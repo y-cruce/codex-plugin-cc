@@ -1,10 +1,10 @@
 {
-  "name": "openai-codex",
+  "name": "y-cruce-codex",
   "owner": {
-    "name": "OpenAI"
+    "name": "y-cruce"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
+    "description": "Fork of openai/codex-plugin-cc with task --thread <id> (openai/codex-plugin-cc#719), used by codex-director.",
     "version": "1.0.6"
   },
   "plugins": [
