@@ -6,7 +6,7 @@ function oneLine(text) {
   return String(text ?? "").replace(/[\r\n]+/g, " ");
 }
 
-export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, signal } = {}, dependencies = {}) {
+export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, exitIdleMs = 3600000, signal } = {}, dependencies = {}) {
   const snapshot = dependencies.snapshot ?? buildStatusSnapshot;
   const status = dependencies.status ?? liveStatus;
   const acknowledge = dependencies.acknowledge ?? acknowledgeNotifications;
@@ -19,6 +19,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const notifications = new Set();
   const brokerFailures = new Map();
   const stalls = new Map();
+  let lastActiveAt = now();
   while (!signal?.aborted) {
     const report = snapshot(cwd, { all: true });
     for (let job of [...report.running, report.latestFinished, ...report.recent].filter(Boolean)) {
@@ -38,6 +39,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         const lastReported = previous?.progress === progress ? previous.reportedAt : progress;
         if (now() - lastReported >= stallMs) {
           writeLine(`STALLED job=${job.id} thread=${job.threadId ?? "unknown"} ${Math.max(0, Math.floor((now() - progress) / 60000))}m without progress`);
+          lastActiveAt = now();
           stalls.set(job.id, { progress, reportedAt: now() });
         }
       }
@@ -46,6 +48,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         const key = `${job.id}:${question.requestId}`;
         if (questions.has(key)) continue;
         writeLine(`QUESTION job=${job.id} request=${question.requestId} ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+        lastActiveAt = now();
         questions.add(key);
       }
       const pending = (live?.notifications ?? []).filter((note) => !notifications.has(`${job.id}:${note.id}`));
@@ -57,6 +60,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         }
         for (const note of pending) {
           writeLine(`NOTIFIED job=${job.id} thread=${job.threadId ?? "unknown"} ${oneLine(note.message)}`);
+          lastActiveAt = now();
           notifications.add(`${job.id}:${note.id}`);
         }
       }
@@ -64,12 +68,19 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         const prefix = `job=${job.id} thread=${job.threadId ?? "unknown"}`;
         if (job.status === "completed") {
           writeLine(`DONE ${prefix}`);
+          lastActiveAt = now();
         } else {
           const error = job.errorMessage ?? readJob(report.workspaceRoot, job.id)?.result?.error?.message;
           writeLine(`FAILED ${prefix} ${String(error ?? "").split(/[\r\n]/)[0] || "unknown"}`);
+          lastActiveAt = now();
         }
         active.delete(job.id);
       }
+    }
+    if (active.size) lastActiveAt = now();
+    if (!active.size && now() - lastActiveAt >= exitIdleMs) {
+      writeLine(`IDLE_EXIT no active job for ${Math.floor(exitIdleMs / 60000)}m; re-arm the monitor before the next dispatch`);
+      return;
     }
     try {
       await setTimeout(pollMs, undefined, { signal });

@@ -87,7 +87,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs task [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>]",
+      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -941,11 +941,13 @@ async function handleTaskWorker(argv) {
 }
 
 async function handleEvents(argv) {
-  const { options } = parseCommandInput(argv, { valueOptions: ["cwd", "poll-ms", "stall-ms"] });
+  const { options } = parseCommandInput(argv, { valueOptions: ["cwd", "poll-ms", "stall-ms", "exit-idle-ms"] });
   const pollMs = Number(options["poll-ms"] ?? 2000);
   if (!Number.isSafeInteger(pollMs) || pollMs <= 0 || pollMs > 2147483647) {
     throw new Error("--poll-ms must be a positive integer no greater than 2147483647.");
   }
+  const exitIdleMs = Number(options["exit-idle-ms"] ?? 3600000);
+  if (!Number.isSafeInteger(exitIdleMs) || exitIdleMs <= 0) throw new Error("--exit-idle-ms must be a positive integer.");
   const controller = new AbortController();
   const stop = () => {
     controller.abort();
@@ -954,7 +956,7 @@ async function handleEvents(argv) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), signal: controller.signal });
+    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), exitIdleMs, signal: controller.signal });
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);

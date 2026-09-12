@@ -10,11 +10,11 @@ import { makeTempDir } from "./helpers.mjs";
 
 const job = { id: "job-1", threadId: "thread-1", status: "running" };
 
-async function monitor(reports, handlers = {}) {
+async function monitor(reports, handlers = {}, options = {}) {
   const controller = new AbortController();
   const lines = [];
   let poll = 0;
-  await streamJobEvents("/repo", { pollMs: 1, signal: controller.signal }, {
+  await streamJobEvents("/repo", { pollMs: 1, signal: controller.signal, ...options }, {
     snapshot(cwd, options) {
       assert.equal(cwd, "/repo");
       assert.equal(options.all, true);
@@ -25,9 +25,91 @@ async function monitor(reports, handlers = {}) {
     readJob: () => null,
     acknowledge: async () => assert.fail("Unexpected acknowledgement"),
     ...handlers,
-    writeLine: (line) => lines.push(line)
+    writeLine: (line) => {
+      lines.push(line);
+      handlers.writeLine?.(line);
+    }
   });
   return lines;
+}
+
+for (const exitIdleMs of [undefined, 60000]) {
+  test(`events exits after idle time with no jobs (${exitIdleMs ?? "default"}ms)`, async () => {
+    const interval = exitIdleMs ?? 3600000;
+    const startedAt = 123456;
+    const times = [startedAt, startedAt + interval - 1, startedAt + interval];
+    let clock = startedAt;
+    let poll = 0;
+    const lines = await monitor([], {
+      now: () => clock,
+      snapshot: () => {
+        assert.ok(poll < times.length, "Monitor must return at the idle deadline");
+        clock = times[poll++];
+        return { running: [], latestFinished: null, recent: [] };
+      }
+    }, { exitIdleMs });
+    assert.equal(poll, times.length);
+    assert.deepEqual(lines, [
+      `IDLE_EXIT no active job for ${interval / 60000}m; re-arm the monitor before the next dispatch`
+    ]);
+  });
+}
+
+test("events stays alive while a job is active beyond the idle timeout", async () => {
+  let clock = 0;
+  let calls = 0;
+  const lines = await monitor(Array.from({ length: 3 }, () => ({ running: [job] })), {
+    now: () => clock,
+    progressAt: () => clock,
+    status: async () => {
+      calls += 1;
+      clock += 60001;
+      return {};
+    }
+  }, { exitIdleMs: 60000 });
+  assert.equal(calls, 3);
+  assert.deepEqual(lines, []);
+});
+
+for (const notified of [false, true]) {
+  test(`events resets idle time when emitting ${notified ? "NOTIFIED and DONE" : "DONE"}`, async () => {
+    const times = [0, 60000, 119999, 120000];
+    const trace = [];
+    let clock = 0;
+    let poll = 0;
+    const lines = await monitor([], {
+      now: () => {
+        trace.push("now");
+        return clock;
+      },
+      progressAt: () => clock,
+      snapshot: () => {
+        assert.ok(poll < times.length, "Monitor must return one idle interval after DONE");
+        clock = times[poll++];
+        return {
+          running: poll === 1 ? [job] : [],
+          latestFinished: poll > 1 ? { ...job, status: "completed" } : null,
+          recent: []
+        };
+      },
+      status: async () => notified && poll === 2
+        ? { notifications: [{ id: "note-1", message: "Ready" }] } : {},
+      acknowledge: async () => {},
+      writeLine: (line) => trace.push(line)
+    }, { exitIdleMs: 60000 });
+    const notification = "NOTIFIED job=job-1 thread=thread-1 Ready";
+    const done = "DONE job=job-1 thread=thread-1";
+    assert.equal(poll, times.length);
+    assert.deepEqual(lines, [
+      ...(notified ? [notification] : []),
+      done,
+      "IDLE_EXIT no active job for 1m; re-arm the monitor before the next dispatch"
+    ]);
+    if (notified) {
+      // DONE also resets the deadline, so verify NOTIFIED samples the clock before DONE.
+      assert.deepEqual(trace.slice(trace.indexOf(notification), trace.indexOf(done) + 1), [notification, "now", done]);
+    }
+  });
 }
 
 test("events acknowledges a note once and reports only jobs observed active", async () => {
