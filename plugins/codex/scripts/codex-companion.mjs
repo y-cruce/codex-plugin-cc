@@ -23,7 +23,7 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { acknowledgeNotifications, liveStatus, sendLiveCommand } from "./lib/live-commands.mjs";
-import { streamJobEvents } from "./lib/job-events.mjs";
+import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -87,7 +87,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs task [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--exit-idle-ms <ms>]",
+      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -865,6 +865,9 @@ async function handleTask(argv) {
   if (options.background) {
     ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, Boolean(resumeLast || resumeThreadId));
+    if (resumeThreadId && !allowOtherRepo) {
+      requireTrackedThreadForWorkspace(workspaceRoot, resumeThreadId);
+    }
 
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -941,13 +944,15 @@ async function handleTaskWorker(argv) {
 }
 
 async function handleEvents(argv) {
-  const { options } = parseCommandInput(argv, { valueOptions: ["cwd", "poll-ms", "stall-ms", "exit-idle-ms"] });
+  const { options } = parseCommandInput(argv, { valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms"] });
   const pollMs = Number(options["poll-ms"] ?? 2000);
   if (!Number.isSafeInteger(pollMs) || pollMs <= 0 || pollMs > 2147483647) {
     throw new Error("--poll-ms must be a positive integer no greater than 2147483647.");
   }
   const exitIdleMs = Number(options["exit-idle-ms"] ?? 3600000);
   if (!Number.isSafeInteger(exitIdleMs) || exitIdleMs <= 0) throw new Error("--exit-idle-ms must be a positive integer.");
+  const questionRemindMs = Number(options["question-remind-ms"] ?? DEFAULT_QUESTION_REMIND_MS);
+  if (!Number.isSafeInteger(questionRemindMs) || questionRemindMs <= 0) throw new Error("--question-remind-ms must be a positive integer.");
   const controller = new AbortController();
   const stop = () => {
     controller.abort();
@@ -956,7 +961,7 @@ async function handleEvents(argv) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), exitIdleMs, signal: controller.signal });
+    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), questionRemindMs, exitIdleMs, signal: controller.signal });
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);

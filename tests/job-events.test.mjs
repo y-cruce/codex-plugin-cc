@@ -142,6 +142,56 @@ test("events reports each request once and limits the first question to one line
   assert.deepEqual(lines, [`QUESTION job=job-1 request=request-1 Choose ${"x".repeat(193)}`]);
 });
 
+test("events reminds pending questions at two-minute intervals and stops when removed or finished", async () => {
+  const startedAt = 123456;
+  const times = [0, 119999, 120000, 239999, 240000, 360000, 480000];
+  const question = { requestId: "request-1", expiresAt: startedAt + 600000, questions: [
+    { question: `Choose\n${"x".repeat(300)}` }, { question: "Do not show this" }
+  ] };
+  let clock = startedAt;
+  let poll = 0;
+  const lines = await monitor(times.map((time) => time === 480000
+    ? { latestFinished: { ...job, status: "completed" } } : { running: [job] }), {
+    now: () => clock,
+    progressAt: () => clock,
+    status: async () => {
+      const time = times[poll++];
+      clock = startedAt + time;
+      return { questions: time === 360000 ? [] : [question] };
+    }
+  });
+  const text = `Choose ${"x".repeat(193)}`;
+  assert.deepEqual(lines, [
+    `QUESTION job=job-1 request=request-1 ${text}`,
+    `QUESTION_PENDING job=job-1 request=request-1 2m unanswered, expires in 8m: ${text}`,
+    `QUESTION_PENDING job=job-1 request=request-1 4m unanswered, expires in 6m: ${text}`,
+    "DONE job=job-1 thread=thread-1"
+  ]);
+});
+
+test("events tracks each question independently and supports a custom reminder interval", async () => {
+  const times = [0, 30000, 59999, 60000, 90000];
+  let clock = 0;
+  let poll = 0;
+  const lines = await monitor(times.map(() => ({ running: [job] })), {
+    now: () => clock,
+    progressAt: () => clock,
+    status: async () => {
+      clock = times[poll++];
+      return { questions: [
+        { requestId: "request-1", expiresAt: 90001, questions: [{ question: "First?" }] },
+        ...(clock >= 30000 ? [{ requestId: "request-2", questions: [{ question: "Second?" }] }] : [])
+      ] };
+    }
+  }, { questionRemindMs: 60000 });
+  assert.deepEqual(lines, [
+    "QUESTION job=job-1 request=request-1 First?",
+    "QUESTION job=job-1 request=request-2 Second?",
+    "QUESTION_PENDING job=job-1 request=request-1 1m unanswered, expires in 0m: First?",
+    "QUESTION_PENDING job=job-1 request=request-2 1m unanswered: Second?"
+  ]);
+});
+
 test("events silently retries unavailable broker state before reporting a failure", async () => {
   const failed = { ...job, status: "failed", errorMessage: "First error\nMore details" };
   let calls = 0;

@@ -788,7 +788,7 @@ test("task --thread --allow-other-repo resumes an untracked thread", () => {
   assert.equal(fakeState.lastTurnStart.prompt, "cross-repo follow up");
 });
 
-test("task --thread rejects an untracked thread in background mode", () => {
+test("task --thread rejects an untracked thread before enqueueing in background mode", () => {
   const repo = makeTempDir();
   const otherRepo = makeTempDir();
   const binDir = makeTempDir();
@@ -811,22 +811,27 @@ test("task --thread rejects an untracked thread in background mode", () => {
     }
   );
 
-  assert.equal(launched.status, 0, launched.stderr);
-  const launchPayload = JSON.parse(launched.stdout);
-  const waitedStatus = run(
+  assert.equal(launched.status, 1);
+  assert.match(launched.stderr, /is not tracked for this repository/);
+  assert.match(launched.stderr, /--allow-other-repo/);
+  assert.equal(launched.stdout, "");
+  const status = run(
     "node",
-    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
+    [SCRIPT, "status", "--all", "--json"],
     {
       cwd: repo,
       env
     }
   );
 
-  assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
-  const job = JSON.parse(waitedStatus.stdout).job;
-  assert.equal(job.status, "failed");
-  assert.match(job.errorMessage, /--allow-other-repo/);
-  assert.equal("threadId" in job, false);
+  assert.equal(status.status, 0, status.stderr);
+  const report = JSON.parse(status.stdout);
+  assert.deepEqual(report.running, []);
+  assert.deepEqual(report.recent, []);
+  assert.equal(report.latestFinished, null);
+  const stateDir = resolveStateDirWithPluginData(repo, pluginDataDir);
+  assert.equal(fs.existsSync(path.join(stateDir, "jobs")), false);
+  assert.equal(fs.existsSync(path.join(stateDir, "state.json")), false);
   const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
   assert.equal("lastTurnStart" in fakeState, false);
 });

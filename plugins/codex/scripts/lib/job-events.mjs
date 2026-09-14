@@ -2,11 +2,13 @@ import { setTimeout } from "node:timers/promises";
 import { buildStatusSnapshot, checkJobLiveness, DEFAULT_STALL_MS, lastJobProgressAt, readStoredJob } from "./job-control.mjs";
 import { acknowledgeNotifications, liveStatus } from "./live-commands.mjs";
 
+export const DEFAULT_QUESTION_REMIND_MS = 120000;
+
 function oneLine(text) {
   return String(text ?? "").replace(/[\r\n]+/g, " ");
 }
 
-export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, exitIdleMs = 3600000, signal } = {}, dependencies = {}) {
+export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, questionRemindMs = DEFAULT_QUESTION_REMIND_MS, exitIdleMs = 3600000, signal } = {}, dependencies = {}) {
   const snapshot = dependencies.snapshot ?? buildStatusSnapshot;
   const status = dependencies.status ?? liveStatus;
   const acknowledge = dependencies.acknowledge ?? acknowledgeNotifications;
@@ -15,7 +17,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const now = dependencies.now ?? Date.now;
   const progressAt = dependencies.progressAt ?? lastJobProgressAt;
   const active = new Set();
-  const questions = new Set();
+  const questions = new Map();
   const notifications = new Set();
   const brokerFailures = new Map();
   const stalls = new Map();
@@ -46,10 +48,21 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       if (running && live?.unavailable) continue;
       for (const question of live?.questions ?? []) {
         const key = `${job.id}:${question.requestId}`;
-        if (questions.has(key)) continue;
+        const previous = questions.get(key);
+        if (previous) {
+          const time = now();
+          if (running && time - previous.reportedAt >= questionRemindMs) {
+            const minutes = Math.max(0, Math.floor((time - previous.firstSeenAt) / 60000));
+            const expires = question.expiresAt == null ? "" : `, expires in ${Math.max(0, Math.floor((question.expiresAt - time) / 60000))}m`;
+            writeLine(`QUESTION_PENDING job=${job.id} request=${question.requestId} ${minutes}m unanswered${expires}: ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+            lastActiveAt = now();
+            previous.reportedAt = time;
+          }
+          continue;
+        }
         writeLine(`QUESTION job=${job.id} request=${question.requestId} ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
         lastActiveAt = now();
-        questions.add(key);
+        questions.set(key, { firstSeenAt: lastActiveAt, reportedAt: lastActiveAt });
       }
       const pending = (live?.notifications ?? []).filter((note) => !notifications.has(`${job.id}:${note.id}`));
       if (pending.length) {
