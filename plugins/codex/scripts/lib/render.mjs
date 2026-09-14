@@ -81,8 +81,12 @@ function isStructuredReviewStoredResult(storedJob) {
   );
 }
 
+function formatJobId(job) {
+  return `${job.id}${job.label ? ` [${job.label.replace(/[\r\n]+/g, " ")}]` : ""}`;
+}
+
 function formatJobLine(job) {
-  const parts = [job.id, `${job.status || "unknown"}`];
+  const parts = [formatJobId(job), `${job.status || "unknown"}`];
   if (job.kindLabel) {
     parts.push(job.kindLabel);
   }
@@ -116,7 +120,7 @@ function appendActiveJobsTable(lines, jobs) {
       actions.push(`/codex:cancel ${job.id}`);
     }
     lines.push(
-      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
+      `| ${escapeMarkdownCell(formatJobId(job))} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
     );
   }
 }
@@ -457,7 +461,7 @@ export function renderStoredJobResult(job, storedJob) {
   const lines = [
     `# ${job.title ?? "Codex Result"}`,
     "",
-    `Job: ${job.id}`,
+    `Job: ${formatJobId(job)}`,
     `Status: ${job.status}`
   ];
   if (sandboxDetails) lines.push(sandboxDetails);

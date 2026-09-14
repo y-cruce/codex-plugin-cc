@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderJobStatusReport, renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { renderJobStatusReport, renderReviewResult, renderStatusReport, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+
+test("job labels appear beside ids in status lists, details, and result headers", () => {
+  const job = { id: "task-live", label: "answer validation", status: "running" };
+  const report = { sessionRuntime: { label: "ready" }, config: {}, running: [job], latestFinished: null, recent: [] };
+  assert.match(renderStatusReport(report), /\| task-live \[answer validation\] \|/);
+  assert.match(renderJobStatusReport(job), /- task-live \[answer validation\] \| running/);
+  assert.match(renderStatusReport({ ...report, running: [], recent: [job] }), /- task-live \[answer validation\] \| running/);
+  assert.match(renderStoredJobResult(job, {}), /Job: task-live \[answer validation\]/);
+  assert.match(renderStoredJobResult({ ...job, label: undefined }, {}), /Job: task-live\n/);
+});
 
 test("running job status shows owner liveness and time since progress", () => {
   const job = { id: "task-live", status: "running", ownerAlive: true, progressAgeMinutes: 17 };

@@ -82,9 +82,9 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
+      "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
+      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
@@ -598,7 +598,7 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 }
 
 function renderQueuedTaskLaunch(payload) {
-  return `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n`;
+  return `${payload.title} started in the background as ${payload.jobId}${payload.label ? ` [${payload.label.replace(/[\r\n]+/g, " ")}]` : ""}. Check /codex:status ${payload.jobId} for progress.\n`;
 }
 
 function getJobKindLabel(kind, jobClass) {
@@ -608,7 +608,12 @@ function getJobKindLabel(kind, jobClass) {
   return jobClass === "review" ? "review" : "rescue";
 }
 
-function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false }) {
+function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false, label }) {
+  if (label != null) {
+    label = String(label).trim();
+    if (!label) throw new Error("--label must not be empty.");
+    label = label.slice(0, 80);
+  }
   return createJobRecord({
     id: generateJobId(prefix),
     kind,
@@ -617,7 +622,8 @@ function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summ
     workspaceRoot,
     jobClass,
     summary,
-    write
+    write,
+    ...(label != null ? { label } : {})
   });
 }
 
@@ -633,7 +639,7 @@ function createTrackedProgress(job, options = {}) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network) {
+function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, label) {
   return { ...createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -641,7 +647,8 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network) {
     workspaceRoot,
     jobClass: "task",
     summary: taskMetadata.summary,
-    write
+    write,
+    label
   }), sandbox, network };
 }
 
@@ -749,6 +756,7 @@ function enqueueBackgroundTask(cwd, job, request) {
     payload: {
       jobId: job.id,
       status: "queued",
+      ...(job.label ? { label: job.label } : {}),
       title: job.title,
       summary: job.summary,
       logFile
@@ -759,7 +767,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "cwd", "label"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -782,7 +790,8 @@ async function handleReviewCommand(argv, config) {
     title: metadata.title,
     workspaceRoot,
     jobClass: "review",
-    summary: metadata.summary
+    summary: metadata.summary,
+    label: options.label
   });
   await runForegroundCommand(
     job,
@@ -809,7 +818,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -846,7 +855,7 @@ async function handleTask(argv) {
     resumeLast: Boolean(resumeLast || resumeThreadId)
   });
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network);
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, options.label);
   const request = buildTaskRequest({
     cwd,
     model,

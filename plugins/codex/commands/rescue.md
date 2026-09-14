@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
-argument-hint: "[--background|--wait] [--thread <id>|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--label <text>] [--background|--wait] [--thread <id>|--resume|--fresh] [--allow-other-repo] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -17,6 +17,7 @@ Execution mode:
 - If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
+- `--label <text>` names the task job in launch output, status, and events. Preserve it for the forwarded `task` call. Labels are trimmed, must not be empty, and are truncated to 80 characters.
 - `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - `--thread <id>` is a routing flag. Preserve it for the forwarded `task` call, but do not treat it or its value as part of the natural-language task text.
 - `--allow-other-repo` is a routing flag for `--thread <id>`. Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text.

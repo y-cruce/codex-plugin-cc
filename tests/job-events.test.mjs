@@ -133,6 +133,34 @@ test("events acknowledges a note once and reports only jobs observed active", as
   assert.deepEqual(acknowledged, [{ cwd: "/repo", jobId: job.id, ids: [note.id] }]);
 });
 
+for (const terminal of ["completed", "failed"]) {
+  test(`events includes the job label on every event (${terminal})`, async () => {
+    const labeled = { ...job, label: "answer validation" };
+    let clock = 0;
+    let poll = 0;
+    const lines = await monitor([
+      { running: [labeled] }, { running: [labeled] },
+      { latestFinished: { ...labeled, status: terminal, errorMessage: "Stopped" } }
+    ], {
+      now: () => clock,
+      progressAt: () => 0,
+      status: async () => {
+        clock = poll++ * 120000;
+        return { questions: [{ requestId: "request-1", questions: [{ question: "Choose?" }] }],
+          notifications: [{ id: "note-1", message: "Ready" }] };
+      },
+      acknowledge: async () => {}
+    }, { stallMs: 120000 });
+    assert.deepEqual(lines, [
+      "QUESTION job=job-1 [answer validation] request=request-1 Choose?",
+      "NOTIFIED job=job-1 [answer validation] thread=thread-1 Ready",
+      "STALLED job=job-1 [answer validation] thread=thread-1 2m without progress",
+      "QUESTION_PENDING job=job-1 [answer validation] request=request-1 2m unanswered: Choose?",
+      terminal === "completed" ? "DONE job=job-1 [answer validation] thread=thread-1" : "FAILED job=job-1 [answer validation] thread=thread-1 Stopped"
+    ]);
+  });
+}
+
 test("events reports each request once and limits the first question to one line of 200 characters", async () => {
   const lines = await monitor([{ running: [job] }, { running: [job] }], {
     status: async () => ({ questions: [{ requestId: "request-1", questions: [

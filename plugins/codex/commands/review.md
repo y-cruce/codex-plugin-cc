@@ -1,11 +1,13 @@
 ---
 description: Run a Codex code review against local git state
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch]'
+argument-hint: '[--label <text>] [--wait|--background] [--base <ref>] [--scope auto|working-tree|branch]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
 Run a Codex review through the shared built-in reviewer.
+
+`--label <text>` names the review job in status and events; labels are trimmed, must not be empty, and are truncated to 80 characters. Preserve this flag when invoking the runtime.
 
 Raw slash-command arguments:
 `$ARGUMENTS`

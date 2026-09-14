@@ -32,6 +32,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       let live = await status(cwd, job);
       if (signal?.aborted) continue;
       job = checkJobLiveness(report.workspaceRoot ?? cwd, job, live, brokerFailures, dependencies);
+      const jobPrefix = `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;
       // A dead owner must be reported even when its pending notes cannot be acknowledged.
       if (job.status === "failed" && (job.errorMessage === "owner process exited" || job.errorMessage === "broker unreachable")) live = null;
       running = job.status === "queued" || job.status === "running";
@@ -40,7 +41,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         const previous = stalls.get(job.id);
         const lastReported = previous?.progress === progress ? previous.reportedAt : progress;
         if (now() - lastReported >= stallMs) {
-          writeLine(`STALLED job=${job.id} thread=${job.threadId ?? "unknown"} ${Math.max(0, Math.floor((now() - progress) / 60000))}m without progress`);
+          writeLine(`STALLED ${jobPrefix} thread=${job.threadId ?? "unknown"} ${Math.max(0, Math.floor((now() - progress) / 60000))}m without progress`);
           lastActiveAt = now();
           stalls.set(job.id, { progress, reportedAt: now() });
         }
@@ -54,13 +55,13 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           if (running && time - previous.reportedAt >= questionRemindMs) {
             const minutes = Math.max(0, Math.floor((time - previous.firstSeenAt) / 60000));
             const expires = question.expiresAt == null ? "" : `, expires in ${Math.max(0, Math.floor((question.expiresAt - time) / 60000))}m`;
-            writeLine(`QUESTION_PENDING job=${job.id} request=${question.requestId} ${minutes}m unanswered${expires}: ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+            writeLine(`QUESTION_PENDING ${jobPrefix} request=${question.requestId} ${minutes}m unanswered${expires}: ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
             lastActiveAt = now();
             previous.reportedAt = time;
           }
           continue;
         }
-        writeLine(`QUESTION job=${job.id} request=${question.requestId} ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+        writeLine(`QUESTION ${jobPrefix} request=${question.requestId} ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
         lastActiveAt = now();
         questions.set(key, { firstSeenAt: lastActiveAt, reportedAt: lastActiveAt });
       }
@@ -72,13 +73,13 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           continue;
         }
         for (const note of pending) {
-          writeLine(`NOTIFIED job=${job.id} thread=${job.threadId ?? "unknown"} ${oneLine(note.message)}`);
+          writeLine(`NOTIFIED ${jobPrefix} thread=${job.threadId ?? "unknown"} ${oneLine(note.message)}`);
           lastActiveAt = now();
           notifications.add(`${job.id}:${note.id}`);
         }
       }
       if (!running) {
-        const prefix = `job=${job.id} thread=${job.threadId ?? "unknown"}`;
+        const prefix = `${jobPrefix} thread=${job.threadId ?? "unknown"}`;
         if (job.status === "completed") {
           writeLine(`DONE ${prefix}`);
           lastActiveAt = now();

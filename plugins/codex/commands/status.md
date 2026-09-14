@@ -33,6 +33,8 @@ STALLED job=<job-id> thread=<thread-id> <minutes>m without progress
 
 `QUESTION_PENDING` repeats every 120000 ms (2 minutes, configurable with `--question-remind-ms`) after the first `QUESTION` while the question remains pending and its job is active; elapsed and remaining minutes are rounded down with a minimum of zero, and `, expires in <m>m` is omitted when no expiry is available.
 
+`task`, `review`, and `adversarial-review` accept `--label <text>` (trimmed, nonempty, truncated to 80 characters). Status lists, single-job views, and result headers display `<job-id> [<label>]`; every event above inserts ` [<label>]` immediately after `job=<job-id>`. Unlabeled jobs keep their existing output. JSON status includes the job record’s `label`.
+
 Jobs already finished when monitoring starts are omitted. Printed notifications are acknowledged, so `status --wait` will not return them again. A missing thread ID is printed as `unknown`. Both commands fail active jobs when their recorded owner has exited, or their broker is unreachable for three consecutive polls.
 
 `--exit-idle-ms` defaults to 3600000 (1 hour). With no active job for that long, `events` prints `IDLE_EXIT no active job for <minutes>m; re-arm the monitor before the next dispatch` and exits 0, so a monitor nobody stopped does not poll forever; any event resets the interval.

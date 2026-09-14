@@ -1253,53 +1253,78 @@ test("task using the shared broker still completes when Codex spawns subagents",
   assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
 });
 
-test("task --background enqueues a detached worker and exposes per-job status", async () => {
-  const repo = makeTempDir();
-  const binDir = makeTempDir();
-  installFakeCodex(binDir, "slow-task");
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
+for (const json of [true, false]) {
+  test(`task --background persists a trimmed, capped label and exposes it in launch output (json=${json})`, async () => {
+    const repo = makeTempDir();
+    const binDir = makeTempDir();
+    installFakeCodex(binDir, "slow-task");
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
-    cwd: repo,
-    env: buildEnv(binDir)
-  });
-
-  assert.equal(launched.status, 0, launched.stderr);
-  const launchPayload = JSON.parse(launched.stdout);
-  assert.equal(launchPayload.status, "queued");
-  assert.match(launchPayload.jobId, /^task-/);
-
-  const waitedStatus = run(
-    "node",
-    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
-    {
-      cwd: repo,
-      env: buildEnv(binDir)
-    }
-  );
-
-  assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
-  const waitedPayload = JSON.parse(waitedStatus.stdout);
-  assert.equal(waitedPayload.job.id, launchPayload.jobId);
-  assert.equal(waitedPayload.job.status, "completed");
-
-  const resultPayload = await waitFor(() => {
-    const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
+    const label = json ? "answer validation" : "x".repeat(90);
+    const expectedLabel = label.slice(0, 80);
+    const launched = run("node", [SCRIPT, "task", "--background", ...(json ? ["--json"] : []), "--label", `  ${label}  `, "investigate the failing test"], {
       cwd: repo,
       env: buildEnv(binDir)
     });
-    if (result.status !== 0) {
-      return null;
-    }
-    return JSON.parse(result.stdout);
-  });
 
-  assert.equal(resultPayload.job.id, launchPayload.jobId);
-  assert.equal(resultPayload.job.status, "completed");
-  assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+    assert.equal(launched.status, 0, launched.stderr);
+    const launchPayload = json ? JSON.parse(launched.stdout) : { jobId: launched.stdout.match(/as (task-[\w-]+)/)?.[1] };
+    if (json) {
+      assert.equal(launchPayload.status, "queued");
+      assert.equal(launchPayload.label, expectedLabel);
+    } else {
+      assert.ok(launched.stdout.includes(`as ${launchPayload.jobId} [${expectedLabel}]. Check`));
+    }
+    assert.match(launchPayload.jobId, /^task-/);
+
+    const waitedStatus = run(
+      "node",
+      [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
+      {
+        cwd: repo,
+        env: buildEnv(binDir)
+      }
+    );
+
+    assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
+    const waitedPayload = JSON.parse(waitedStatus.stdout);
+    assert.equal(waitedPayload.job.id, launchPayload.jobId);
+    assert.equal(waitedPayload.job.status, "completed");
+    assert.equal(waitedPayload.job.label, expectedLabel);
+    const status = run("node", [SCRIPT, "status", "--all", "--json"], { cwd: repo, env: buildEnv(binDir) });
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).latestFinished.label, expectedLabel);
+
+    const resultPayload = await waitFor(() => {
+      const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
+        cwd: repo,
+        env: buildEnv(binDir)
+      });
+      if (result.status !== 0) {
+        return null;
+      }
+      return JSON.parse(result.stdout);
+    });
+
+    assert.equal(resultPayload.job.id, launchPayload.jobId);
+    assert.equal(resultPayload.job.status, "completed");
+    assert.equal(resultPayload.storedJob.label, expectedLabel);
+    assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+  });
+}
+
+test("task rejects an empty label before writing a job", () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  for (const background of [false, true]) {
+    const result = run("node", [SCRIPT, "task", ...(background ? ["--background"] : []), "--label", "  ", "investigate"], { cwd: repo });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--label must not be empty/);
+  }
+  assert.equal(fs.existsSync(path.join(resolveStateDir(repo), "jobs")), false);
 });
 
 test("review rejects focus text because it is native-review only", () => {
