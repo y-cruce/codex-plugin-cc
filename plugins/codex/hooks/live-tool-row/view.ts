@@ -19,7 +19,7 @@ export type LiveView = {
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
-  tail: { seq: string; at: string; type: string; text: string; exitCode?: number | null; durationMs?: number | null }[]
+  tail: { seq: string; at: string; type: string; text: string; exitCode?: number | null; durationMs?: number | null; agent?: string }[]
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
@@ -107,9 +107,12 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   if (tail.length) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
-  const newest = kind ? tail.findLastIndex(event => typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')) : -1
+  const newest = kind ? tail.findLastIndex(event => !event.agent && typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')) : -1
   tail.forEach((event, index) => {
     const type = typeOf(event)
+    // Rows from a Codex sub-agent thread stay one dim line each; only the main
+    // thread's messages get Markdown and the full newest text.
+    if (event.agent) return add(event.text, { dimColor: true })
     if (type === 'question.resolved') {
       prose('→ answer delivered', { color: 'cyan' })
       return

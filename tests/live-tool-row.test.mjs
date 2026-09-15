@@ -426,6 +426,27 @@ describe('live row polish', () => {
     assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'no terminal line yet', stderr: '' }, { tool_use_id: 'seen' }))), '');
     assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'x', stderr: '' }, { tool: 'Read', tool_use_id: 'seen' }))), 'native Bash result');
   });
+  test('sub-agent rows stay one dim line and never become the newest full message', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = [];
+    data.lastMessage = { kind: 'assistant', text: '**main** answer', at: data.startedAt };
+    data.tail = [
+      { seq: '1', at: data.startedAt, type: 'message.completed', text: 'assistant: **main** answer' },
+      { seq: '2', at: data.startedAt, type: 'tool.started', text: '⇢ sub-agent review_41_44 started' },
+      { seq: '3', at: data.startedAt, type: 'message.completed', text: '[review_41_44] assistant: **child** ' + 'x'.repeat(200), agent: 'review_41_44' },
+      { seq: '4', at: data.startedAt, type: 'command.completed', text: '[review_41_44] $ rg -n foo', agent: 'review_41_44', exitCode: 0 },
+    ];
+    const rows = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0));
+    const main = rows.find(node => textOf(node).includes('main'));
+    assert.ok(main.children.some(child => child.props?.bold === true), 'main message is Markdown');
+    const child = rows.find(node => textOf(node).includes('[review_41_44] assistant'));
+    assert.equal(child.props.dimColor, true);
+    assert.equal(child.props.wrap, 'truncate-end');
+    assert.ok(Array.from(textOf(child)).length <= 80);
+    assert.ok((Array.isArray(child.children) ? child.children : [child.children]).every(part => typeof part === 'string'), 'child row is plain text, not Markdown');
+    const cmd = rows.find(node => textOf(node).includes('[review_41_44] $ rg'));
+    assert.equal(cmd.props.dimColor, true);
+  });
   test('a job first seen already finished draws its card without a completion toast', async ($, on) => {
     const { state, clock } = world($, on);
     const data = fixture(); data.status = 'completed'; data.endedAt = '2026-09-15T00:01:00Z';
