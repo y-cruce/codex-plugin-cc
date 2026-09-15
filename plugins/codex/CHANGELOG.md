@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.2
+
+- While an assistant message streams, the block still being written is no longer drawn as raw text; completed blocks appear whole and a dim `…` marks the rest, so text never snaps from Markdown source into its rendered form.
+
 ## 1.2.1
 
 - The live-tool-row mod also takes over the result block under a follow row, so the quiet heartbeat lines, repository edits the host attributes to the command (made by Codex meanwhile) and the timeout note no longer appear beneath the card.

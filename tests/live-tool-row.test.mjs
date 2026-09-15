@@ -480,7 +480,7 @@ describe('live row polish', () => {
 });
 
 describe('Markdown and prompt footer', () => {
-  test('commits earlier Markdown blocks but keeps the streaming last block clean and literal', ($, on) => {
+  test('commits earlier Markdown blocks and hides the streaming last block behind an ellipsis', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
     const committed = '# Heading\n\n- **item**\n\n| A | B |\n|--|--|\n| one | two |\n\n```ts\nconst x = 1\n\nreturn x\n```\n\n';
@@ -488,34 +488,32 @@ describe('Markdown and prompt footer', () => {
     const nodes = markdown(ui, committed + last, { dimColor: true }, '› ', 100, true);
     assert.deepEqual(nodes.slice(0, -1), markdown(ui, committed, { dimColor: true }, '› ', 100));
     assert.equal(nodes.at(-1).type, 'Text');
-    assert.equal(nodes.at(-1).props.wrap, 'wrap');
     assert.equal(nodes.at(-1).props.dimColor, true);
-    assert.equal(textOf(nodes.at(-1)), '**writing** `code` [a](/x/y');
+    assert.equal(textOf(nodes.at(-1)), '…');
+    assert.doesNotMatch(textOf({ type: 'Box', children: nodes }), /writing|\[a\]/);
     assert.ok(nodes.some(node => node.type === 'Code'));
     assert.ok(nodes.some(node => node.type === 'Box'));
   });
-  test('renders a single streaming block entirely as plain wrapping text including partial links and tables', ($, on) => {
+  test('a single streaming block shows only the prefixed ellipsis until it completes', ($, on) => {
     world($, on);
     for (const source of ['# **Title**\n- *item* [a](/x/y', '| A | B |\n|--|--|\n| x | [a](/x/y']) {
       const nodes = markdown($.ui.resolve(row()), source, {}, '› ', 100, true);
       assert.equal(nodes.length, 1);
       assert.equal(nodes[0].type, 'Text');
-      assert.equal(nodes[0].props.wrap, 'wrap');
-      assert.equal(nodes[0].props.bold, undefined);
-      assert.equal(textOf(nodes[0]), `› ${source}`);
-      assert.ok(nodes[0].children.every(child => typeof child === 'string'));
+      assert.equal(nodes[0].props.dimColor, true);
+      assert.equal(textOf(nodes[0]), '› …');
     }
   });
-  test('keeps an unclosed fence plain including internal blank lines and commits only after its closing blank line', ($, on) => {
+  test('hides an unclosed fence including internal blank lines and commits only after its closing blank line', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
     for (const fence of ['```', '~~~~']) {
       const source = `${fence}ts\n**raw**\n\n[a](/x/y\n\n`;
       for (const prefix of ['', '# Ready\n\n']) {
         const nodes = markdown(ui, prefix + source, {}, '', 100, true);
-        assert.equal(textOf(nodes.at(-1)), source);
-        assert.equal(nodes.at(-1).props.wrap, 'wrap');
+        assert.equal(textOf(nodes.at(-1)), '…');
         assert.ok(nodes.every(node => node.type !== 'Code'));
+        assert.doesNotMatch(textOf({ type: 'Box', children: nodes }), /raw/);
       }
       assert.equal(markdown(ui, source + fence, {}, '', 100, true)[0].type, 'Text');
       assert.equal(markdown(ui, source + fence + '\n\n', {}, '', 100, true)[0].type, 'Code');
@@ -530,7 +528,7 @@ describe('Markdown and prompt footer', () => {
     await $.ui.render(row()); await clock.settle();
     let tree = await $.ui.render(row());
     assert.match(textOf(tree), /› older/);
-    assert.equal(textOf(rowsOf(tree).at(-1)), `› ${data.lastMessage.text}`);
+    assert.equal(textOf(rowsOf(tree).at(-1)), '› …');
     assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
     const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
     assert.deepEqual(rowsOf(result).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);

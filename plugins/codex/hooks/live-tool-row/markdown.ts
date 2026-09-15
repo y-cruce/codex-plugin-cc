@@ -93,8 +93,10 @@ export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '
       }
     }
     if (boundary) nodes.push(...markdown(ui, lines.slice(0, boundary).join('\n') + '\n', props, prefix, columns))
-    const pending = lines.slice(boundary).join('\n')
-    if (pending || !nodes.length) nodes.push(ui.Text({ ...props, wrap: 'wrap', children: `${nodes.length ? '' : prefix}${pending}` }))
+    // The block still being written is not drawn at all: completed blocks
+    // appear whole, like Claude Code's own replies, instead of a typewriter
+    // of raw Markdown that later snaps into its rendered form.
+    nodes.push(ui.Text({ ...props, dimColor: true, children: `${nodes.length ? '' : prefix}…` }))
     return nodes
   }
   const paragraph: string[] = []
