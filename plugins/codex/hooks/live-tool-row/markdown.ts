@@ -75,9 +75,28 @@ function table(ui: UI, rows: string[][], columns: number, props: TextProps) {
 }
 
 // Only terminal primitives; Code.source's 10000-character limit is a host contract.
-export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '', columns = 120) {
+export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '', columns = 120, streaming = false) {
   const nodes: ReturnType<UI['Text']>[] = []
   const lines = clean(text).split('\n')
+  if (streaming) {
+    let boundary = 0
+    let closing: RegExp | undefined
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!
+      if (closing) {
+        if (closing.test(line)) closing = undefined
+      } else {
+        const fence = line.match(/^\s*(`{3,}|~{3,})\s*([\w+-]*)\s*$/)
+        if (fence) closing = new RegExp(`^\\s*${fence[1]![0]}{${fence[1]!.length},}\\s*$`)
+        // Blank lines inside a fence cannot commit an unfinished code block.
+        else if (!line.trim() && i < lines.length - 1) boundary = i + 1
+      }
+    }
+    if (boundary) nodes.push(...markdown(ui, lines.slice(0, boundary).join('\n') + '\n', props, prefix, columns))
+    const pending = lines.slice(boundary).join('\n')
+    if (pending || !nodes.length) nodes.push(ui.Text({ ...props, wrap: 'wrap', children: `${nodes.length ? '' : prefix}${pending}` }))
+    return nodes
+  }
   const paragraph: string[] = []
   const indents: number[] = []
   const add = (value: string, style: TextProps = {}, raw = false) => {

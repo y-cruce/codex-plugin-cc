@@ -132,7 +132,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     const color = /error|failed/.test(type) ? 'red' : type.startsWith('question') ? 'magenta' : (type.startsWith('director') || type.startsWith('control.message')) ? 'cyan' : undefined
     const text = index === newest ? data.lastMessage!.text : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
     const props = { color, dimColor: type === 'source.warning' || type.startsWith('reasoning') || (!prefix && !color) }
-    if (type.startsWith('message')) lines.push(...markdown(ui, text, props, `${prefix} `, columns))
+    if (type.startsWith('message')) lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && type.endsWith('.delta')))
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props)
     else add(`${prefix} ${text}`.trimStart(), props)
   })

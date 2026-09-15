@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- While an assistant message is still streaming, only its completed Markdown blocks are rendered; the block being written shows as plain wrapped text, so tables no longer re-lay out on every delta and half-written links stay literal. The full Markdown rendering applies once the message completes.
+
 ## 1.1.1
 
 - Follow rows that ended on NOTIFIED, QUESTION, TIMEOUT or STALLED draw a segment card from their own output; only the DONE card carries the final answer.

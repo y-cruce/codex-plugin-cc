@@ -470,6 +470,67 @@ describe('live row polish', () => {
 });
 
 describe('Markdown and prompt footer', () => {
+  test('commits earlier Markdown blocks but keeps the streaming last block clean and literal', ($, on) => {
+    world($, on);
+    const ui = $.ui.resolve(row());
+    const committed = '# Heading\n\n- **item**\n\n| A | B |\n|--|--|\n| one | two |\n\n```ts\nconst x = 1\n\nreturn x\n```\n\n';
+    const last = '**writing** `code` [a](/x/y\u001b';
+    const nodes = markdown(ui, committed + last, { dimColor: true }, '› ', 100, true);
+    assert.deepEqual(nodes.slice(0, -1), markdown(ui, committed, { dimColor: true }, '› ', 100));
+    assert.equal(nodes.at(-1).type, 'Text');
+    assert.equal(nodes.at(-1).props.wrap, 'wrap');
+    assert.equal(nodes.at(-1).props.dimColor, true);
+    assert.equal(textOf(nodes.at(-1)), '**writing** `code` [a](/x/y');
+    assert.ok(nodes.some(node => node.type === 'Code'));
+    assert.ok(nodes.some(node => node.type === 'Box'));
+  });
+  test('renders a single streaming block entirely as plain wrapping text including partial links and tables', ($, on) => {
+    world($, on);
+    for (const source of ['# **Title**\n- *item* [a](/x/y', '| A | B |\n|--|--|\n| x | [a](/x/y']) {
+      const nodes = markdown($.ui.resolve(row()), source, {}, '› ', 100, true);
+      assert.equal(nodes.length, 1);
+      assert.equal(nodes[0].type, 'Text');
+      assert.equal(nodes[0].props.wrap, 'wrap');
+      assert.equal(nodes[0].props.bold, undefined);
+      assert.equal(textOf(nodes[0]), `› ${source}`);
+      assert.ok(nodes[0].children.every(child => typeof child === 'string'));
+    }
+  });
+  test('keeps an unclosed fence plain including internal blank lines and commits only after its closing blank line', ($, on) => {
+    world($, on);
+    const ui = $.ui.resolve(row());
+    for (const fence of ['```', '~~~~']) {
+      const source = `${fence}ts\n**raw**\n\n[a](/x/y\n\n`;
+      for (const prefix of ['', '# Ready\n\n']) {
+        const nodes = markdown(ui, prefix + source, {}, '', 100, true);
+        assert.equal(textOf(nodes.at(-1)), source);
+        assert.equal(nodes.at(-1).props.wrap, 'wrap');
+        assert.ok(nodes.every(node => node.type !== 'Code'));
+      }
+      assert.equal(markdown(ui, source + fence, {}, '', 100, true)[0].type, 'Text');
+      assert.equal(markdown(ui, source + fence + '\n\n', {}, '', 100, true)[0].type, 'Code');
+    }
+  });
+  test('switches newest delta tables to columns on completion and always renders result cards as Markdown', async ($, on) => {
+    const { state, clock } = world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = [];
+    data.lastMessage.text = '| Name | Detail |\n|--|--|\n| file | [a](/x/y) |';
+    data.tail = [{ type: 'message.completed', text: 'assistant: **older**' }, { type: 'message.delta', text: 'truncated' }];
+    state.text = JSON.stringify(data);
+    await $.ui.render(row()); await clock.settle();
+    let tree = await $.ui.render(row());
+    assert.match(textOf(tree), /› older/);
+    assert.equal(textOf(rowsOf(tree).at(-1)), `› ${data.lastMessage.text}`);
+    assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
+    const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
+    assert.deepEqual(rowsOf(result).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);
+    data.tail.at(-1).type = 'message.completed';
+    state.text = JSON.stringify(data); state.mtime++;
+    await clock.advance(500);
+    tree = await $.ui.render(row());
+    assert.deepEqual(rowsOf(tree).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);
+    assert.doesNotMatch(textOf(tree), /\|--|\/x\/y/);
+  });
   test('renders inline bold, both italics, cyan code and link labels in wrapping paragraphs', ($, on) => {
     world($, on);
     const nodes = markdown($.ui.resolve(row()), '**bold** *star* _under_ `code` [title](https://example.com)\nnext\u001b');
