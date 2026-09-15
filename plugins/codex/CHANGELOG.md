@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- The live-tool-row mod also takes over the result block under a follow row, so the quiet heartbeat lines, repository edits the host attributes to the command (made by Codex meanwhile) and the timeout note no longer appear beneath the card.
+
 ## 1.2.0
 
 - Removed the `/codex:rescue` command, the `codex-rescue` subagent and the internal `codex-cli-runtime`, `codex-result-handling` and `gpt-5-4-prompting` skills. Delegation is driven by the codex-director workflow (the `codex-task` subagent with `observe follow`); the remaining commands (`review`, `adversarial-review`, `status`, `result`, `answer`, `message`, `cancel`, `transfer`, `setup`) are unchanged.

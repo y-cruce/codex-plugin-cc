@@ -10,6 +10,7 @@ type State = {
   rows: Map<string, Job>
   jobs: Map<string, Job>
   terminalLabels: Map<string, string>
+  followRows: Set<string>
   timer?: Timer
   polling: boolean
   now: number
@@ -136,7 +137,7 @@ function matchingFollow(call: Pick<ToolGroupCall, 'tool' | 'input' | 'isInterrup
 }
 
 export function register(on: On) {
-  const state: State = { rows: new Map(), jobs: new Map(), terminalLabels: new Map(), polling: false, now: 0, redrawnAt: 0, toasted: new Set() }
+  const state: State = { rows: new Map(), jobs: new Map(), terminalLabels: new Map(), followRows: new Set(), polling: false, now: 0, redrawnAt: 0, toasted: new Set() }
   on('ui.render', { component: 'PromptHint' }, ($, e, next) => {
     if (e.props.isDraft) return next(e)
     const text = statusText([...new Set(state.rows.values())].flatMap(job => job.data ? [job.data] : []), state.now)
@@ -159,12 +160,20 @@ export function register(on: On) {
     }
     return expand ? next({ ...e, props: { ...e.props, isExpanded: true } }) : next(e)
   })
+  // The host draws a follow row's result on its own: the quiet heartbeat lines,
+  // repository edits it attributes to the command (Codex made them meanwhile)
+  // and a timeout note. The card above already says what happened, so draw nothing.
+  on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
+    const ours = e.props.tool === 'Bash' && !e.props.isErrored && (state.followRows.has(e.props.tool_use_id) || terminalOf(e.props.output) !== undefined)
+    return ours ? $.ui.resolve(e).Box({ children: [] }) : next(e)
+  })
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const follow = matchingFollow(e.props)
     if (!follow) {
       release(state, e.props.tool_use_id)
       return next(e)
     }
+    state.followRows.add(e.props.tool_use_id)
     const terminal = e.props.isRunning ? undefined : terminalOf(e.props.output)
     if (!e.props.isRunning) {
       release(state, e.props.tool_use_id)

@@ -81,12 +81,17 @@ export function row(command = 'node /tools/codex-companion.mjs observe follow ta
   return { component: 'ToolUse', surface: 'terminal', requestId: 'tool-1', viewport: { columns: 120, rows: 40 },
     props: { tool: 'Bash', tool_use_id: 'tool-1', input: { command }, isRunning: true, isErrored: false, isInterrupted: false, ...props } };
 }
+export function resultRow(output, props = {}) {
+  return { component: 'ToolResult', surface: 'terminal', requestId: 'tool-1', viewport: { columns: 120, rows: 40 },
+    props: { tool: 'Bash', tool_use_id: 'tool-1', output, isErrored: false, ...props } };
+}
 export function world($, on) {
   const clock = mock.clock($);
   mock.env(on, { HOME: '/home/test' });
   const state = { text: JSON.stringify(fixture()), mtime: 1, reads: 0, stats: 0, runs: [], invalidations: [], statuses: [], toasts: [], missing: false, unknown: false };
   on('session.cwd', () => '/work');
   on('ui.render', { component: 'ToolUse' }, () => ({ type: 'Text', children: ['native Bash row'] }));
+  on('ui.render', { component: 'ToolResult' }, () => ({ type: 'Text', children: ['native Bash result'] }));
   on('ui.render', { component: 'PromptHint' }, (_, e) => ({ type: 'Text', children: [e.props.hint] }));
   on('ui.status', (_, e) => { state.statuses.push(e.text); });
   on('ui.toast', (_, e) => { state.toasts.push(e); });

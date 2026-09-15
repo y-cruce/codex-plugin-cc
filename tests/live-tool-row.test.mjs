@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { describe, test, tier, fixture, row, world, textOf, hint, rowsOf, terminalOutput } from './fixtures/live-tool-row.mjs';
+import { describe, test, tier, fixture, row, resultRow, world, textOf, hint, rowsOf, terminalOutput } from './fixtures/live-tool-row.mjs';
 import { followOf } from '../plugins/codex/hooks/live-tool-row/command.ts';
 import { refresh } from '../plugins/codex/hooks/live-tool-row/register.ts';
 import { terminalOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
@@ -415,6 +415,16 @@ describe('live row polish', () => {
       state.mtime++; state.text = JSON.stringify(data); await clock.advance(1000);
       assert.equal(state.toasts.filter(item => item.text.endsWith(`· ${status}`)).length, 1);
     }
+  });
+  test('a follow row draws no result block; other Bash results stay native', async ($, on) => {
+    const { clock } = world($, on);
+    const output = { stdout: '… 19:03:42 still running\nCURSOR: abc\nTIMEOUT job=task-abc123-xyz789 [fixture task] thread=t 540s elapsed, continue with --after', stderr: '', interrupted: false };
+    assert.equal(textOf(await $.ui.render(resultRow(output))), '');
+    assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'hello', stderr: '' }, { tool_use_id: 'other' }))), 'native Bash result');
+    assert.equal(textOf(await $.ui.render(resultRow(output, { isErrored: true }))), 'native Bash result');
+    await $.ui.render(row(undefined, { tool_use_id: 'seen' })); await clock.settle();
+    assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'no terminal line yet', stderr: '' }, { tool_use_id: 'seen' }))), '');
+    assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'x', stderr: '' }, { tool: 'Read', tool_use_id: 'seen' }))), 'native Bash result');
   });
   test('a job first seen already finished draws its card without a completion toast', async ($, on) => {
     const { state, clock } = world($, on);
