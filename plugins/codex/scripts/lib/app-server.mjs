@@ -33,12 +33,7 @@ const DEFAULT_CLIENT_INFO = {
 const DEFAULT_CAPABILITIES = {
   experimentalApi: true,
   requestAttestation: false,
-  optOutNotificationMethods: [
-    "item/agentMessage/delta",
-    "item/reasoning/summaryTextDelta",
-    "item/reasoning/summaryPartAdded",
-    "item/reasoning/textDelta"
-  ]
+  optOutNotificationMethods: []
 };
 
 function buildJsonRpcError(code, message, data) {
@@ -138,8 +133,7 @@ class AppServerClientBase {
     }
 
     if (message.id !== undefined && message.method) {
-      this.handleServerRequest(message);
-      return;
+      return this.handleServerRequest(message);
     }
 
     if (message.id !== undefined) {
@@ -158,12 +152,12 @@ class AppServerClientBase {
     }
 
     if (message.method && this.notificationHandler) {
-      this.notificationHandler(/** @type {AppServerNotification} */ (message));
+      return this.notificationHandler(/** @type {AppServerNotification} */ (message));
     }
   }
 
-  handleServerRequest(message) {
-    if (this.serverRequestHandler?.(message)) {
+  async handleServerRequest(message) {
+    if (await this.serverRequestHandler?.(message)) {
       return;
     }
     this.sendMessage({
@@ -232,14 +226,15 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     });
 
     this.readline = readline.createInterface({ input: this.proc.stdout });
-    this.readline.on("line", (line) => {
-      this.handleLine(line);
-    });
+    this.reading = (async () => {
+      for await (const line of this.readline) await this.handleLine(line);
+    })().catch((error) => this.handleExit(error));
 
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
+    this.observationVersion = Number(initialized["observationVersion"] ?? 0);
     this.notify("initialized", {});
   }
 
@@ -320,10 +315,11 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       });
     });
 
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
+    this.observationVersion = Number(initialized["observationVersion"] ?? 0);
     this.notify("initialized", {});
   }
 

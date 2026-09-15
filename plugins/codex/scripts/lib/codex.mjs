@@ -44,6 +44,7 @@ import path from "node:path";
 import { readJsonFile } from "./fs.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { registerObservedJob } from "./observation-client.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -1041,6 +1042,7 @@ export async function runAppServerReview(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
+    await registerObservedJob(client, cwd, options.onProgress);
     const thread = await startThread(client, cwd, {
       model: options.model,
       sandbox: "read-only",
@@ -1134,6 +1136,7 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     let threadId;
+    await registerObservedJob(client, cwd, options.onProgress);
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");

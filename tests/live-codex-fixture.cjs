@@ -94,6 +94,26 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
           fs.writeFileSync(path.join(thread.cwd, "written.txt"), text);
           complete(thread, "written");
         } else complete(thread, "read-only", "failed");
+      } else if (text === "hold observation" || text === "hold observation-burst") {
+        const turnId = thread.turnId;
+        const later = (delay, action) => setTimeout(() => { if (thread.turnId === turnId) action(); }, delay);
+        const base = { threadId: thread.id, turnId };
+        later(100, () => {
+          emit("item/started", { ...base, item: { type: "commandExecution", id: "observe-command", command: `echo observation-${thread.id}`, cwd: thread.cwd, status: "inProgress" } });
+          emit("item/started", { ...base, item: { type: "agentMessage", id: "observe-message", text: "", phase: "commentary" } });
+        });
+        later(150, () => {
+          const count = text.endsWith("-burst") ? 400 : 3;
+          for (let index = 0; index < count; index++) {
+            emit("item/agentMessage/delta", { ...base, itemId: "observe-message", delta: `piece-${index} ` });
+            emit("item/commandExecution/outputDelta", { ...base, itemId: "observe-command", delta: `output-${index}\n` });
+          }
+        });
+        later(250, () => {
+          emit("item/completed", { ...base, item: { type: "agentMessage", id: "observe-message", text: `observation conclusion ${thread.id}`, phase: "commentary" } });
+          emit("item/completed", { ...base, item: { type: "commandExecution", id: "observe-command", command: `echo observation-${thread.id}`, cwd: thread.cwd, status: "completed", exitCode: 0, aggregatedOutput: "observation output" } });
+          emit("thread/tokenUsage/updated", { ...base, tokenUsage: { total: { inputTokens: 123, outputTokens: 45, cachedInputTokens: 10 }, last: { inputTokens: 123, outputTokens: 45, cachedInputTokens: 10 } } });
+        });
       } else if (text.startsWith("hold")) {
         thread.lateChange = text === "hold-late";
         fs.writeFileSync(path.join(thread.cwd, "partial.txt"), "partial");
@@ -111,6 +131,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       }
       thread.inputs.push(...p.input);
       reply({ turnId: thread.turnId });
+      if (p.input.some((item) => item.text === "observation-live")) {
+        const base = { threadId: thread.id, turnId: thread.turnId };
+        setTimeout(() => emit("item/agentMessage/delta", { ...base, itemId: "observe-live", delta: "live incremental " }), 100);
+        setTimeout(() => emit("item/agentMessage/delta", { ...base, itemId: "observe-live", delta: "conclusion" }), 600);
+        setTimeout(() => emit("item/completed", { ...base, item: { type: "agentMessage", id: "observe-live", text: "live incremental conclusion", phase: "commentary" } }), 1200);
+      }
       setTimeout(() => {
         emit("item/started", { threadId: thread.id, turnId: thread.turnId, item: {
           type: "userMessage", id: `user-${p.clientUserMessageId}`, clientId: p.clientUserMessageId, content: p.input

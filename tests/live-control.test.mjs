@@ -394,6 +394,12 @@ test("invalid director notifications and unknown tools do not create notificatio
 test("plain status retains notifications and status --wait consumes them once while work continues", async (t) => {
   const h = await setup(t);
   const { job, done } = await startJob(t, h, "hold notify:Build phase ready");
+  // The broker exposes the notification before the owning worker persists its
+  // phase. Wait for that projection before asserting status preserves it.
+  await waitFor(() => {
+    try { return JSON.parse(fs.readFileSync(job.logFile.replace(/\.log$/, ".json"), "utf8")).phase === "notified"; }
+    catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+  });
   const plain = h.cli("status", job.id);
   assert.equal(plain.status, 0, plain.stderr);
   const notification = JSON.parse(plain.stdout).job.live.notifications[0];

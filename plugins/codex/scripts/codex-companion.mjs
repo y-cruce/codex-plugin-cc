@@ -24,6 +24,8 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { acknowledgeNotifications, liveStatus, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
+import { handleObserve } from "./lib/job-observe.mjs";
+import { finishObservedJob } from "./lib/observation-client.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -88,6 +90,10 @@ function printUsage() {
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
+      "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
+      "  node scripts/codex-companion.mjs observe replay <job-id> [--after <cursor>] [--limit <n>] --jsonl",
+      "  node scripts/codex-companion.mjs observe view-path <job-id> --cwd <repo>",
+      "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -631,11 +637,11 @@ function createTrackedProgress(job, options = {}) {
   const logFile = options.logFile ?? createJobLogFile(job.workspaceRoot, job.id, job.title);
   return {
     logFile,
-    progress: createProgressReporter({
+    progress: Object.assign(createProgressReporter({
       stderr: Boolean(options.stderr),
       logFile,
       onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
-    })
+    }), { jobId: job.id })
   };
 }
 
@@ -918,7 +924,17 @@ async function handleTaskWorker(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
+  // The detached process can run before its parent has published both records.
+  // Wait for the matching PID in the index as well, so queued cannot overwrite running.
+  let storedJob;
+  const launchDeadline = Date.now() + 10000;
+  do {
+    try { storedJob = readStoredJob(workspaceRoot, options["job-id"]); }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+    const indexed = listJobs(workspaceRoot).find((job) => job.id === options["job-id"]);
+    if (storedJob?.pid === process.pid && indexed?.pid === process.pid) break;
+    await sleep(25);
+  } while (Date.now() < launchDeadline);
   if (!storedJob) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
@@ -1147,6 +1163,7 @@ async function handleCancel(argv) {
   };
 
   outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  await finishObservedJob(workspaceRoot, job.id);
 }
 
 async function main() {
@@ -1157,6 +1174,9 @@ async function main() {
   }
 
   switch (subcommand) {
+    case "observe":
+      await handleObserve(argv);
+      break;
     case "setup":
       await handleSetup(argv);
       break;

@@ -8,7 +8,8 @@ import process from "node:process";
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
-import { LiveTurnControl } from "./lib/live-turn-control.mjs";
+import { LiveTurnControl, DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
+import { JobRuntime } from "./lib/job-runtime.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 
@@ -60,7 +61,7 @@ async function main() {
   const endpoint = String(options.endpoint);
   const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
-  const inputTimeoutMs = Number(options["input-timeout-ms"] ?? 600000);
+  const inputTimeoutMs = Number(options["input-timeout-ms"] ?? DEFAULT_INPUT_TIMEOUT_MS);
   if (!Number.isSafeInteger(inputTimeoutMs) || inputTimeoutMs <= 0 || inputTimeoutMs > 2147483647) {
     throw new Error("input-timeout-ms must be a positive timer duration.");
   }
@@ -71,6 +72,7 @@ async function main() {
   writePidFile(pidFile);
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, requestUserInput: true });
   const controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs);
+  const jobs = new JobRuntime();
   let activeRequestSocket = null;
   const streamOwners = new Map();
   const pendingThreadStarts = new Map();
@@ -102,8 +104,10 @@ async function main() {
   }
 
   function routeNotification(message) {
+    const recorded = jobs.observe(structuredClone(message));
     controls.observe(message);
     deliverNotification(message);
+    return recorded;
   }
 
   function deliverNotification(message) {
@@ -148,6 +152,7 @@ async function main() {
     for (const socket of sockets) {
       socket.end();
     }
+    await jobs.close();
     await appClient.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
     if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
@@ -159,7 +164,10 @@ async function main() {
   }
 
   appClient.setNotificationHandler(routeNotification);
-  appClient.setServerRequestHandler((message) => controls.handleServerRequest(message));
+  appClient.setServerRequestHandler(async (message) => {
+    await jobs.observe(message);
+    return controls.handleServerRequest(message);
+  });
 
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -194,7 +202,8 @@ async function main() {
           send(socket, {
             id: message.id,
             result: {
-              userAgent: "codex-companion-broker"
+              userAgent: "codex-companion-broker",
+              observationVersion: 1
             }
           });
           continue;
@@ -214,12 +223,41 @@ async function main() {
           continue;
         }
 
+        if (message.method.startsWith("broker/job-") || message.method.startsWith("broker/observe-")) {
+          try {
+            const p = message.params ?? {};
+            let result;
+            switch (message.method) {
+              case "broker/job-register": result = await jobs.register(socket, p.cwd ?? cwd, p.jobId); break;
+              case "broker/job-finish": result = await jobs.finish(p.cwd ?? cwd, p.jobId); break;
+              case "broker/observe-follow": result = await jobs.follow(socket, p.cwd ?? cwd, p.jobId, p.after); break;
+              case "broker/observe-status": result = { followers: jobs.followers.size }; break;
+              default: throw new Error("OBSERVATION_UNSUPPORTED");
+            }
+            send(socket, { id: message.id, result });
+            if (message.method === "broker/observe-follow") jobs.wake(jobs.followers.get(socket));
+          } catch (error) {
+            send(socket, { id: message.id, error: buildJsonRpcError(-32600, error.message, {
+              code: error.code ?? "OBSERVATION_FAILED", earliestAvailableCursor: error.earliestAvailableCursor
+            }) });
+          }
+          continue;
+        }
+
         if (controls.handles(message.method)) {
           try {
             if (message.method === "broker/redirect" && !streamOwners.has(message.params?.threadId)) {
               throw new Error("No task owner is connected to continue after interruption.");
             }
             const result = await controls.request(message.method, message.params ?? {});
+            const p = message.params ?? {};
+            if (message.method === "turn/steer" || message.method === "broker/redirect") {
+              await jobs.observe({ method: "companion/control-message", params: { threadId: p.threadId,
+                turnId: p.expectedTurnId ?? p.turnId, message: p.input.map((item) => item.text).join("\n"),
+                interrupt: message.method === "broker/redirect", status: "accepted" } });
+            } else if (message.method === "broker/answer") {
+              await jobs.observe({ method: "companion/answer-delivered", params: { ...p } });
+            }
             send(socket, { id: message.id, result });
           } catch (error) {
             send(socket, { id: message.id, error: buildJsonRpcError(error.rpcCode ?? -32600, error.message) });
@@ -247,8 +285,11 @@ async function main() {
             resetIdleTimer();
           } else activeRequestSocket = socket;
           if (message.method === "turn/start") controls.starting(message.params ?? {});
+          if (message.params?.threadId) await jobs.bind(socket, message.params.threadId);
           try {
             const result = await appClient.request(message.method, message.params ?? {});
+            if (result.thread?.id) await jobs.bind(socket, result.thread.id);
+            if (result.reviewThreadId) await jobs.bind(socket, result.reviewThreadId);
             if (message.method === "thread/start") pendingThreadStarts.delete(result.thread?.id);
             if (isStreaming && !socket.destroyed) {
               for (const id of buildStreamThreadIds(message.method, message.params, result)) {
@@ -281,11 +322,13 @@ async function main() {
     });
 
     socket.on("close", () => {
+      jobs.disconnected(socket);
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });
 
     socket.on("error", () => {
+      jobs.disconnected(socket);
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });

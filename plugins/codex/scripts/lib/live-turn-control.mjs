@@ -2,10 +2,11 @@ import crypto from "node:crypto";
 import { runCommand } from "./process.mjs";
 
 const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/ack-notifications"]);
+export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
 export class LiveTurnControl {
-  constructor(client, notify, inputTimeoutMs = 600000) {
+  constructor(client, notify, inputTimeoutMs = DEFAULT_INPUT_TIMEOUT_MS) {
     this.client = client;
     this.notify = notify;
     this.inputTimeoutMs = inputTimeoutMs;

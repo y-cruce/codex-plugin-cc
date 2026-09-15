@@ -285,6 +285,36 @@ Then check in with:
 
 ## Codex Integration
 
+### Live task history / 实时任务轨迹
+
+The companion records complete app-server event payloads, including text deltas, even without a viewer. Each job has its own durable cursor and atomic `live-view.json` projection. Existing `status`, `result`, `events`, and job logs retain their interfaces.
+
+Observation reads first use the current state directory, then discover the same repository key under `$CLAUDE_CONFIG_DIR/plugins/data/*/state` (default `~/.claude`) and the temporary companion directory. If multiple fallback roots contain a job, the newest job JSON wins. Without `CLAUDE_PLUGIN_DATA`, `observe list` merges these roots. Execution writes keep their existing location.
+
+observe 读取优先使用当前状态目录；找不到任务时，回退查找 Claude 插件数据目录及临时目录下相同 repo-key，并按 job JSON 的修改时间选最新副本。未注入 `CLAUDE_PLUGIN_DATA` 时，list 合并这些目录；写入位置保持不变。
+
+```bash
+node plugins/codex/scripts/codex-companion.mjs observe list --cwd /path/to/repo --json
+node plugins/codex/scripts/codex-companion.mjs observe follow JOB --cwd /path/to/repo --max-seconds 540
+node plugins/codex/scripts/codex-companion.mjs observe follow JOB --cwd /path/to/repo --after CURSOR --until done
+node plugins/codex/scripts/codex-companion.mjs observe replay JOB --cwd /path/to/repo --limit 200 --jsonl
+node plugins/codex/scripts/codex-companion.mjs observe view-path JOB --cwd /path/to/repo
+```
+
+`follow` prints compact item events; `--verbose` includes deltas. It emits `CURSOR:` before DONE, FAILED, QUESTION, NOTIFIED, STALLED, or TIMEOUT. `--until done` keeps following through notifications. Closing the process closes its subscription; it does not interrupt the Codex task. Completed histories remain readable after the broker exits. Old brokers return `OBSERVATION_UNSUPPORTED` and are never replaced to enable observation.
+
+Use `--quiet` for relay agents: only the cursor and terminal line are emitted, with a one-line heartbeat every 60 seconds while waiting. DONE does not include result text in this mode; read it separately with `result`. Default display hides token updates, user-message echoes and empty reasoning, and bounds command output previews to 120 characters and assistant rows to 300. Full event payloads and `lastMessage.text` remain unchanged; `--verbose` retains full output.
+
+The live view unwraps recognized `zsh/bash/sh -lc/-c` command wrappers for active commands and tail rows. Completed command rows carry `exitCode` and `durationMs` instead of embedding the exit code in text. Pending questions include ISO `openedAt` and `expiresAt` (the broker's actual deadline, or the shared ten-minute default when absent). Turn lifecycle lines remain in follow output but not in the tail. Raw event payloads are unchanged.
+
+live-view 的活动命令和 tail 会剥除可识别的 shell 包装，无法可靠解析时保留原文；命令完成行通过 exitCode/durationMs 字段提供退出码与耗时，不再拼进 tail 文本。待答问题新增 openedAt/expiresAt 时间字段，turn 起止只在 follow 中展示，不占 tail 行。原始事件 payload 不变。
+
+事件全程保存，不依赖观察者。`follow` 适用于原生后台 agent 的阻塞 Bash 行；默认展示命令、消息预览、非空推理摘要、文件改动和调度者控制消息，`--verbose` 保留完整展示并输出 delta。`--quiet` 仅输出游标和终结行，等待时每60秒一行心跳，DONE 后不附结果；主线程另用 result 读取。默认命令输出预览最多120字符，assistant行最多300字符，完整事件与 lastMessage.text 不截断。`--max-seconds 540` 可在 Bash 时限前输出游标，下一次用 `--after` 续跟。`view-path` 返回 mod 可直接读取的原子投影文件，最多每秒更新五次，终态额外刷新。
+
+Writes are batched at 50 ms or 256 KiB and become visible only after durable commit. Histories rotate at 64 MiB, retain up to 1 GiB per job, and keep completed jobs for 30 days within a 20 GiB total budget. Retention removes oldest segments/jobs, never truncates individual payloads; expired cursors return `CURSOR_EXPIRED` and `earliestAvailableCursor`. Crashes or retention are marked as partial history. Legacy jobs do not acquire invented event history.
+
+写入以 50ms/256KiB 批量提交，公开游标只指向已持久化的数据。异常退出可能丢失尚未提交的批次，上游未提供重放的通知也无法补造。保留策略为单任务 1GiB、64MiB 分段、已结束任务 30 天、总量 20GiB；超限清理最旧历史并明确标记缺口。`job.log` 继续作为兼容文本日志，新增消费者不应解析它。
+
 The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
 
 ### Common Configurations

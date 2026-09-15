@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import process from "node:process";
+import { finishObservedJob } from "./observation-client.mjs";
 
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
@@ -177,6 +178,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       completedAt
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
+    await finishObservedJob(job.workspaceRoot, job.id);
     return execution;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -199,6 +201,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       errorMessage,
       completedAt
     });
+    await finishObservedJob(job.workspaceRoot, job.id);
     throw error;
   }
 }
