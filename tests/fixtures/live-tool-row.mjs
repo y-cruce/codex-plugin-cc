@@ -115,3 +115,7 @@ export function hint(props = {}, columns = 120) {
 export function rowsOf(tree) {
   return [tree.children[0], ...tree.children[1].children[0].children];
 }
+
+export function terminalOutput(kind, text = '', label = 'row label') {
+  return `CURSOR: x\n${kind} job=task-abc123-xyz789 [${label}] ${kind === 'QUESTION' ? 'request=1' : 'thread=thread-1'}${text ? ` ${text}` : ''}`;
+}

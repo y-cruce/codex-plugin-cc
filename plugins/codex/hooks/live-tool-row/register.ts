@@ -1,14 +1,15 @@
 import type { EngineInterface, On, Timer, ToolGroupCall } from 'claude-code'
 import { followOf } from './command.ts'
 import type { Follow } from './command.ts'
-import { liveTree, statusText } from './view.ts'
-import { clip } from './format.ts'
+import { liveTree, statusText, terminalTree } from './view.ts'
+import { clip, terminalOf } from './format.ts'
 import type { LiveView } from './view.ts'
 
 type Job = { follow: Follow; path?: Promise<string>; retryPolls: number; mtime?: number; data?: LiveView; error: string; finalReads?: Map<string, Promise<boolean>>; eventSeqs?: Map<string, string>; sawLive?: boolean }
 type State = {
   rows: Map<string, Job>
   jobs: Map<string, Job>
+  terminalLabels: Map<string, string>
   timer?: Timer
   polling: boolean
   now: number
@@ -135,7 +136,7 @@ function matchingFollow(call: Pick<ToolGroupCall, 'tool' | 'input' | 'isInterrup
 }
 
 export function register(on: On) {
-  const state: State = { rows: new Map(), jobs: new Map(), polling: false, now: 0, redrawnAt: 0, toasted: new Set() }
+  const state: State = { rows: new Map(), jobs: new Map(), terminalLabels: new Map(), polling: false, now: 0, redrawnAt: 0, toasted: new Set() }
   on('ui.render', { component: 'PromptHint' }, ($, e, next) => {
     if (e.props.isDraft) return next(e)
     const text = statusText([...new Set(state.rows.values())].flatMap(job => job.data ? [job.data] : []), state.now)
@@ -164,15 +165,26 @@ export function register(on: On) {
       release(state, e.props.tool_use_id)
       return next(e)
     }
+    const terminal = e.props.isRunning ? undefined : terminalOf(e.props.output)
+    if (!e.props.isRunning) {
+      release(state, e.props.tool_use_id)
+      if (!terminal) return next(e)
+    }
     const cwd = follow.cwd ?? await $.session.cwd()
     const key = JSON.stringify([cwd, follow.script, follow.jobId])
     let job = state.jobs.get(key)
+    const ui = $.ui.resolve(e)
+    const columns = Math.max(1, e.viewport?.columns ?? 120)
+    if (terminal && terminal.kind !== 'DONE' && terminal.kind !== 'FAILED') {
+      // Snapshot the label once; intermediate results never read the live-view.
+      if (!state.terminalLabels.has(e.props.tool_use_id)) state.terminalLabels.set(e.props.tool_use_id, job?.data?.label ?? terminal.label ?? follow.jobId)
+      return terminalTree(ui, terminal, state.terminalLabels.get(e.props.tool_use_id)!, columns)
+    }
     if (!job) {
       job = { follow: { ...follow, cwd }, retryPolls: 0, error: 'loading' }
       state.jobs.set(key, job)
     }
     if (!e.props.isRunning) {
-      release(state, e.props.tool_use_id)
       job.finalReads ??= new Map()
       if (!job.finalReads.has(e.props.tool_use_id)) {
         job.mtime = undefined
@@ -190,9 +202,7 @@ export function register(on: On) {
       state.timer = $.clock.every(500, () => { void poll($, state) })
       void poll($, state)
     }
-    const ui = $.ui.resolve(e)
-    const columns = Math.max(1, e.viewport?.columns ?? 120)
-    if (!job.error && job.data) return liveTree(ui, job.data, columns, state.now, e.viewport?.rows, e.props.isRunning ? undefined : { output: e.props.output })
+    if (!job.error && job.data) return liveTree(ui, job.data, columns, state.now, e.viewport?.rows, terminal ? { kind: terminal.kind as 'DONE' | 'FAILED' } : undefined)
     return ui.Box({ flexDirection: 'column', children: [await next(e), ui.Box({ paddingLeft: 2, children: ui.Text({
       dimColor: true, wrap: 'truncate-end', children: clip(`codex live view unavailable: ${job.error}`, Math.max(1, columns - 2)),
     }) })] })

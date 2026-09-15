@@ -57,8 +57,11 @@ export function tailLimit(rows?: number): number {
   return rows === undefined ? 8 : Math.max(4, Math.min(12, Math.floor(rows / 4)))
 }
 
-export function cursorOf(output: unknown): string | undefined {
+export type Terminal = { kind: 'DONE' | 'FAILED' | 'QUESTION' | 'NOTIFIED' | 'STALLED' | 'TIMEOUT'; text: string; label?: string }
+
+export function terminalOf(output: unknown): Terminal | undefined {
   const text = typeof output === 'string' ? output : (output as { stdout?: unknown } | null)?.stdout
   if (typeof text !== 'string') return undefined
-  return [...text.matchAll(/^CURSOR:\s*(\S+)/gm)].at(-1)?.[1]?.slice(-6)
+  const match = [...text.matchAll(/^(DONE|FAILED|QUESTION|NOTIFIED|STALLED|TIMEOUT) job=([^\s]+)(?:[ \t]+\[([^\]\r\n]*)\])?(?:[ \t]+(?:thread|request)=\S+)*(?:[ \t]+([^\r\n]*))?\r?$/gm)].at(-1)
+  return match ? { kind: match[1] as Terminal['kind'], text: match[4] ?? '', label: match[3] } : undefined
 }

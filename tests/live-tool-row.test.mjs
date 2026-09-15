@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { describe, test, tier, fixture, row, world, textOf, hint, rowsOf } from './fixtures/live-tool-row.mjs';
+import { describe, test, tier, fixture, row, world, textOf, hint, rowsOf, terminalOutput } from './fixtures/live-tool-row.mjs';
 import { followOf } from '../plugins/codex/hooks/live-tool-row/command.ts';
 import { refresh } from '../plugins/codex/hooks/live-tool-row/register.ts';
-import { cursorOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
+import { terminalOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
 import { clip, liveTree, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
 import { markdown } from '../plugins/codex/hooks/live-tool-row/markdown.ts';
 
@@ -123,7 +123,7 @@ describe('live ToolUse row', () => {
     await $.ui.render(row());
     await clock.settle();
     await $.ui.render(row(undefined, { tool_use_id: 'tool-2' }));
-    assert.match(textOf(await $.ui.render(row(undefined, { isRunning: false }))), /Codex · fixture task/);
+    assert.match(textOf(await $.ui.render(row(undefined, { isRunning: false, output: terminalOutput('DONE') }))), /Codex · fixture task/);
     assert.equal(clock.timers.size, 1);
     await $.ui.render(row(undefined, { tool_use_id: 'tool-2', isRunning: false, isInterrupted: true }));
     const stats = state.stats;
@@ -206,7 +206,115 @@ describe('live ToolUse row', () => {
 
 
 describe('live row polish', () => {
-  test('formats tokens, durations, paths, waiting and cursor without controls', () => {
+  test('parses the last terminal line from string or Bash stdout and strips only metadata', () => {
+    for (const kind of ['DONE', 'FAILED', 'QUESTION', 'NOTIFIED', 'TIMEOUT', 'STALLED']) {
+      const text = 'Which color? [green] request=keep this text';
+      const output = terminalOutput(kind, text, 'named job');
+      const expected = { kind, text, label: 'named job' };
+      assert.deepEqual(terminalOf(output), expected);
+      assert.deepEqual(terminalOf({ stdout: `${terminalOutput('NOTIFIED', 'old')}\r\n${output}\r\n` }), expected);
+    }
+    assert.deepEqual(terminalOf('TIMEOUT job=task-abc123-xyz789 [name] 60s elapsed, continue with --after'), { kind: 'TIMEOUT', label: 'name', text: '60s elapsed, continue with --after' });
+    assert.deepEqual(terminalOf('DONE job=task-abc123-xyz789'), { kind: 'DONE', text: '', label: undefined });
+    assert.deepEqual(terminalOf('QUESTION job=task-abc123-xyz789 thread=t request=1 Which color?'), { kind: 'QUESTION', text: 'Which color?', label: undefined });
+    for (const output of [null, {}, { stdout: 123 }, 'CURSOR: x', 'NOTIFIED job=', 'QUESTION_PENDING job=task-abc123-xyz789 request=1 wait', 'text DONE job=x']) assert.equal(terminalOf(output), undefined);
+  });
+  for (const [kind, status, color, dim] of [['QUESTION', 'question', 'magenta', false], ['NOTIFIED', 'notified', 'cyan', false], ['TIMEOUT', 'paused', undefined, true], ['STALLED', 'stalled', undefined, true]]) {
+    test(`renders ${kind} from its own stdout without lookup, file reads or timers`, async ($, on) => {
+      const { state, clock } = world($, on);
+      state.missing = true;
+      const body = 'Original text with enough words to wrap at a narrow terminal width.';
+      const input = row(undefined, { isRunning: false, output: terminalOutput(kind, body) });
+      input.viewport.columns = 40;
+      const tree = await $.ui.render(input);
+      assert.equal(textOf(tree), `● Codex · row label · ${status}${kind === 'TIMEOUT' ? '' : `\n${body}`}`);
+      assert.equal(tree.children[0].props.color, color);
+      assert.equal(tree.children[0].props.dimColor, dim);
+      if (kind !== 'TIMEOUT') {
+        assert.equal(tree.children[1].props.paddingLeft, 2);
+        assert.equal(tree.children[1].children[0].props.wrap, 'wrap');
+      }
+      await clock.advance(2000);
+      assert.equal(state.runs.length, 0);
+      assert.equal(state.stats, 0);
+      assert.equal(state.reads, 0);
+      assert.equal(clock.timers.size, 0);
+      assert.equal(state.toasts.length, 0);
+    });
+  }
+  for (const [kind, status, color] of [['DONE', 'completed', 'green'], ['FAILED', 'failed', 'red']]) {
+    test(`renders ${kind} full answer with its own status despite stale shared status`, async ($, on) => {
+      const { state } = world($, on);
+      const input = row(undefined, { isRunning: false, output: terminalOutput(kind) });
+      const tree = await $.ui.render(input);
+      assert.match(textOf(tree), new RegExp(`fixture task · ${status} ·`));
+      assert.match(textOf(tree), /Checking the change/);
+      assert.equal(rowsOf(tree)[0].children[2].props.color, color);
+      assert.doesNotMatch(textOf(tree), /running|cursor|CURSOR/);
+      await $.ui.render(input);
+      assert.equal(state.reads, 1);
+    });
+  }
+  test('keeps NOTIFIED and QUESTION rows stable beside DONE for the same job', async ($, on) => {
+    const { state, clock } = world($, on);
+    await $.ui.render(row()); await clock.settle();
+    const notified = row(undefined, { isRunning: false, output: terminalOutput('NOTIFIED', 'color received: green') });
+    const question = row(undefined, { tool_use_id: 'question', isRunning: false, output: terminalOutput('QUESTION', 'Which color?') });
+    const first = await $.ui.render(notified);
+    const second = await $.ui.render(question);
+    assert.equal(textOf(first), '● Codex · fixture task · notified\ncolor received: green');
+    assert.equal(textOf(second), '● Codex · fixture task · question\nWhich color?');
+    assert.equal(state.reads, 1);
+    const data = fixture(); data.label = 'latest label'; data.lastMessage.text = 'FINAL FULL ANSWER';
+    state.mtime++; state.text = JSON.stringify(data);
+    const done = row(undefined, { tool_use_id: 'done', isRunning: false, output: terminalOutput('DONE') });
+    const third = await $.ui.render(done);
+    assert.match(textOf(third), /latest label · completed/);
+    assert.match(textOf(third), /FINAL FULL ANSWER/);
+    assert.deepEqual(await $.ui.render(notified), first);
+    assert.deepEqual(await $.ui.render(question), second);
+    assert.doesNotMatch(textOf(first) + textOf(second), /FINAL FULL ANSWER/);
+    assert.equal(state.reads, 2);
+    assert.equal(clock.timers.size, 0);
+  });
+  test('unparseable ended output returns the native row and releases polling without a final read', async ($, on) => {
+    const { state, clock } = world($, on);
+    for (const output of [undefined, { stdout: 'CURSOR: x\nNOTIFI' }, 'no terminal']) {
+      assert.equal(textOf(await $.ui.render(row(undefined, { isRunning: false, output }))), 'native Bash row');
+    }
+    assert.equal(state.runs.length, 0);
+    await $.ui.render(row()); await clock.settle();
+    assert.equal(textOf(await $.ui.render(row(undefined, { isRunning: false }))), 'native Bash row');
+    assert.equal(clock.timers.size, 0);
+    assert.equal(state.reads, 1);
+  });
+  test('shows one magenta question and cyan answer, filters closed and dynamic tool lifecycle before tail limiting', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.tail = [
+      { type: 'question.opened', text: 'Question request=1: Which color?' },
+      { type: 'question.resolved', text: 'director → answer delivered request=1' },
+      { type: 'question.closed', text: 'Question resolved request=1' },
+      { type: 'tool.started', text: 'regular tool started' },
+      { type: 'tool.completed', text: 'regular tool completed' },
+      ...Array.from({ length: 12 }, () => [
+        { type: 'tool.started', text: 'dynamicToolCall started: notify_director' },
+        { type: 'tool.completed', text: 'dynamicToolCall completed: notify_director' },
+      ]).flat(),
+    ];
+    const tree = liveTree($.ui.resolve(row()), data, 120, 0, 16);
+    const nodes = rowsOf(tree);
+    const question = nodes.find(node => textOf(node).startsWith('?'));
+    assert.equal(textOf(question), '? Question request=1: Which color?');
+    assert.equal(question.props.color, 'magenta');
+    const answer = nodes.find(node => textOf(node).startsWith('→'));
+    assert.equal(textOf(answer), '→ answer delivered');
+    assert.equal(answer.props.color, 'cyan');
+    assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
+    assert.match(textOf(tree), /regular tool started\nregular tool completed/);
+    assert.equal(nodes.filter(node => node.props.color === 'magenta').length, 1);
+  });
+  test('formats tokens, durations, paths and waiting without controls', () => {
     assert.equal(tokens(82400), '82.4k');
     assert.equal(tokens(999), '999');
     assert.equal(tokens(1000), '1k');
@@ -215,9 +323,6 @@ describe('live row polish', () => {
     assert.equal(elapsed('2026-09-15T00:00:00Z', Date.parse('2026-09-15T00:00:03Z')), '3s');
     assert.equal(shortPath('a/long/path/main.ts', 10), '…h/main.ts');
     assert.equal(shortPath('main.ts', 10), 'main.ts');
-    assert.equal(cursorOf({ stdout: 'text\nCURSOR: abcdef123456\n' }), '123456');
-    assert.equal(cursorOf('CURSOR: old123456\nCURSOR: newabcdef'), 'abcdef');
-    for (const output of [null, {}, 'no cursor', { stdout: 123 }]) assert.equal(cursorOf(output), undefined);
     const now = Date.parse('2026-09-15T00:03:00Z');
     assert.equal(waiting('2026-09-15T00:00:00Z', '2026-09-15T00:10:00Z', now), 'waiting 3m · expires in 7m');
     assert.equal(waiting('2026-09-15T00:00:00Z', null, now), 'waiting 3m');
@@ -230,14 +335,15 @@ describe('live row polish', () => {
     data.lastMessage.text = 'Original answer\nsecond line';
     data.files = Array.from({ length: 5 }, (_, n) => ({ ...data.files[0], path: `file-${n}.ts` }));
     state.text = JSON.stringify(data);
-    const output = { stdout: 'private tool result\nCURSOR: secret0123456789' };
+    const output = { stdout: `private tool result\n${terminalOutput('DONE')}` };
     const done = row(undefined, { isRunning: false, output });
     const tree = await $.ui.render(done);
     assert.match(textOf(tree), /completed · 1m2s · 5 files\nOriginal answer\nsecond line/);
-    assert.match(textOf(tree), /file-2.ts \(\+3 −1\)\n\+2 more\ncursor …456789$/);
+    assert.match(textOf(tree), /file-2.ts \(\+3 −1\)\n\+2 more$/);
     assert.equal(rowsOf(tree).at(-1).props.dimColor, true);
     assert.equal(done.props.output, output);
-    assert.equal(output.stdout, 'private tool result\nCURSOR: secret0123456789');
+    assert.equal(output.stdout, `private tool result\n${terminalOutput('DONE')}`);
+    assert.doesNotMatch(textOf(tree), /cursor|CURSOR/);
     await $.ui.render(done);
     await clock.advance(3000);
     assert.equal(state.reads, 1);
@@ -245,12 +351,12 @@ describe('live row polish', () => {
     assert.equal(clock.timers.size, 0);
     for (const flag of ['isInterrupted', 'isErrored']) assert.equal(textOf(await $.ui.render(row(undefined, { isRunning: false, [flag]: true }))), 'native Bash row');
     assert.equal(state.reads, 1);
-    assert.doesNotMatch(textOf(await $.ui.render(row(undefined, { isRunning: false }))), /cursor/);
+    assert.doesNotMatch(textOf(await $.ui.render(row(undefined, { isRunning: false, output: terminalOutput('DONE') }))), /cursor/);
   });
   test('does not reread an ended row when another follow for the same job rerenders', async ($, on) => {
     const { state, clock } = world($, on);
     await $.ui.render(row()); await clock.settle();
-    const done = row(undefined, { isRunning: false });
+    const done = row(undefined, { isRunning: false, output: terminalOutput('DONE') });
     await $.ui.render(done);
     await $.ui.render(row(undefined, { tool_use_id: 'another-follow' })); await clock.settle();
     const reads = state.reads;
@@ -427,11 +533,11 @@ describe('Markdown and prompt footer', () => {
     let tree = liveTree(ui, data, 120, 0);
     assert.match(textOf(tree), /› older\n› Full answer\nconst full = true\n… \*\*plain\*\* `raw`/);
     assert.equal(rowsOf(tree).at(-1).props.dimColor, true);
-    tree = liveTree(ui, data, 120, 0, undefined, { output: '' });
+    tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
     assert.equal(rowsOf(tree)[1].props.bold, true);
     assert.equal(rowsOf(tree)[2].type, 'Code');
     data.lastMessage = { ...data.lastMessage, kind: 'reasoning', text: '**raw thought**' };
-    for (const result of [undefined, { output: '' }]) {
+    for (const result of [undefined, { kind: 'DONE' }]) {
       tree = liveTree(ui, data, 120, 0, undefined, result);
       const thought = rowsOf(tree).find(node => textOf(node).includes('**raw thought**'));
       assert.ok(thought.props.dimColor);

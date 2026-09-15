@@ -1,5 +1,6 @@
 import type { Elements, TextProps } from 'claude-code'
-import { clean, clip, cursorOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } from './format.ts'
+import { clean, clip, duration, elapsed, shortPath, tailLimit, tokens, waiting } from './format.ts'
+import type { Terminal } from './format.ts'
 import { markdown } from './markdown.ts'
 export { clip } from './format.ts'
 
@@ -34,19 +35,33 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
   }).join(' · ')}`
 }
 
-export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { output: unknown }) {
+export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, terminal: Terminal, label: string, columns: number) {
   const { Box, Text } = ui
+  const status = { DONE: 'completed', FAILED: 'failed', QUESTION: 'question', NOTIFIED: 'notified', TIMEOUT: 'paused', STALLED: 'stalled' }[terminal.kind]
+  const color = terminal.kind === 'QUESTION' ? 'magenta' : terminal.kind === 'NOTIFIED' ? 'cyan' : undefined
+  const dimColor = terminal.kind === 'TIMEOUT' || terminal.kind === 'STALLED'
+  return Box({ flexDirection: 'column', children: [
+    Text({ color, dimColor, wrap: 'truncate-end', children: clip(`● Codex · ${label} · ${status}`, columns) }),
+    ...(terminal.kind !== 'TIMEOUT' && terminal.text ? [Box({ paddingLeft: 2, width: columns, children: Text({
+      dimColor, wrap: 'wrap', children: clean(terminal.text),
+    }) })] : []),
+  ] })
+}
+
+export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }) {
+  const { Box, Text } = ui
+  const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
   const stalled = data.status === 'running' && data.tail.length ? now - Date.parse(data.tail.at(-1)!.at) : 0
   const header = [
     { text: '● Codex · ' },
     { text: data.label, bold: true },
-    { text: ` · ${data.status}`, color: colors[data.status] },
+    { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${elapsed(data.startedAt, data.endedAt ? Date.parse(data.endedAt) : now)} · ${result ? `${data.files.length} files` : `↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens`}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.
   let remaining = Array.from(clip(header.map(part => part.text).join(''), columns)).length
-  const lines = [Text({ color: data.status === 'waiting-for-answer' ? 'magenta' : undefined, children: header.map(({ text, ...style }) => {
+  const lines = [Text({ color: status === 'waiting-for-answer' ? 'magenta' : undefined, children: header.map(({ text, ...style }) => {
     const chars = Array.from(clip(text, columns))
     const shown = chars.slice(0, remaining).join('')
     remaining = Math.max(0, remaining - chars.length)
@@ -68,8 +83,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (data.lastMessage?.kind === 'reasoning') prose(data.lastMessage.text, { dimColor: true })
     else if (data.lastMessage) lines.push(...markdown(ui, data.lastMessage.text, {}, '', columns))
     files()
-    const cursor = cursorOf(result.output)
-    if (cursor) add(`cursor …${cursor}`, { dimColor: true })
     return tree()
   }
   if (data.pendingQuestion) {
@@ -83,6 +96,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const warnings = new Set<string>()
   const tail = data.tail.filter(event => {
     if (event.type === 'job.started') return false
+    if (event.type === 'question.closed') return false
+    if ((event.type === 'tool.started' || event.type === 'tool.completed') && event.text.startsWith('dynamicToolCall')) return false
     if (event.type === 'source.warning') {
       if (warnings.has(event.text)) return false
       warnings.add(event.text)
@@ -95,6 +110,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const newest = kind ? tail.findLastIndex(event => typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')) : -1
   tail.forEach((event, index) => {
     const type = typeOf(event)
+    if (type === 'question.resolved') {
+      prose('→ answer delivered', { color: 'cyan' })
+      return
+    }
     if (type.startsWith('command')) {
       const completed = type === 'command.completed'
       const color = completed ? event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
