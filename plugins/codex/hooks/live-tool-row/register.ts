@@ -1,7 +1,7 @@
 import type { EngineInterface, On, Timer, ToolGroupCall } from 'claude-code'
 import { followOf } from './command.ts'
 import type { Follow } from './command.ts'
-import { liveTree, statusText, terminalTree } from './view.ts'
+import { agentSummaries, liveTree, statusText, terminalTree } from './view.ts'
 import { clip, terminalOf } from './format.ts'
 import type { LiveView } from './view.ts'
 
@@ -9,7 +9,7 @@ type Job = { follow: Follow; path?: Promise<string>; retryPolls: number; mtime?:
 type State = {
   rows: Map<string, Job>
   jobs: Map<string, Job>
-  terminalLabels: Map<string, string>
+  terminalLabels: Map<string, { label: string; agents: string[] }>
   followRows: Set<string>
   timer?: Timer
   polling: boolean
@@ -185,9 +185,10 @@ export function register(on: On) {
     const ui = $.ui.resolve(e)
     const columns = Math.max(1, e.viewport?.columns ?? 120)
     if (terminal && terminal.kind !== 'DONE' && terminal.kind !== 'FAILED') {
-      // Snapshot the label once; intermediate results never read the live-view.
-      if (!state.terminalLabels.has(e.props.tool_use_id)) state.terminalLabels.set(e.props.tool_use_id, job?.data?.label ?? terminal.label ?? follow.jobId)
-      return terminalTree(ui, terminal, state.terminalLabels.get(e.props.tool_use_id)!, columns)
+      // Snapshot the label and agent summaries once; intermediate results never read the live-view.
+      if (!state.terminalLabels.has(e.props.tool_use_id)) state.terminalLabels.set(e.props.tool_use_id, { label: job?.data?.label ?? terminal.label ?? follow.jobId, agents: job?.data ? agentSummaries(job.data).map(agent => agent.text) : [] })
+      const snapshot = state.terminalLabels.get(e.props.tool_use_id)!
+      return terminalTree(ui, terminal, snapshot.label, columns, snapshot.agents)
     }
     if (!job) {
       job = { follow: { ...follow, cwd }, retryPolls: 0, error: 'loading' }

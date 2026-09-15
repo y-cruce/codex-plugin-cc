@@ -213,6 +213,8 @@ export function createLiveView(job) {
 function updateTail(view, event, text, key = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
   const row = { seq: String(event.seq), at: event.occurredAt, type: event.type, text: oneLine(text) };
+  const agentThreadId = event.type === "agent.activity" ? params(event).item.agentThreadId : event.derived?.agent?.threadId;
+  if (agentThreadId) row.agentThreadId = agentThreadId;
   if (event.derived?.agent) {
     row.agent = event.derived.agent.path;
     row.text = `[${oneLine(row.agent)}] ${row.text}`;
@@ -225,6 +227,7 @@ function updateTail(view, event, text, key = null) {
   }
   const prior = key && view._items[key]?.tailSeq;
   const index = prior ? view.tail.findIndex((entry) => entry.seq === prior) : -1;
+  row.positionSeq = index >= 0 ? view.tail[index].positionSeq ?? view.tail[index].seq : row.seq;
   if (index >= 0) view.tail[index] = row;
   else view.tail.push(row);
   if (key) {
@@ -256,12 +259,12 @@ export function applyJobEvent(view, event) {
       let agent = view.subAgents.find((entry) => entry.threadId === threadId);
       if (!agent) {
         agent = { threadId, path: String(item.agentPath ?? threadId).split("/").filter(Boolean).at(-1),
-          status: item.kind, startedAt: item.kind === "started" ? event.occurredAt : null, endedAt: null };
+          status: item.kind, startedAt: item.kind === "started" ? event.occurredAt : null, endedAt: null, startedSeq: String(event.seq) };
         view.subAgents.push(agent);
       }
-      agent.status = item.kind;
+      if (item.agentPath) agent.path = String(item.agentPath).split("/").filter(Boolean).at(-1);
+      if (item.kind !== "interacted" && (item.kind !== "completed" || agent.status !== "failed")) agent.status = item.kind;
       if (item.kind === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
-      if (item.kind === "interacted") agent.endedAt = null;
       if (["interrupted", "completed"].includes(item.kind)) agent.endedAt = event.occurredAt;
       tailKey = key;
       break;
@@ -280,7 +283,8 @@ export function applyJobEvent(view, event) {
     case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== event.turnId); break;
     case "command.started":
       Object.assign(state, { command: unwrapCommand(item.command), cwd: item.cwd, turnId: event.turnId });
-      view.activeCommands.push({ itemId: event.itemId, command: state.command, cwd: item.cwd, startedAt: event.occurredAt, _key: key });
+      view.activeCommands.push({ itemId: event.itemId, command: state.command, cwd: item.cwd, startedAt: event.occurredAt, _key: key,
+        ...(child ? { agentThreadId: event.derived.agent.threadId } : {}) });
       tailKey = key;
       break;
     case "command.output.delta":
@@ -359,6 +363,22 @@ export function applyJobEvent(view, event) {
     case "history.retention.changed": case "history.continuity.lost": case "history.recording.failed":
       view.history.continuity = "partial";
       break;
+  }
+  if (child) {
+    view.subAgents ??= [];
+    let agent = view.subAgents.find((entry) => entry.threadId === event.derived.agent.threadId);
+    if (!agent) {
+      agent = { ...event.derived.agent, status: "started", startedAt: event.occurredAt, endedAt: null, startedSeq: String(event.seq) };
+      view.subAgents.push(agent);
+    }
+    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) {
+      agent.lastActivity = preview(text, 300);
+    }
+    if (!agent.endedAt && event.type === "turn.completed" && p.turn?.status === "failed") {
+      agent.status = "failed";
+      agent.endedAt = event.occurredAt;
+      if (p.turn.error?.message) agent.lastActivity = preview(p.turn.error.message, 300);
+    }
   }
   updateTail(view, event, text, tailKey);
   if (key && event.type.endsWith(".completed")) delete view._items[key];

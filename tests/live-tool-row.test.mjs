@@ -6,6 +6,8 @@ import { terminalOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } 
 import { clip, liveTree, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
 import { markdown } from '../plugins/codex/hooks/live-tool-row/markdown.ts';
 
+import { createLiveView, normalizeJobEvent, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+
 tier('user');
 describe('live ToolUse row', () => {
   test('keeps completed follow groups expanded and stops polling', async ($, on) => {
@@ -426,26 +428,90 @@ describe('live row polish', () => {
     assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'no terminal line yet', stderr: '' }, { tool_use_id: 'seen' }))), '');
     assert.equal(textOf(await $.ui.render(resultRow({ stdout: 'x', stderr: '' }, { tool: 'Read', tool_use_id: 'seen' }))), 'native Bash result');
   });
-  test('sub-agent rows stay one dim line and never become the newest full message', ($, on) => {
+  test("interleaved sub-agent events update one anchored summary in live and result cards", ($, on) => {
     world($, on);
-    const data = fixture(); data.activeCommands = []; data.files = [];
-    data.lastMessage = { kind: 'assistant', text: '**main** answer', at: data.startedAt };
-    data.tail = [
-      { seq: '1', at: data.startedAt, type: 'message.completed', text: 'assistant: **main** answer' },
-      { seq: '2', at: data.startedAt, type: 'tool.started', text: '⇢ sub-agent review_41_44 started' },
-      { seq: '3', at: data.startedAt, type: 'message.completed', text: '[review_41_44] assistant: **child** ' + 'x'.repeat(200), agent: 'review_41_44' },
-      { seq: '4', at: data.startedAt, type: 'command.completed', text: '[review_41_44] $ rg -n foo', agent: 'review_41_44', exitCode: 0 },
+    const data = createLiveView({ id: "task", threadId: "parent", startedAt: fixture().startedAt });
+    let seq = 0;
+    const accept = (item, child = false, method = "item/completed") => {
+      const event = normalizeJobEvent({ method, params: { threadId: child ? "child" : "parent", turnId: "turn", item } }, { id: "task", threadId: "parent" });
+      event.seq = String(++seq);
+      if (child) event.derived = { ...event.derived, agent: { threadId: "child", path: "baseline" } };
+      applyJobEvent(data, event);
+    };
+    const render = result => rowsOf(liveTree($.ui.resolve(row()), JSON.parse(JSON.stringify(data)), 120, 0, 16, result));
+    const texts = () => render().map(textOf);
+    accept({ type: "agentMessage", id: "before", text: "parent before" });
+    accept({ type: "subAgentActivity", id: "spawn", agentThreadId: "child", agentPath: "/root/baseline", kind: "started" }, false, "item/started");
+    accept({ type: "commandExecution", id: "cmd", command: "pwd", cwd: "/work" }, true, "item/started");
+    accept({ type: "agentMessage", id: "after", text: "**parent** after" });
+    assert.deepEqual(texts().slice(2), ["› parent before", "⇢ baseline · running · $ pwd", "› parent after"]);
+    const anchor = texts().findIndex(text => text.startsWith("⇢"));
+    accept({ type: "agentMessage", id: "child-message", text: "old child message" }, true);
+    accept({ type: "commandExecution", id: "cmd", command: "pwd", exitCode: 1, aggregatedOutput: "old child warning" }, true);
+    assert.equal(texts().findIndex(text => text.startsWith("⇢")), anchor, "completion replaces the earlier command in place");
+    assert.match(texts()[anchor], /pwd.*old child warning/);
+    accept({ type: "agentMessage", id: "child-final", text: "**child** conclusion" }, true);
+    accept({ type: "subAgentActivity", id: "done", agentThreadId: "child", agentPath: "/root/baseline", kind: "completed" });
+    accept({ type: "agentMessage", id: "late", text: "late child message" }, true);
+    for (const result of [undefined, { kind: "DONE" }, { kind: "FAILED" }]) {
+      const nodes = render(result);
+      const summaries = nodes.filter(node => textOf(node).startsWith("⇢"));
+      assert.equal(summaries.length, 1);
+      assert.equal(textOf(summaries[0]), "⇢ baseline · done · **child** conclusion");
+      assert.equal(summaries[0].props.wrap, "truncate-end");
+      assert.equal(summaries[0].props.dimColor, true);
+      assert.ok(summaries[0].children.every(child => typeof child === "string"));
+      assert.doesNotMatch(nodes.map(textOf).join("\n"), /old child|late child|\[baseline\]|sub-agent|pwd/);
+      assert.ok(nodes.find(node => textOf(node).includes("parent after")).children.some(child => child.props?.bold));
+    }
+    assert.equal(texts().findIndex(text => text.startsWith("⇢")), anchor);
+    data.tail = data.tail.filter(event => event.type === "message.completed" && !event.agent && event.positionSeq !== "1");
+    assert.equal(texts()[2], "⇢ baseline · done · **child** conclusion", "expired startup stays before newer parent activity");
+  });
+  test("agent summaries survive tail trimming and distinguish same-name threads", ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.subAgents = [
+      { threadId: "a", path: "review", status: "completed", endedAt: data.startedAt, lastActivity: "first result" },
+      { threadId: "b", path: "review", status: "interrupted", endedAt: data.startedAt, lastActivity: "second result" },
     ];
-    const rows = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0));
-    const main = rows.find(node => textOf(node).includes('main'));
-    assert.ok(main.children.some(child => child.props?.bold === true), 'main message is Markdown');
-    const child = rows.find(node => textOf(node).includes('[review_41_44] assistant'));
-    assert.equal(child.props.dimColor, true);
-    assert.equal(child.props.wrap, 'truncate-end');
-    assert.ok(Array.from(textOf(child)).length <= 80);
-    assert.ok((Array.isArray(child.children) ? child.children : [child.children]).every(part => typeof part === 'string'), 'child row is plain text, not Markdown');
-    const cmd = rows.find(node => textOf(node).includes('[review_41_44] $ rg'));
-    assert.equal(cmd.props.dimColor, true);
+    data.tail = [{ seq: "1", at: data.startedAt, type: "message.completed", agent: "review", agentThreadId: "b", text: "[review] hidden detail" }];
+    const original = JSON.stringify(data);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · done · first result", "⇢ review · failed · second result"]);
+    assert.equal(JSON.stringify(data), original);
+    data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null, startedSeq: "2", lastActivity: "working" }];
+    data.tail = [
+      { seq: "99", positionSeq: "1", at: data.startedAt, type: "command.completed", text: "$ parent before" },
+      { seq: "3", positionSeq: "3", at: data.startedAt, type: "message.completed", text: "parent after" },
+    ];
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working", "› parent after"]);
+    data.tail.pop();
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working"]);
+    data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null }];
+    data.tail = [
+      { seq: "9", at: data.startedAt, type: "command.completed", agent: "review", text: "[review] $ latest completion" },
+      { seq: "2", at: data.startedAt, type: "message.completed", agent: "review", text: "[review] stale message" },
+    ];
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · running · $ latest completion"], "old projections use sequence, not tail position");
+  });
+  test("intermediate cards freeze each agent summary without reading newer state", async ($, on) => {
+    const { state, clock } = world($, on);
+    const data = fixture();
+    data.subAgents = [{ threadId: "child", path: "baseline", status: "started", endedAt: null, lastActivity: "$ pwd" }];
+    state.text = JSON.stringify(data);
+    await $.ui.render(row()); await clock.settle();
+    for (const kind of ["TIMEOUT", "QUESTION", "NOTIFIED", "STALLED"]) {
+      const event = row(undefined, { tool_use_id: kind, isRunning: false, output: terminalOutput(kind, "parent note") });
+      const card = textOf(await $.ui.render(event));
+      assert.equal(card.match(/⇢ baseline/g)?.length, 1);
+      assert.match(card, /⇢ baseline · running · \$ pwd/);
+    }
+    data.subAgents[0].status = "completed"; data.subAgents[0].lastActivity = "final";
+    state.text = JSON.stringify(data); state.mtime++;
+    await clock.advance(500);
+    const reads = state.reads;
+    assert.match(textOf(await $.ui.render(row(undefined, { tool_use_id: "TIMEOUT", isRunning: false, output: terminalOutput("TIMEOUT") }))), /⇢ baseline · running · \$ pwd/);
+    assert.equal(state.reads, reads);
   });
   test('a job first seen already finished draws its card without a completion toast', async ($, on) => {
     const { state, clock } = world($, on);

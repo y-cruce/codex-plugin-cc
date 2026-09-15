@@ -80,3 +80,64 @@ test("child messages and questions do not replace the parent's current state", (
   assert.equal(view.subAgents[0].endedAt, done.occurredAt);
   assert.equal(view.subAgents[0].status, "completed");
 });
+
+test("agent summaries retain activity and original positions after replacement, truncation and terminal events", () => {
+  const job = { id: "task", threadId: "parent" };
+  const view = createLiveView(job);
+  let seq = 0;
+  const accept = (message, child = false) => {
+    const event = normalizeJobEvent(message, job);
+    event.seq = String(++seq);
+    if (child) event.derived = { ...event.derived, agent: { threadId: "child", path: "review_41_44" } };
+    applyJobEvent(view, event);
+    return event;
+  };
+  const started = accept(activity("started"));
+  const command = { type: "commandExecution", id: "command", command: "pwd", cwd: "/work" };
+  accept({ method: "item/started", params: { threadId: "child", item: command } }, true);
+  assert.equal(view.activeCommands[0].agentThreadId, "child");
+  assert.equal(view.subAgents[0].lastActivity, "$ pwd");
+  const position = view.tail[1].positionSeq;
+  accept(childMessage("progress"), true);
+  accept({ method: "item/completed", params: { threadId: "child", item: { ...command, exitCode: 0 } } }, true);
+  assert.equal(view.tail[1].positionSeq, position);
+  assert.equal(view.tail[1].seq, "4");
+  assert.equal(view.tail[1].agentThreadId, "child");
+  assert.equal(view.subAgents[0].startedSeq, started.seq);
+  assert.match(view.subAgents[0].lastActivity, /pwd/);
+  accept(childMessage("final result"), true);
+  accept(activity("completed", "item/completed"));
+  accept(activity("interacted"));
+  accept(childMessage("late message"), true);
+  assert.equal(view.subAgents[0].status, "completed");
+  assert.equal(view.subAgents[0].lastActivity, "assistant: final result");
+  for (let index = 0; index < 210; index++) {
+    accept({ method: "item/completed", params: { threadId: "parent", item: { type: "agentMessage", id: `parent-${index}`, text: "parent activity" } } });
+  }
+  assert.equal(view.tail.length, 200);
+  assert.ok(view.tail.every(row => !row.agentThreadId));
+  assert.equal(view.subAgents[0].lastActivity, "assistant: final result");
+  assert.equal(view.subAgents[0].startedSeq, started.seq);
+  accept(activity("started"));
+  accept({ method: "turn/completed", params: { threadId: "child", turn: { id: "failed-turn", status: "failed", error: { message: "child failed" } } } }, true);
+  accept(activity("completed", "item/completed"));
+  accept(childMessage("late after failure"), true);
+  assert.equal(view.subAgents[0].status, "failed");
+  assert.equal(view.subAgents[0].lastActivity, "child failed");
+});
+
+test("a child observed before its lifecycle gets the eventual agent name without losing activity", () => {
+  const job = { id: "task", threadId: "parent" };
+  const view = createLiveView(job);
+  const message = normalizeJobEvent(childMessage("early progress"), job);
+  message.seq = "1";
+  message.derived = { agent: { threadId: "child", path: "child" } };
+  applyJobEvent(view, message);
+  const started = normalizeJobEvent(activity("started"), job);
+  started.seq = "2";
+  applyJobEvent(view, started);
+  assert.equal(view.subAgents.length, 1);
+  assert.equal(view.subAgents[0].path, "review_41_44");
+  assert.equal(view.subAgents[0].lastActivity, "assistant: early progress");
+  assert.equal(view.subAgents[0].startedSeq, "1");
+});

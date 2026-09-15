@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.4
+
+- Group each Codex sub-agent into one anchored live row with its name, status and latest activity; result and intermediate cards keep one summary per agent. Child commands and output no longer interleave with the parent trace.
+
 ## 1.2.3
 
 - Codex sub-agent threads (`subAgentActivity`) are bound to their parent job: their events are recorded in the same history with `derived.agent`, tail rows carry an `agent` field and a `[name]` prefix, `⇢ sub-agent <name> started|completed` rows replace the raw call ids, and `live-view.json` gains `subAgents`. Sub-agent messages never replace the parent thread's `lastMessage`, pending question or status.
