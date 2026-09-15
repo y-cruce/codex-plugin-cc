@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+- Removed the `/codex:rescue` command, the `codex-rescue` subagent and the internal `codex-cli-runtime`, `codex-result-handling` and `gpt-5-4-prompting` skills. Delegation is driven by the codex-director workflow (the `codex-task` subagent with `observe follow`); the remaining commands (`review`, `adversarial-review`, `status`, `result`, `answer`, `message`, `cancel`, `transfer`, `setup`) are unchanged.
+
 ## 1.1.2
 
 - While an assistant message is still streaming, only its completed Markdown blocks are rendered; the block being written shows as plain wrapped text, so tables no longer re-lay out on every delta and half-written links stay literal. The full Markdown rendering applies once the message completes.

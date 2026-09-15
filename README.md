@@ -11,7 +11,8 @@ they already have.
 
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/codex:transfer`, `/codex:status`, `/codex:result`, `/codex:answer`, `/codex:message`, and `/codex:cancel` to hand off sessions and steer or manage background jobs
+- delegation itself is driven by the [codex-director](https://github.com/y-cruce/codex-director) workflow: its `codex-task` subagent starts a Codex task through the companion and follows it with `observe follow`, while the `live-tool-row` mod draws the live trace
 
 ## Requirements
 
@@ -59,10 +60,7 @@ If Codex is installed but not logged in yet, run:
 !codex login
 ```
 
-After install, you should see:
-
-- the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
+After install, you should see the slash commands listed below.
 
 One simple first run is:
 
@@ -141,45 +139,6 @@ Examples:
 ```
 
 This command is read-only. It does not fix code.
-
-### `/codex:rescue`
-
-Hands a task to Codex through the `codex:codex-rescue` subagent.
-
-Use it when you want Codex to:
-
-- investigate a bug
-- try a fix
-- continue a previous Codex task
-- take a faster or cheaper pass with a smaller model
-
-> [!NOTE]
-> Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
-
-It supports `--background`, `--wait`, `--thread <id>`, `--allow-other-repo`, `--resume`, and `--fresh`. By default, `--thread` only resumes threads tracked for the current repo; use `--allow-other-repo` for a thread from another repo or one created outside this plugin. If you omit `--thread`, `--resume`, and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
-
-Examples:
-
-```bash
-/codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
-/codex:rescue --background investigate the regression
-```
-
-You can also just ask for a task to be delegated to Codex:
-
-```text
-Ask Codex to redesign the database connection to be more resilient.
-```
-
-**Notes:**
-
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
-- follow-up rescue requests can continue the latest Codex task in the repo
 
 ### `/codex:transfer`
 
@@ -263,17 +222,10 @@ When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted
 /codex:review
 ```
 
-### Hand A Problem To Codex
-
-```bash
-/codex:rescue investigate why the build is failing in CI
-```
-
 ### Start Something Long-Running
 
 ```bash
 /codex:adversarial-review --background
-/codex:rescue --background investigate the flaky test
 ```
 
 Then check in with:
