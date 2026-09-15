@@ -1,0 +1,82 @@
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
+import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { normalizeJobEvent, applyJobEvent, createLiveView, renderJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+
+const activity = (kind, method = "item/started") => ({ method, params: { threadId: "parent", turnId: "turn-parent",
+  item: { type: "subAgentActivity", id: `call-${kind}`, kind, agentThreadId: "child", agentPath: "/root/review_41_44" } } });
+const childMessage = (text) => ({ method: "item/completed", params: { threadId: "child", turnId: "turn-child",
+  item: { type: "agentMessage", id: `message-${text}`, text } } });
+
+test("subAgentActivity of every kind binds buffered and future child events to one job", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  for (const kind of ["started", "interacted", "interrupted", "completed"]) {
+    const job = { id: `task-${kind}`, status: "running", workspaceRoot: cwd, pid: process.pid, threadId: "parent" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const runtime = new JobRuntime();
+    const owner = {};
+    try {
+      await runtime.register(owner, cwd, job.id);
+      await runtime.bind(owner, "parent");
+      await runtime.observe(childMessage("buffered"));
+      assert.equal(runtime.pendingThreads.get("child").length, 1);
+      await runtime.observe(activity(kind));
+      assert.equal(runtime.pendingThreads.has("child"), false);
+      await runtime.observe(childMessage("future"));
+      await runtime.observe(activity(kind, "item/completed"));
+      await runtime.observe(childMessage("late"));
+      const entry = [...runtime.jobs.values()][0];
+      await entry.store.flush();
+      const history = await readHistory(cwd, job.id);
+      const children = history.events.filter((event) => event.threadId === "child");
+      assert.equal(children.length, 3);
+      for (const event of children) {
+        assert.equal(event.jobId, job.id);
+        assert.deepEqual(event.derived.agent, { threadId: "child", path: "review_41_44" });
+        assert.match(renderJobEvent(event), /^\[review_41_44\] assistant:/);
+        assert.equal(event.source.message.params.threadId, "child");
+      }
+      assert.equal(entry.view.lastMessage, null);
+      assert.equal(entry.view.subAgents[0].status, kind);
+      assert.equal(entry.view.tail.filter((row) => row.agent === "review_41_44").length, 3);
+      assert.ok(entry.view.tail.some((row) => row.text === `⇢ sub-agent review_41_44 ${kind}`));
+      assert.ok(entry.view.tail.every((row) => !row.text.includes("call-")));
+    } finally { await runtime.close(); }
+  }
+});
+
+test("child messages and questions do not replace the parent's current state", () => {
+  const job = { id: "task", threadId: "parent" };
+  const view = createLiveView(job);
+  let seq = 0;
+  const accept = (message, agent = false) => {
+    const event = normalizeJobEvent(message, job);
+    event.seq = String(++seq);
+    if (agent) event.derived = { ...event.derived, agent: { threadId: "child", path: "review_41_44" } };
+    applyJobEvent(view, event);
+    return event;
+  };
+  accept({ method: "item/completed", params: { threadId: "parent", turnId: "turn-parent", item: { type: "agentMessage", id: "parent-message", text: "parent conclusion" } } });
+  accept({ method: "companion/question", params: { threadId: "parent", requestId: "parent-question", questions: [{ question: "Parent question?" }] } });
+  const original = structuredClone({ lastMessage: view.lastMessage, pendingQuestion: view.pendingQuestion, status: view.status, threadId: view.threadId, turnId: view.turnId });
+  accept(activity("started"));
+  accept({ method: "turn/started", params: { threadId: "child", turn: { id: "turn-child" } } }, true);
+  accept({ method: "item/agentMessage/delta", params: { threadId: "child", turnId: "turn-child", itemId: "child-message", delta: "x".repeat(400) } }, true);
+  accept(childMessage("child conclusion"), true);
+  accept({ method: "item/reasoning/summaryTextDelta", params: { threadId: "child", itemId: "reason", delta: "child reasoning" } }, true);
+  accept({ method: "item/completed", params: { threadId: "child", item: { type: "reasoning", id: "reason", summary: ["reasoned"] } } }, true);
+  accept({ method: "companion/question", params: { threadId: "child", requestId: "child-question", questions: [{ question: "Child?" }] } }, true);
+  assert.deepEqual({ lastMessage: view.lastMessage, pendingQuestion: view.pendingQuestion, status: view.status, threadId: view.threadId, turnId: view.turnId }, original);
+  assert.ok(view.tail.filter((row) => row.agent).every((row) => row.text.startsWith("[review_41_44] ")));
+  const done = accept(activity("completed", "item/completed"));
+  assert.equal(view.subAgents[0].endedAt, done.occurredAt);
+  assert.equal(view.subAgents[0].status, "completed");
+});

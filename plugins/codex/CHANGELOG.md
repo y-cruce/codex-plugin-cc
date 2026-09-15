@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3
+
+- Codex sub-agent threads (`subAgentActivity`) are bound to their parent job: their events are recorded in the same history with `derived.agent`, tail rows carry an `agent` field and a `[name]` prefix, `⇢ sub-agent <name> started|completed` rows replace the raw call ids, and `live-view.json` gains `subAgents`. Sub-agent messages never replace the parent thread's `lastMessage`, pending question or status.
+- The live-tool-row mod draws sub-agent rows as single dim lines without Markdown.
+
 ## 1.2.2
 
 - While an assistant message streams, the block still being written is no longer drawn as raw text; completed blocks appear whole and a dim `…` marks the rest, so text never snaps from Markdown source into its rendered form.

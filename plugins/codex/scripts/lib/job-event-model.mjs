@@ -100,6 +100,7 @@ export function normalizeJobEvent(message, job) {
   let type = METHODS[message.method] ?? "source.unknown";
   if (message.method === "item/started" || message.method === "item/completed") {
     type = `${ITEM_TYPES[p.item?.type] ?? "tool"}.${message.method.endsWith("started") ? "started" : "completed"}`;
+    if (p.item?.type === "subAgentActivity") type = "agent.activity";
   }
   if (message.method === "companion/job-completed") {
     type = `job.${p.job?.status ?? "completed"}`;
@@ -125,6 +126,13 @@ export function normalizeJobEvent(message, job) {
 }
 
 export function renderJobEvent(event, { verbose = false, tail = false } = {}) {
+  const text = renderEventText(event, { verbose, tail });
+  if (text == null || !event.derived?.agent) return text;
+  const prefixed = `[${oneLine(event.derived.agent.path)}] ${text}`;
+  return !verbose && /^(message|reasoning)\./.test(event.type) ? preview(prefixed, 300) : prefixed;
+}
+
+function renderEventText(event, { verbose = false, tail = false } = {}) {
   const p = params(event);
   const item = p.item ?? {};
   if (isDelta(event)) {
@@ -133,6 +141,7 @@ export function renderJobEvent(event, { verbose = false, tail = false } = {}) {
   }
   let text;
   switch (event.type) {
+    case "agent.activity": text = `⇢ sub-agent ${String(item.agentPath ?? item.agentThreadId).split("/").filter(Boolean).at(-1)} ${item.kind}`; break;
     case "job.started": text = "Job started"; break;
     case "job.completed": case "job.failed": case "job.cancelled": text = `Job ${event.type.slice(4)}`; break;
     case "turn.started": text = verbose ? `Turn started ${event.turnId ?? ""}` : "Turn started"; break;
@@ -204,6 +213,11 @@ export function createLiveView(job) {
 function updateTail(view, event, text, key = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
   const row = { seq: String(event.seq), at: event.occurredAt, type: event.type, text: oneLine(text) };
+  if (event.derived?.agent) {
+    row.agent = event.derived.agent.path;
+    row.text = `[${oneLine(row.agent)}] ${row.text}`;
+    if (/^(message|reasoning)\./.test(event.type)) row.text = preview(row.text, 300);
+  }
   if (event.type === "command.completed") {
     const item = params(event).item ?? {};
     row.exitCode = typeof item.exitCode === "number" ? item.exitCode : null;
@@ -226,15 +240,32 @@ export function applyJobEvent(view, event) {
   view._items ??= {};
   view._usage ??= {};
   view.history.committedSeq = String(event.seq);
-  if (event.threadId && (!view.threadId || event.threadId === view.threadId)) {
+  const child = Boolean(event.derived?.agent);
+  if (!child && event.threadId && (!view.threadId || event.threadId === view.threadId)) {
     view.threadId = event.threadId;
     if (event.turnId) view.turnId = event.turnId;
   }
   const key = event.itemId ? `${event.threadId}:${event.turnId}:${event.itemId}` : null;
   const state = key ? (view._items[key] ??= { text: "", summary: [], output: "" }) : null;
-  let text = renderJobEvent(event, { tail: true });
+  let text = renderEventText(event, { tail: true });
   let tailKey = null;
   switch (event.type) {
+    case "agent.activity": {
+      view.subAgents ??= [];
+      const threadId = item.agentThreadId;
+      let agent = view.subAgents.find((entry) => entry.threadId === threadId);
+      if (!agent) {
+        agent = { threadId, path: String(item.agentPath ?? threadId).split("/").filter(Boolean).at(-1),
+          status: item.kind, startedAt: item.kind === "started" ? event.occurredAt : null, endedAt: null };
+        view.subAgents.push(agent);
+      }
+      agent.status = item.kind;
+      if (item.kind === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
+      if (item.kind === "interacted") agent.endedAt = null;
+      if (["interrupted", "completed"].includes(item.kind)) agent.endedAt = event.occurredAt;
+      tailKey = key;
+      break;
+    }
     case "job.started":
       view.status = "running";
       view.startedAt = p.job?.startedAt ?? view.startedAt ?? event.occurredAt;
@@ -245,7 +276,7 @@ export function applyJobEvent(view, event) {
       view.activeCommands = [];
       view.pendingQuestion = null;
       break;
-    case "turn.started": view.status = "running"; view.pendingQuestion = null; break;
+    case "turn.started": if (!child) { view.status = "running"; view.pendingQuestion = null; } break;
     case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== event.turnId); break;
     case "command.started":
       Object.assign(state, { command: unwrapCommand(item.command), cwd: item.cwd, turnId: event.turnId });
@@ -268,20 +299,20 @@ export function applyJobEvent(view, event) {
       break;
     case "message.delta":
       state.text = (state.text ?? "") + (p.delta ?? "");
-      view.lastMessage = { kind: "assistant", text: state.text, at: event.occurredAt };
+      if (!child) view.lastMessage = { kind: "assistant", text: state.text, at: event.occurredAt };
       text = preview(`assistant: ${state.text}`, 300);
       tailKey = key;
       break;
     case "reasoning.summary.delta":
       state.summary ??= [];
       state.summary[p.summaryIndex ?? 0] = (state.summary[p.summaryIndex ?? 0] ?? "") + (p.delta ?? "");
-      view.lastMessage = { kind: "reasoning", text: state.summary.join("\n"), at: event.occurredAt };
+      if (!child) view.lastMessage = { kind: "reasoning", text: state.summary.join("\n"), at: event.occurredAt };
       text = state.summary.join("\n").trim() ? `reasoning: ${state.summary.join("\n")}` : null;
       tailKey = key;
       break;
     case "message.completed": case "reasoning.completed": {
       const body = event.type === "message.completed" ? item.text ?? "" : (Array.isArray(item.summary) ? item.summary.join("\n") : item.summary ?? "");
-      view.lastMessage = { kind: event.type === "message.completed" ? "assistant" : "reasoning", text: body, at: event.occurredAt };
+      if (!child) view.lastMessage = { kind: event.type === "message.completed" ? "assistant" : "reasoning", text: body, at: event.occurredAt };
       tailKey = key;
       break;
     }
@@ -309,6 +340,7 @@ export function applyJobEvent(view, event) {
       break;
     }
     case "question.opened": {
+      if (child) break;
       const openedAt = event.occurredAt;
       const expires = p.expiresAt === undefined ? Date.parse(openedAt) + DEFAULT_INPUT_TIMEOUT_MS
         : p.expiresAt === null ? NaN : typeof p.expiresAt === "number" ? p.expiresAt : Date.parse(p.expiresAt);
@@ -318,6 +350,7 @@ export function applyJobEvent(view, event) {
       break;
     }
     case "question.resolved": case "question.closed":
+      if (child) break;
       if (view.pendingQuestion?.requestId === String(p.requestId)) {
         view.pendingQuestion = null;
         view.status = "running";

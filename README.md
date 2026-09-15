@@ -261,6 +261,10 @@ The live view unwraps recognized `zsh/bash/sh -lc/-c` command wrappers for activ
 
 live-view 的活动命令和 tail 会剥除可识别的 shell 包装，无法可靠解析时保留原文；命令完成行通过 exitCode/durationMs 字段提供退出码与耗时，不再拼进 tail 文本。待答问题新增 openedAt/expiresAt 时间字段，turn 起止只在 follow 中展示，不占 tail 行。原始事件 payload 不变。
 
+Native subagent activity binds the child thread to the same job, including notifications buffered before its identity arrived. Child events retain `derived.agent` and render with `[agent-name]` prefixes; tail rows also expose `agent`. The optional `subAgents` projection lists thread ID, short path, activity status and lifecycle timestamps. Child messages and questions do not replace the parent task's current message, question or status. Ownership is retained after child completion/interruption to capture late notifications.
+
+原生子 agent 的 started/interacted/interrupted/completed 活动均会建立同一 job 归属并回放缓冲通知；子线程事件以 derived.agent 标识来源，tail/follow 显示名称前缀。live-view 的可选 subAgents 字段记录生命周期，子线程内容不覆盖父线程的 lastMessage、待答问题或状态；完成后保留归属以记录迟到通知。
+
 事件全程保存，不依赖观察者。`follow` 适用于原生后台 agent 的阻塞 Bash 行；默认展示命令、消息预览、非空推理摘要、文件改动和调度者控制消息，`--verbose` 保留完整展示并输出 delta。`--quiet` 仅输出游标和终结行，等待时每60秒一行心跳，DONE 后不附结果；主线程另用 result 读取。默认命令输出预览最多120字符，assistant行最多300字符，完整事件与 lastMessage.text 不截断。`--max-seconds 540` 可在 Bash 时限前输出游标，下一次用 `--after` 续跟。`view-path` 返回 mod 可直接读取的原子投影文件，最多每秒更新五次，终态额外刷新。
 
 Writes are batched at 50 ms or 256 KiB and become visible only after durable commit. Histories rotate at 64 MiB, retain up to 1 GiB per job, and keep completed jobs for 30 days within a 20 GiB total budget. Retention removes oldest segments/jobs, never truncates individual payloads; expired cursors return `CURSOR_EXPIRED` and `earliestAvailableCursor`. Crashes or retention are marked as partial history. Legacy jobs do not acquire invented event history.

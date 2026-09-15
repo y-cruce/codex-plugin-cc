@@ -11,6 +11,7 @@ export class JobRuntime {
     this.jobs = new Map();
     this.owners = new Map();
     this.threads = new Map();
+    this.agents = new Map();
     this.pendingThreads = new Map();
     this.followers = new Map();
     this.reconciling = false;
@@ -75,6 +76,10 @@ export class JobRuntime {
         if (!history.events.length || history.events.at(-1).seq === history.committedSeq) break;
       } while (true);
       this.jobs.set(key, entry);
+      for (const agent of entry.view.subAgents ?? []) {
+        this.threads.set(agent.threadId, entry);
+        this.agents.set(agent.threadId, { threadId: agent.threadId, path: agent.path });
+      }
       if (entry.store.snapshot.committedSeq === "0") {
         await this.append(entry, { method: "companion/job-started", params: { job } });
         await entry.store.flush();
@@ -92,6 +97,14 @@ export class JobRuntime {
     const entry = this.owners.get(socket);
     if (!entry || !threadId) return;
     this.threads.set(threadId, entry);
+    this.agents.delete(threadId);
+    await this.bindThread(entry, threadId);
+  }
+
+  async bindThread(entry, threadId, agentPath) {
+    if (this.threads.has(threadId) && this.threads.get(threadId) !== entry) return;
+    this.threads.set(threadId, entry);
+    if (agentPath) this.agents.set(threadId, { threadId, path: agentPath.split("/").filter(Boolean).at(-1) ?? threadId });
     const buffered = this.pendingThreads.get(threadId) ?? [];
     this.pendingThreads.delete(threadId);
     for (const message of buffered) await this.observe(message);
@@ -102,7 +115,7 @@ export class JobRuntime {
     const threadId = p.threadId ?? p.thread?.id;
     const parentId = p.thread?.source?.subagent?.thread_spawn?.parent_thread_id;
     if (threadId && parentId && this.threads.has(parentId) && !this.threads.has(threadId)) {
-      this.threads.set(threadId, this.threads.get(parentId));
+      await this.bindThread(this.threads.get(parentId), threadId, p.thread?.name ?? threadId);
     }
     const entry = this.threads.get(threadId);
     if (!entry) {
@@ -113,20 +126,22 @@ export class JobRuntime {
       }
       return;
     }
-    if (p.item?.type === "collabAgentToolCall") {
+    await this.append(entry, message);
+    if (p.item?.type === "subAgentActivity" && p.item.agentThreadId) {
+      await this.bindThread(entry, p.item.agentThreadId, p.item.agentPath ?? p.item.agentThreadId);
+    } else if (p.item?.type === "collabAgentToolCall") {
       for (const childId of p.item.receiverThreadIds ?? []) {
-        if (!this.threads.has(childId)) this.threads.set(childId, entry);
-        for (const buffered of this.pendingThreads.get(childId) ?? []) await this.observe(buffered);
-        this.pendingThreads.delete(childId);
+        await this.bindThread(entry, childId, this.agents.get(childId)?.path ?? childId);
       }
     }
-    await this.append(entry, message);
   }
 
   async append(entry, message) {
     if (entry.failure) return;
     try {
       const event = normalizeJobEvent(structuredClone(message), entry.job);
+      const agent = this.agents.get(event.threadId);
+      if (agent) event.derived = { ...event.derived, agent: { ...agent } };
       try { entry.store.append(event); }
       catch (error) {
         if (error.code !== "HISTORY_BACKPRESSURE") throw error;
