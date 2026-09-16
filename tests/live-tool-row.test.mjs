@@ -444,7 +444,7 @@ describe('live row polish', () => {
     accept({ type: "subAgentActivity", id: "spawn", agentThreadId: "child", agentPath: "/root/baseline", kind: "started" }, false, "item/started");
     accept({ type: "commandExecution", id: "cmd", command: "pwd", cwd: "/work" }, true, "item/started");
     accept({ type: "agentMessage", id: "after", text: "**parent** after" });
-    assert.deepEqual(texts().slice(2), ["› parent before", "⇢ baseline · running · $ pwd", "› parent after"]);
+    assert.deepEqual(texts().slice(2), ["› parent before", " ", "⇢ baseline · running · $ pwd", " ", "› parent after"]);
     const anchor = texts().findIndex(text => text.startsWith("⇢"));
     accept({ type: "agentMessage", id: "child-message", text: "old child message" }, true);
     accept({ type: "commandExecution", id: "cmd", command: "pwd", exitCode: 1, aggregatedOutput: "old child warning" }, true);
@@ -484,7 +484,7 @@ describe('live row polish', () => {
       { seq: "99", positionSeq: "1", at: data.startedAt, type: "command.completed", text: "$ parent before" },
       { seq: "3", positionSeq: "3", at: data.startedAt, type: "message.completed", text: "parent after" },
     ];
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working", "› parent after"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working", " ", "› parent after"]);
     data.tail.pop();
     assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working"]);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null }];
@@ -687,7 +687,7 @@ describe('Markdown and prompt footer', () => {
     ];
     const ui = $.ui.resolve(row());
     let tree = liveTree(ui, data, 120, 0);
-    assert.match(textOf(tree), /› older\n› Full answer\nconst full = true\n… \*\*plain\*\* `raw`/);
+    assert.match(textOf(tree), /› older\n \n› Full answer\nconst full = true\n \n… \*\*plain\*\* `raw`/);
     assert.equal(rowsOf(tree).at(-1).props.dimColor, true);
     tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
     assert.equal(rowsOf(tree)[1].props.bold, true);
@@ -840,5 +840,78 @@ describe('table layout, body indent and startup noise', () => {
     assert.equal(statusText([data], now), `Codex · 1 running · fixture task 0s ${'中文'.repeat(7)}中`);
     data.tail = [];
     assert.equal(statusText([data], now), 'Codex · 1 running · fixture task 0s');
+  });
+});
+
+describe('transcript block spacing', () => {
+  test('spaces mixed blocks without separating compact rows or changing the entry budget', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.subAgents = [{ threadId: 'child', path: 'review', status: 'started', endedAt: null, startedSeq: '5', lastActivity: '$ inspect' }];
+    data.tail = [
+      { type: 'source.warning', text: 'Warning: timeout clamped' },
+      { type: 'command.completed', text: '$ git status', exitCode: 0 },
+      { type: 'message.completed', text: 'assistant: I will check the contract.' },
+      { type: 'command.completed', text: '$ rg requestId', exitCode: 1, durationMs: 400 },
+      { type: 'agent.activity', agentThreadId: 'child', text: '⇢ sub-agent review started' },
+      { type: 'command.completed', text: '$ validate ⏎ validation failed', exitCode: 1 },
+      { type: 'question.resolved', text: 'delivered' },
+      { type: 'reasoning.completed', text: 'reasoning: Check the result.' },
+      { type: 'message.completed', text: 'assistant: Finished.' },
+      { type: 'source.warning', text: 'Warning: final note' },
+    ].map((event, index) => ({ ...event, seq: String(index + 1), at: data.startedAt }));
+    const original = JSON.stringify(data);
+    const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt), 48)).map(textOf);
+    assert.deepEqual(rendered.slice(1), [
+      ' ', 'Warning: timeout clamped', '● $ git status',
+      ' ', '› I will check the contract.',
+      ' ', '● $ rg requestId · 0.4s', '⇢ review · running · $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
+      ' ', '… Check the result.',
+      ' ', '› Finished.',
+      ' ', 'Warning: final note',
+    ]);
+    assert.ok(rendered[0].startsWith('● Codex'));
+    assert.notEqual(rendered.at(-1), ' ');
+    assert.ok(rendered.every((text, index) => text !== ' ' || rendered[index - 1] !== ' '));
+    assert.equal(JSON.stringify(data), original);
+  });
+  test('treats each prose kind as a block and keeps a pending question together', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const render = () => rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt))).map(textOf).slice(1);
+    for (const type of ['message.completed', 'reasoning.completed', 'question.opened', 'director.notified', 'control.message.updated']) {
+      data.tail = [{ type: 'command.started', text: '$ before' }, { type, text: 'body' }, { type: 'command.started', text: '$ after' }];
+      const lines = render();
+      assert.deepEqual(lines.slice(0, 3), [' ', '$ before', ' ']);
+      assert.ok(lines[3].endsWith('body'));
+      assert.deepEqual(lines.slice(4), [' ', '$ after']);
+      data.tail = [{ type, text: 'body' }];
+      assert.equal(render().length, 2, 'only the existing header gap surrounds a lone block');
+    }
+    data.pendingQuestion = { requestId: 'q', text: 'Which source?\nChoose one.', openedAt: data.startedAt, expiresAt: null };
+    data.tail = [{ type: 'command.started', text: '$ after' }, { type: 'source.warning', text: 'Warning: note' }];
+    assert.deepEqual(render(), ['? Which source?\nChoose one.', 'waiting 0s', ' ', '$ after', 'Warning: note']);
+    data.pendingQuestion = null;
+    data.activeCommands = fixture().activeCommands;
+    data.files = fixture().files;
+    assert.deepEqual(render(), ['$ npm test · 0s', '✎ main.ts (+3 −1)', '$ after', 'Warning: note']);
+  });
+  test('separates result prose from files and agents without leading or trailing gaps', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.subAgents = [{ threadId: 'child', path: 'review', status: 'completed', endedAt: data.startedAt, lastActivity: 'done' }];
+    const render = () => rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt), undefined, { kind: 'DONE' })).map(textOf).slice(1);
+    for (const kind of ['assistant', 'reasoning']) {
+      data.lastMessage = { kind, text: 'Final answer', at: data.startedAt };
+      data.files = fixture().files;
+      assert.deepEqual(render(), ['Final answer', ' ', '✎ main.ts (+3 −1)', '⇢ review · done · done']);
+      data.files = [];
+      assert.deepEqual(render(), ['Final answer', ' ', '⇢ review · done · done']);
+    }
+    data.lastMessage = null;
+    assert.deepEqual(render(), ['⇢ review · done · done']);
+    data.lastMessage = fixture().lastMessage;
+    data.subAgents = [];
+    assert.deepEqual(render(), ['Checking the change']);
   });
 });

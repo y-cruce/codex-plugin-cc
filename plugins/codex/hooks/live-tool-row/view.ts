@@ -90,8 +90,21 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const heading = lines.pop()!
   columns = Math.max(1, columns - 2)
   const tree = () => Box({ flexDirection: 'column', children: [heading, Box({ flexDirection: 'column', paddingLeft: 2, children: Box({ flexDirection: 'column', width: columns, children: lines }) })] })
-  const add = (text: string, props: TextProps = {}) => lines.push(Text({ ...props, wrap: 'truncate-end', children: clip(text, columns) }))
-  const prose = (text: string, props: TextProps = {}) => lines.push(Text({ ...props, wrap: 'wrap', children: clean(text) }))
+  let previousBlock = false
+  let hasContent = false
+  const separate = (block: boolean) => {
+    if (hasContent && (block || previousBlock)) lines.push(Text({ children: ' ' }))
+    previousBlock = block
+    hasContent = true
+  }
+  const add = (text: string, props: TextProps = {}) => {
+    separate(false)
+    lines.push(Text({ ...props, wrap: 'truncate-end', children: clip(text, columns) }))
+  }
+  const prose = (text: string, props: TextProps = {}, block = true) => {
+    separate(block)
+    lines.push(Text({ ...props, wrap: 'wrap', children: clean(text) }))
+  }
   const files = () => {
     for (const file of data.files.slice(0, 3)) {
       const counts = ` (+${file.additions ?? '?'} −${file.deletions ?? '?'})`
@@ -101,16 +114,20 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   }
   if (result) {
     if (data.lastMessage?.kind === 'reasoning') prose(data.lastMessage.text, { dimColor: true })
-    else if (data.lastMessage) lines.push(...markdown(ui, data.lastMessage.text, {}, '', columns))
+    else if (data.lastMessage) {
+      separate(true)
+      lines.push(...markdown(ui, data.lastMessage.text, {}, '', columns))
+    }
     files()
     for (const agent of agentSummaries(data)) add(agent.text, { dimColor: true })
     return tree()
   }
   if (data.pendingQuestion) {
     prose(`? ${data.pendingQuestion.text}`, { color: 'magenta', bold: true })
-    add(waiting(data.pendingQuestion.openedAt, data.pendingQuestion.expiresAt, now), { dimColor: true })
+    lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(waiting(data.pendingQuestion.openedAt, data.pendingQuestion.expiresAt, now), columns) }))
   }
   for (const command of data.activeCommands.filter(command => !command.agentThreadId).slice(0, 3)) {
+    separate(false)
     lines.push(Text({ wrap: 'truncate-middle', children: `$ ${clean(command.command).replaceAll('\n', ' ')} · ${elapsed(command.startedAt, now)}` }))
   }
   files()
@@ -135,7 +152,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (tail.includes(event)) grouped.push(event)
   })
   for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push({ seq: '', at: '', type: 'agent.summary', text: agent.text })
-  if (grouped.length) lines.push(Text({ children: ' ' }))
+  if (grouped.length && !hasContent) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
   const newest = kind ? grouped.findLastIndex(event => !event.agent && typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')) : -1
@@ -143,10 +160,11 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     const type = typeOf(event)
     if (type === 'agent.summary') return add(event.text, { dimColor: true })
     if (type === 'question.resolved') {
-      prose('→ answer delivered', { color: 'cyan' })
+      add('→ answer delivered', { color: 'cyan' })
       return
     }
     if (type.startsWith('command')) {
+      separate(false)
       const completed = type === 'command.completed'
       const color = completed ? event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
       const suffix = completed && event.durationMs != null ? ` · ${duration(event.durationMs)}` : ''
@@ -164,8 +182,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     const color = /error|failed/.test(type) ? 'red' : type.startsWith('question') ? 'magenta' : (type.startsWith('director') || type.startsWith('control.message')) ? 'cyan' : undefined
     const text = index === newest ? data.lastMessage!.text : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
     const props = { color, dimColor: type === 'source.warning' || type.startsWith('reasoning') || (!prefix && !color) }
-    if (type.startsWith('message')) lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && type.endsWith('.delta')))
-    else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props)
+    if (type.startsWith('message')) {
+      separate(true)
+      lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && type.endsWith('.delta')))
+    } else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
   })
   return tree()

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.5
+
+- Separate live transcript prose blocks with blank lines while keeping command, file and agent rows compact; result cards separate the final message from file and agent summaries.
+
 ## 1.2.4
 
 - Group each Codex sub-agent into one anchored live row with its name, status and latest activity; result and intermediate cards keep one summary per agent. Child commands and output no longer interleave with the parent trace.
