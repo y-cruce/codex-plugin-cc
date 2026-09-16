@@ -81,7 +81,7 @@ async function follow(location, job, options) {
   catch (error) { client?.close(); throw error; }
   let cursor = options.after ?? cursorFor({ jobId: job.id, streamId: initial.streamId }, BigInt(initial.earliestSeq) - 1n);
   let finished = false;
-  let lastProgress = Date.parse(job.startedAt ?? job.createdAt) || Date.now();
+  let lastProgress = followStartedAt;
   let lastThread = job.threadId;
   let resolveDone;
   let rejectDone;

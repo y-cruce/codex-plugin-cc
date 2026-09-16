@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.6
+
+- Measure `observe follow` stalls from the current follow session and subsequent event progress, preventing immediate false STALLED results when resuming long-running jobs.
+
 ## 1.2.5
 
 - Separate live transcript prose blocks with blank lines while keeping command, file and agent rows compact; result cards separate the final message from file and agent summaries.

@@ -314,6 +314,23 @@ test("events reports a stall once per interval and new progress resets the inter
   ]);
 });
 
+test("events uses recent log progress when monitoring an hour-old job", async () => {
+  const started = Date.now();
+  let clock = started;
+  const logFile = path.join(makeTempDir(), "job.log");
+  fs.writeFileSync(logFile, "still working\n");
+  const current = { ...job, startedAt: new Date(started - 60 * 60000).toISOString(), logFile };
+  const lines = await monitor(Array.from({ length: 3 }, () => ({ running: [current] })), {
+    now: () => clock,
+    status: async () => {
+      fs.utimesSync(logFile, new Date(clock), new Date(clock));
+      clock += 60000;
+      return {};
+    }
+  });
+  assert.deepEqual(lines, []);
+});
+
 test("live broker deadline closes a socket even when initialize never replies", async (t) => {
   const root = makeTempDir("codex-live-deadline-");
   const socketPath = path.join(root, "broker.sock");
