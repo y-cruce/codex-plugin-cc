@@ -77,8 +77,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
           tool: text === "unknown-tool" ? "other_tool" : "notify_director",
           arguments: text === "notify-missing" ? {} : { message: notification ? notification[1] : 42 }
         } });
-      } else if (text === "ask") {
+      } else if (text === "ask" || text === "ask and notify") {
         ask(thread);
+        if (text === "ask and notify") send({ id: `tool-${thread.turnId}`, method: "item/tool/call", params: {
+          threadId: thread.id, turnId: thread.turnId, callId: `tool-${thread.turnId}`,
+          tool: "notify_director", arguments: { message: "Source decision needed" }
+        } });
       } else if (text === "approve") {
         pendingQuestion = { id: "approval-1", thread };
         send({ id: "approval-1", method: "item/fileChange/requestApproval", params: {

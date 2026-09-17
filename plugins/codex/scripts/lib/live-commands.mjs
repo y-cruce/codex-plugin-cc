@@ -5,7 +5,7 @@ import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { buildSingleJobSnapshot } from "./job-control.mjs";
 
 async function withLiveClient(cwd, action, options = {}) {
-  const endpoint = process.env[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint;
+  const endpoint = options.brokerEndpoint ?? process.env[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint;
   if (!endpoint) throw new Error("No live broker found. This task cannot receive messages; do not start another runtime for its thread.");
   const client = await CodexAppServerClient.connect(cwd, { ...options, brokerEndpoint: endpoint });
   try {
@@ -15,10 +15,10 @@ async function withLiveClient(cwd, action, options = {}) {
   }
 }
 
-export async function liveStatus(cwd, job) {
+export async function liveStatus(cwd, job, options = {}) {
   if (!job.threadId) return null;
   try {
-    return await withLiveClient(cwd, (client) => client.request("broker/status", { threadId: job.threadId }), { brokerTimeoutMs: 5000 });
+    return await withLiveClient(cwd, (client) => client.request("broker/status", { threadId: job.threadId }), { brokerTimeoutMs: 5000, ...options });
   } catch (error) {
     return { unavailable: error.message };
   }

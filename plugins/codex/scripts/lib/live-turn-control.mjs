@@ -109,7 +109,8 @@ export class LiveTurnControl {
       }
       this.client.respond(message.id, { contentItems: [{ type: "inputText", text: "Delivered to the director." }], success: true });
       const notification = { id: crypto.randomBytes(6).toString("hex"), message: p.arguments.message,
-        turnId: p.turnId, receivedAt: new Date().toISOString() };
+        turnId: p.turnId, receivedAt: new Date().toISOString(),
+        ...(state.questions[0] ? { pendingRequestId: state.questions[0].requestId } : {}) };
       state.notifications.push(notification);
       this.notify({ method: "companion/notification", params: { threadId: p.threadId, ...notification } });
       return true;

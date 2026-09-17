@@ -1,6 +1,8 @@
 import { setTimeout } from "node:timers/promises";
 import { buildStatusSnapshot, checkJobLiveness, DEFAULT_STALL_MS, lastJobProgressAt, readStoredJob } from "./job-control.mjs";
 import { acknowledgeNotifications, liveStatus } from "./live-commands.mjs";
+import { resolveStateDir } from "./state.mjs";
+import { claimQuestion } from "./question-report.mjs";
 
 export const DEFAULT_QUESTION_REMIND_MS = 120000;
 
@@ -16,6 +18,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const writeLine = dependencies.writeLine ?? ((line) => process.stdout.write(`${line}\n`));
   const now = dependencies.now ?? Date.now;
   const progressAt = dependencies.progressAt ?? lastJobProgressAt;
+  const claim = dependencies.claimQuestion ?? ((cwd, jobId, requestId) => claimQuestion(resolveStateDir(cwd), jobId, requestId));
   const active = new Set();
   const questions = new Map();
   const notifications = new Set();
@@ -61,7 +64,10 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           }
           continue;
         }
-        writeLine(`QUESTION ${jobPrefix} request=${question.requestId} ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+        const first = await claim(report.workspaceRoot ?? cwd, job.id, question.requestId);
+        const text = oneLine(question.questions?.[0]?.question).slice(0, 200);
+        writeLine(first ? `QUESTION ${jobPrefix} request=${question.requestId} ${text}`
+          : `QUESTION_PENDING ${jobPrefix} request=${question.requestId} still unanswered: ${text}`);
         lastActiveAt = now();
         questions.set(key, { firstSeenAt: lastActiveAt, reportedAt: lastActiveAt });
       }
@@ -73,7 +79,9 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           continue;
         }
         for (const note of pending) {
-          writeLine(`NOTIFIED ${jobPrefix} thread=${job.threadId ?? "unknown"} ${oneLine(note.message)}`);
+          const requestId = note.pendingRequestId;
+          const pendingField = requestId == null ? "" : ` pending_request=${requestId}`;
+          writeLine(`NOTIFIED ${jobPrefix} thread=${job.threadId ?? "unknown"}${pendingField} ${oneLine(note.message)}`);
           lastActiveAt = now();
           notifications.add(`${job.id}:${note.id}`);
         }

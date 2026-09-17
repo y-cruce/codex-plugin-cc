@@ -186,6 +186,10 @@ test("QUESTION exits with cursor and successful answers appear before terminal o
   await waitFor(() => JSON.parse(h.cli("status", jobId, "--json").stdout).job.status === "completed", "completed answer job");
   const result = h.cli("result", jobId);
   assert.equal(result.status, 0, result.stderr);
+  const stale = await h.child("observe", "follow", jobId).done;
+  assert.equal(stale.code, 0, stale.stderr);
+  assert.doesNotMatch(stale.stdout, /^QUESTION(?:_PENDING)? /m);
+  assert.match(stale.stdout, /^DONE /m);
   await sendBrokerShutdown(h.endpoint);
   await h.closed;
   const followed = await h.child("observe", "follow", jobId, "--after", savedCursor).done;
@@ -198,6 +202,24 @@ test("QUESTION exits with cursor and successful answers appear before terminal o
   const rows = replay.stdout.trim().split("\n").map(JSON.parse);
   assert.ok(rows.some((event) => event.type === "question.resolved"));
   assert.equal(rows.at(-1).type, "end");
+  const offline = await h.child("observe", "follow", jobId).done;
+  assert.equal(offline.code, 0, offline.stderr);
+  assert.match(offline.stdout, /^QUESTION_PENDING job=.*request=question-1 still unanswered: Which source\?$/m);
+  assert.doesNotMatch(offline.stdout, /^QUESTION /m);
+});
+
+test("follow notification records the pending request at emission", async (t) => {
+  const h = await setup(t);
+  const jobId = await h.start("ask and notify", "pending notification");
+  const question = await h.child("observe", "follow", jobId, "--quiet").done;
+  assert.match(question.stdout, /^QUESTION job=/m);
+  const notified = await h.child("observe", "follow", jobId, "--after", cursor(question.stdout), "--quiet").done;
+  assert.equal(notified.code, 0, notified.stderr);
+  assert.match(notified.stdout, /^NOTIFIED job=.*pending_request=question-1 Source decision needed$/m);
+  const repeated = await h.child("observe", "follow", jobId, "--quiet").done;
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.match(repeated.stdout, /^QUESTION_PENDING job=.*request=question-1 still unanswered: Which source\?$/m);
+  assert.doesNotMatch(repeated.stdout, /^QUESTION /m);
 });
 
 test("unknown view path is a structured nonzero lookup failure", async (t) => {

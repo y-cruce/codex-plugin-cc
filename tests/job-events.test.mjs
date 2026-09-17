@@ -24,6 +24,7 @@ async function monitor(reports, handlers = {}, options = {}) {
     status: async () => ({}),
     readJob: () => null,
     acknowledge: async () => assert.fail("Unexpected acknowledgement"),
+    claimQuestion: async () => true,
     ...handlers,
     writeLine: (line) => {
       lines.push(line);
@@ -147,13 +148,13 @@ for (const terminal of ["completed", "failed"]) {
       status: async () => {
         clock = poll++ * 120000;
         return { questions: [{ requestId: "request-1", questions: [{ question: "Choose?" }] }],
-          notifications: [{ id: "note-1", message: "Ready" }] };
+          notifications: [{ id: "note-1", message: "Ready", pendingRequestId: "request-1" }] };
       },
       acknowledge: async () => {}
     }, { stallMs: 120000 });
     assert.deepEqual(lines, [
       "QUESTION job=job-1 [answer validation] request=request-1 Choose?",
-      "NOTIFIED job=job-1 [answer validation] thread=thread-1 Ready",
+      "NOTIFIED job=job-1 [answer validation] thread=thread-1 pending_request=request-1 Ready",
       "STALLED job=job-1 [answer validation] thread=thread-1 2m without progress",
       "QUESTION_PENDING job=job-1 [answer validation] request=request-1 2m unanswered: Choose?",
       terminal === "completed" ? "DONE job=job-1 [answer validation] thread=thread-1" : "FAILED job=job-1 [answer validation] thread=thread-1 Stopped"
@@ -168,6 +169,20 @@ test("events reports each request once and limits the first question to one line
     ] }] })
   });
   assert.deepEqual(lines, [`QUESTION job=job-1 request=request-1 Choose ${"x".repeat(193)}`]);
+});
+
+test("events omits answered questions and marks notifications with pending requests", async () => {
+  let poll = 0;
+  const lines = await monitor([{ running: [job] }, { running: [job] }], {
+    status: async () => ++poll === 1
+      ? { questions: [{ requestId: 8, questions: [{ question: "Choose?" }] }], notifications: [{ id: "note-1", message: "Need choice", pendingRequestId: 8 }] }
+      : { questions: [], notifications: [] },
+    acknowledge: async () => {}
+  });
+  assert.deepEqual(lines, [
+    "QUESTION job=job-1 request=8 Choose?",
+    "NOTIFIED job=job-1 thread=thread-1 pending_request=8 Need choice"
+  ]);
 });
 
 test("events reminds pending questions at two-minute intervals and stops when removed or finished", async () => {

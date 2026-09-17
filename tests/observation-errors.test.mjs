@@ -77,10 +77,10 @@ async function followWithClock(t, observe) {
   client.socket = { pause() {}, resume() {} };
   client.close = () => {};
   let seq = 1;
-  const emit = async (type, receivedAt = Date.now()) => {
+  const emit = async (type, receivedAt = Date.now(), params = { job: h.job, delta: "live progress" }) => {
     client.emit("notification", { method: "broker/observation", params: { ...page, events: [{
       type, seq: String(++seq), receivedAt: new Date(receivedAt).toISOString(),
-      threadId: h.job.threadId, source: { message: { params: { job: h.job, delta: "live progress" } } }
+      threadId: h.job.threadId, source: { message: { params } }
     }] } });
     await setImmediate();
   };
@@ -103,6 +103,15 @@ async function followWithClock(t, observe) {
   assert.deepEqual(requests, [{ method: "broker/observe-follow", params: { cwd: h.cwd, jobId: h.job.id, after: page.nextCursor } }]);
   return output;
 }
+
+test("follow reports a question when live pending state is unavailable", async (t) => {
+  const output = await followWithClock(t, async ({ emit, started }) => {
+    await emit("question.opened", started, { requestId: "request-1", questions: [{ question: "Choose?" }] });
+  });
+  assert.match(output, /^CURSOR: /m);
+  assert.match(output, /^QUESTION job=task-errors .*request=request-1 Choose\?$/m);
+  assert.doesNotMatch(output, /^DONE /m);
+});
 
 test("resumed follow of an hour-old active job waits for progress and reaches DONE", async (t) => {
   const output = await followWithClock(t, async ({ tick, emit, started }) => {

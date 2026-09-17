@@ -9,6 +9,8 @@ import { readHistory, cursorFor, cleanupHistory } from "./job-event-store.mjs";
 import { createLiveView, renderJobEvent } from "./job-event-model.mjs";
 import { ObservationClient } from "./observation-client.mjs";
 import { readObservationJson, observationRoots, observationJobs, resolveObservationRoot } from "./observation-paths.mjs";
+import { liveStatus } from "./live-commands.mjs";
+import { claimQuestion } from "./question-report.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ");
@@ -41,11 +43,22 @@ function prefix(job) {
   return `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;
 }
 
-function eventExit(event, job, until) {
+async function eventExit(event, job, until, location) {
   const p = event.source.message.params;
   const threadId = event.threadId ?? job.threadId ?? "unknown";
-  if (event.type === "question.opened") return `QUESTION ${prefix(job)} request=${p.requestId} ${oneLine(p.questions?.[0]?.question).slice(0, 200)}`;
-  if (event.type === "director.notified" && until !== "done") return `NOTIFIED job=${job.id} thread=${threadId} ${oneLine(p.message)}`;
+  if (event.type === "question.opened") {
+    const endpoint = location.fallback ? (await readObservationJson(path.join(location.stateDir, "broker.json")))?.endpoint : undefined;
+    const live = await liveStatus(location.cwd, { threadId }, { brokerEndpoint: endpoint });
+    if (Array.isArray(live?.questions) && !live.questions.some((question) => String(question.requestId) === String(p.requestId))) return null;
+    const first = await claimQuestion(location.stateDir, job.id, p.requestId);
+    const text = oneLine(p.questions?.[0]?.question).slice(0, 200);
+    return first ? `QUESTION ${prefix(job)} request=${p.requestId} ${text}`
+      : `QUESTION_PENDING ${prefix(job)} request=${p.requestId} still unanswered: ${text}`;
+  }
+  if (event.type === "director.notified" && until !== "done") {
+    const pending = p.pendingRequestId == null ? "" : ` pending_request=${p.pendingRequestId}`;
+    return `NOTIFIED job=${job.id} thread=${threadId}${pending} ${oneLine(p.message)}`;
+  }
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
     if (event.type === "job.completed") return `DONE ${prefix(job)} thread=${threadId}`;
     return `FAILED ${prefix(job)} thread=${threadId} ${oneLine(p.job?.errorMessage ?? p.job?.result?.error?.message ?? "unknown")}`;
@@ -107,7 +120,7 @@ async function follow(location, job, options) {
       lastProgress = Math.max(lastProgress, Date.parse(event.receivedAt) || 0);
       const text = renderJobEvent(event, { verbose: Boolean(options.verbose) });
       if (text != null && !options.quiet) await write(`${clock(event.occurredAt)} ${text}\n`);
-      const exit = eventExit(event, job, until);
+      const exit = await eventExit(event, job, until, location);
       if (exit) { await finish(exit); return; }
     }
     if (!page.events.length) cursor = page.nextCursor;
