@@ -105,7 +105,9 @@ export function assertCanonicalEventDraft(event) {
   return event;
 }
 
-export function createCanonicalEvent({ job, executor = "codex", type, identity = {}, occurredAt, receivedAt, timeBasis = "received", payload, source, agent }) {
+/** @typedef {import("./executor-events.js").CanonicalIdentity} CanonicalIdentity */
+
+export function createCanonicalEvent({ job, executor = "codex", type, identity = /** @type {Partial<CanonicalIdentity>} */ ({}), occurredAt, receivedAt, timeBasis = "received", payload, source, agent }) {
   const jobId = job.id ?? job.jobId;
   const received = receivedAt ?? new Date().toISOString();
   const event = {
