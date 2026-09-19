@@ -26,6 +26,7 @@ type State = {
   opened: boolean
   selected: string | null
   followed: Set<string>
+  unreadable: Set<string>
 }
 
 const PANE = 'codex_tasks'
@@ -106,6 +107,7 @@ async function poll($: EngineInterface, state: State) {
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; text: string }[] = []
     for (const { job, cwd } of found) {
+      if (state.unreadable.has(job.id)) continue
       try {
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
@@ -134,6 +136,7 @@ async function poll($: EngineInterface, state: State) {
           receipt.terminal = status
         }
       } catch (error) {
+        state.unreadable.add(job.id)
         $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
@@ -216,7 +219,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
-    followed,
+    followed, unreadable: new Set<string>(),
   }
 
   on('session.start', async ($, e, next) => {

@@ -13,6 +13,23 @@ const DOT: Record<string, string> = {
 
 const DONE = ['completed', 'failed', 'cancelled']
 
+// Cutting to a length is not clip's job here: clip flattens every newline into
+// a space, and a message that loses its line breaks loses its Markdown with
+// them -- headings and tables arrive as one run of pipes.
+function shorten(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit)}\u2026`
+}
+
+// A tab only has to be recognizable, so it may lose its end -- but a cut made
+// mid-word ("interrupt semant") reads as noise rather than as a cut. Land it on
+// a word boundary where there is one worth keeping, and say that it happened.
+function tabLabel(text: string, columns: number): string {
+  if (clip(text, columns) === text) return text
+  const room = clip(text, Math.max(1, columns - 1))
+  const cut = room.lastIndexOf(' ')
+  return `${(cut > columns / 2 ? room.slice(0, cut) : room).trimEnd()}…`
+}
+
 export function paneBody(
   ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Button'>,
   jobs: LiveView[],
@@ -44,7 +61,7 @@ export function paneBody(
   const tabs = jobs.map((data, index) => {
     const isFocused = data.jobId === focused.jobId
     const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
-    const label = clip(`${index + 1} ${data.label}${executor}`, isFocused ? focusedWidth : share)
+    const label = tabLabel(`${index + 1} ${data.label}${executor}`, isFocused ? focusedWidth : share)
     return Box({ flexDirection: 'row', children: [
       Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸' : '·' }),
       Button({ key: `codex_tab_${data.jobId}`, label, plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId) }),
@@ -56,8 +73,8 @@ export function paneBody(
   // pane shows what a task is doing, not a whole answer.
   const trimmed: LiveView = {
     ...focused,
-    lastMessage: focused.lastMessage ? { ...focused.lastMessage, text: clip(focused.lastMessage.text, 2000) } : null,
-    tail: focused.tail.map(event => ({ ...event, text: clip(event.text, 1000) })),
+    lastMessage: focused.lastMessage ? { ...focused.lastMessage, text: shorten(focused.lastMessage.text, 2000) } : null,
+    tail: focused.tail.map(event => ({ ...event, text: shorten(event.text, 1000) })),
   }
 
   // The body is the same card the follow row draws: it already groups commands,
@@ -73,6 +90,6 @@ export function paneBody(
   return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
     Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: tabs }),
     Box({ marginTop: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL)] }),
-    ...(jobs.length > 1 ? [Text({ dimColor: true, dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
+    ...(jobs.length > 1 ? [Text({ dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
   ] })
 }
