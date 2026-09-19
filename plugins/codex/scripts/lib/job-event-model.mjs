@@ -165,7 +165,9 @@ function updateTail(view, event, text, key = null) {
   }
   const prior = key && view._items[key]?.tailSeq;
   const index = prior ? view.tail.findIndex((entry) => entry.seq === prior) : -1;
-  const moveToEnd = index >= 0 && (event.type === "message.completed" || event.type === "reasoning.completed");
+  const resumedStream = index >= 0 && index < view.tail.length - 1
+    && (event.type === "message.delta" || event.type === "reasoning.summary.delta");
+  const moveToEnd = index >= 0 && (resumedStream || event.type === "message.completed" || event.type === "reasoning.completed");
   row.positionSeq = index >= 0 && !moveToEnd ? view.tail[index].positionSeq ?? view.tail[index].seq : row.seq;
   if (moveToEnd) view.tail.splice(index, 1);
   if (index >= 0 && !moveToEnd) view.tail[index] = row;

@@ -46,7 +46,7 @@ test("message deltas fold into one row, survive snapshot restoration and retain 
   assert.equal(restored.history.committedSeq, "2");
 });
 
-test("completed streaming messages move after intervening tools while in-progress rows stay anchored", () => {
+test("streaming messages follow resumed activity and still finish after intervening tools", () => {
   const job = { id: "job-acp", executor: "acp", threadId: "session-1" };
   const view = createLiveView(job);
   let seq = 0;
@@ -74,12 +74,32 @@ test("completed streaming messages move after intervening tools while in-progres
   accept("tool.completed", { toolCallId: "tool-1" }, { tool: { ...startedTool, status: "completed" } });
   assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed"]);
 
+  accept("message.delta", { messageId: "message-1" }, { role: "assistant", block: { type: "text", text: " done" } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["tool.started", "tool.completed", "message.delta"]);
+  assert.equal(view.tail.at(-1).text, "assistant: working... done");
+  assert.equal(view.tail.at(-1).positionSeq, "5");
+
   accept("message.completed", { messageId: "message-1" }, { message: {
     messageId: "message-1", role: "assistant", content: [{ type: "text", text: "working... done" }], text: "working... done"
   } });
   assert.deepEqual(view.tail.map((row) => row.type), ["tool.started", "tool.completed", "message.completed"]);
-  assert.deepEqual(view.tail.map((row) => row.seq), ["3", "4", "5"]);
+  assert.deepEqual(view.tail.map((row) => row.seq), ["3", "4", "6"]);
   assert.ok(view.tail.every((row, index) => index === 0 || BigInt(row.seq) > BigInt(view.tail[index - 1].seq)));
+});
+
+test("short Codex messages and command lifecycle keep their compact rows", () => {
+  const { view, accept } = harness();
+  accept("item/agentMessage/delta", { itemId: "message", delta: "short " });
+  accept("item/agentMessage/delta", { itemId: "message", delta: "answer" });
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta"]);
+  assert.equal(view.tail[0].positionSeq, "1");
+  accept("item/completed", { item: { type: "agentMessage", id: "message", text: "short answer" } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.completed"]);
+
+  accept("item/started", { item: { type: "commandExecution", id: "command", command: "pwd", cwd: "/repo" } });
+  accept("item/completed", { item: { type: "commandExecution", id: "command", command: "pwd", exitCode: 0 } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.completed", "command.completed"]);
+  assert.deepEqual(view.tail.map((row) => row.positionSeq), ["3", "4"]);
 });
 
 test("command output updates one item while completion removes active command", () => {
