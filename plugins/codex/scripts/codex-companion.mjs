@@ -550,6 +550,7 @@ async function executeTaskRun(request) {
     args: request.executorArgs,
     modeId: request.executorMode,
     modelId: request.executorModel,
+    effortId: request.executorEffort,
     title: taskMetadata.title
   });
 
@@ -677,7 +678,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
 }
 
 function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId,
-  executor, executorCommand, executorArgs, executorMode, executorModel }) {
+  executor, executorCommand, executorArgs, executorMode, executorModel, executorEffort }) {
   return {
     cwd,
     model,
@@ -694,7 +695,8 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     executorCommand,
     executorArgs,
     executorMode,
-    executorModel
+    executorModel,
+    executorEffort
   };
 }
 
@@ -848,7 +850,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -866,6 +868,7 @@ async function handleTask(argv) {
   let executorArgs = [];
   let executorMode = null;
   let executorModel = null;
+  let executorEffort = null;
   if (executor === "acp") {
     executorCommand = options["executor-command"] ?? process.env.CODEX_COMPANION_ACP_COMMAND ?? null;
     const executorArgsText = options["executor-args"] ?? process.env.CODEX_COMPANION_ACP_ARGS ?? "[]";
@@ -876,6 +879,7 @@ async function handleTask(argv) {
     }
     executorMode = options["executor-mode"] ?? process.env.CODEX_COMPANION_ACP_MODE ?? null;
     executorModel = options["executor-model"] ?? process.env.CODEX_COMPANION_ACP_MODEL ?? null;
+    executorEffort = options["executor-effort"] ?? process.env.CODEX_COMPANION_ACP_EFFORT ?? null;
     if (!executorCommand) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
   }
 
@@ -922,7 +926,8 @@ async function handleTask(argv) {
     executorCommand,
     executorArgs,
     executorMode,
-    executorModel
+    executorModel,
+    executorEffort
   });
   job.request = request;
 
@@ -1018,7 +1023,11 @@ async function handleTaskWorker(argv) {
 }
 
 async function handleEvents(argv) {
-  const { options } = parseCommandInput(argv, { valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms"] });
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms"],
+    rejectUnknownOptions: true,
+    optionContext: "events"
+  });
   const pollMs = Number(options["poll-ms"] ?? 2000);
   if (!Number.isSafeInteger(pollMs) || pollMs <= 0 || pollMs > 2147483647) {
     throw new Error("--poll-ms must be a positive integer no greater than 2147483647.");

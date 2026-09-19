@@ -71,6 +71,12 @@ function findModelOption(configOptions = []) {
     configOptions.find((option) => option.type === "select" && option.category === "model") ?? null;
 }
 
+function findReasoningEffortOption(configOptions = []) {
+  return configOptions.find((option) => option.type === "select" && option.id === "reasoning_effort") ?? null;
+}
+
+const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
+
 function permissionQuestion(entry) {
   return { requestId: entry.requestId, turnId: entry.turnId, message: `Permission requested: ${entry.payload.tool.title}`,
     questions: [{ id: "optionId", question: `Permission requested: ${entry.payload.tool.title}`,
@@ -179,6 +185,8 @@ export class AcpExecutorJobPort {
     this.env = options.env ?? process.env;
     this.modeId = options.modeId ?? null;
     this.modelId = options.modelId ?? null;
+    this.effortId = options.effortId ?? null;
+    this.onProgress = options.onProgress ?? null;
     this.queue = new ExecutorEventQueue();
     this.permissions = new Map();
     this.questions = new Map();
@@ -284,12 +292,51 @@ export class AcpExecutorJobPort {
     response.configOptions = result.configOptions;
   }
 
+  effortNotice(message) {
+    this.onProgress?.({ message, phase: "starting", stderrMessage: `Warning: ${message}` });
+  }
+
+  async applyReasoningEffort(sessionId, response, effortId) {
+    if (!effortId) return null;
+    const option = findReasoningEffortOption(response.configOptions);
+    if (!option) {
+      this.effortNotice(`ACP agent does not expose reasoning_effort; keeping its default for requested effort ${effortId}.`);
+      return null;
+    }
+    const values = selectOptionValues(option);
+    const selected = values.includes(effortId) ? effortId : REASONING_EFFORT_FALLBACKS.find((value) => values.includes(value));
+    if (!selected) {
+      this.effortNotice(`ACP reasoning effort ${effortId} is unavailable and no xhigh, max, or high fallback is exposed; keeping the agent default.`);
+      return null;
+    }
+    if (selected !== effortId) {
+      this.effortNotice(`ACP reasoning effort ${effortId} is unavailable; using ${selected}.`);
+    }
+    let result;
+    try {
+      result = await this.connection.setSessionConfigOption({ sessionId, configId: option.id, value: selected });
+    } catch (error) {
+      throw Object.assign(new Error(`ACP reasoning effort selection failed for ${selected}: ${error instanceof Error ? error.message : String(error)}`, {
+        cause: error
+      }), { code: error?.code ?? "UNSUPPORTED_CAPABILITY" });
+    }
+    const confirmed = findReasoningEffortOption(result.configOptions);
+    if (!confirmed || confirmed.currentValue !== selected) {
+      throw Object.assign(new Error(`ACP agent did not confirm reasoning effort ${selected} after session/set_config_option.`), {
+        code: "INVALID_RESPONSE"
+      });
+    }
+    response.configOptions = result.configOptions;
+    return selected;
+  }
+
   async startSession(request) {
     const response = await this.connection.newSession({ cwd: request.cwd ?? this.cwd,
       additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
     await this.applyModel(response.sessionId, response, request.modelId ?? this.modelId);
-    return this.sessionResult(response.sessionId, response);
+    const effortId = await this.applyReasoningEffort(response.sessionId, response, request.effortId ?? this.effortId);
+    return { ...this.sessionResult(response.sessionId, response), effortId };
   }
 
   async resumeSession(request) {
@@ -298,7 +345,8 @@ export class AcpExecutorJobPort {
       additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
-    return this.sessionResult(request.sessionId, response);
+    const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
+    return { ...this.sessionResult(request.sessionId, response), effortId };
   }
 
   async setMode(request) {

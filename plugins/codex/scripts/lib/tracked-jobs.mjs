@@ -21,6 +21,7 @@ function normalizeProgressEvent(value) {
       threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
       turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
       controlEndpoint: typeof value.controlEndpoint === "string" && value.controlEndpoint.trim() ? value.controlEndpoint.trim() : null,
+      executorEffort: typeof value.executorEffort === "string" && value.executorEffort.trim() ? value.executorEffort.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -35,6 +36,7 @@ function normalizeProgressEvent(value) {
     threadId: null,
     turnId: null,
     controlEndpoint: null,
+    executorEffort: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -82,6 +84,7 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastThreadId = null;
   let lastTurnId = null;
   let lastControlEndpoint = null;
+  let lastExecutorEffort = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -121,6 +124,12 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     if (normalized.controlEndpoint && normalized.controlEndpoint !== lastControlEndpoint) {
       lastControlEndpoint = normalized.controlEndpoint;
       patch.controlEndpoint = normalized.controlEndpoint;
+      changed = true;
+    }
+
+    if (normalized.executorEffort && normalized.executorEffort !== lastExecutorEffort) {
+      lastExecutorEffort = normalized.executorEffort;
+      patch.executorEffort = normalized.executorEffort;
       changed = true;
     }
 

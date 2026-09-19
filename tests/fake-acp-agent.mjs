@@ -30,9 +30,18 @@ function record(value) {
 const modes = { currentModeId: "default", availableModes: ["default", "acceptEdits", "auto", "dontAsk", "yolo"].map((id) => ({ id, name: id, description: null })) };
 const modelValues = ["dfmodel", "efficient", "performance"];
 
-function configOptions(currentValue = "dfmodel") {
-  return [{ type: "select", id: "model", name: "Model", category: "model", currentValue,
+function reasoningEffortValues() {
+  if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "no-effort") return null;
+  return (process.env.ACP_FAKE_EFFORT_OPTIONS ?? "high,max,low,none").split(",").filter(Boolean);
+}
+
+function configOptions(currentModel = "dfmodel", currentEffort = null) {
+  const options = [{ type: "select", id: "model", name: "Model", category: "model", currentValue: currentModel,
     options: modelValues.map((value) => ({ value, name: value })) }];
+  const effortValues = reasoningEffortValues();
+  if (effortValues) options.push({ type: "select", id: "reasoning_effort", name: "Reasoning effort",
+    currentValue: currentEffort ?? effortValues[0], options: effortValues.map((value) => ({ value, name: value })) });
+  return options;
 }
 
 class FakeAgent {
@@ -51,7 +60,8 @@ class FakeAgent {
   newSession(params) {
     record({ method: "session/new", params });
     const sessionId = `fake-${crypto.randomUUID()}`;
-    this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: "dfmodel", cancelled: null });
+    this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: "dfmodel",
+      effort: reasoningEffortValues()?.[0] ?? null, cancelled: null });
     return { sessionId, modes, configOptions: configOptions() };
   }
 
@@ -60,9 +70,10 @@ class FakeAgent {
 
   resumeSession(params) {
     record({ method: "session/resume", params });
-    const session = this.sessions.get(params.sessionId) ?? { cwd: params.cwd, mode: "default", model: "dfmodel", cancelled: null };
+    const session = this.sessions.get(params.sessionId) ?? { cwd: params.cwd, mode: "default", model: "dfmodel",
+      effort: reasoningEffortValues()?.[0] ?? null, cancelled: null };
     this.sessions.set(params.sessionId, session);
-    return { modes, configOptions: configOptions(session.model) };
+    return { modes, configOptions: configOptions(session.model, session.effort) };
   }
 
   setSessionMode(params) {
@@ -73,11 +84,20 @@ class FakeAgent {
 
   setSessionConfigOption(params) {
     record({ method: "session/set_config_option", params });
-    if (params.configId !== "model" || !modelValues.includes(params.value)) throw new Error(`invalid model: ${params.value}`);
     const session = this.sessions.get(params.sessionId);
-    session.model = params.value;
-    const selected = process.env.ACP_FAKE_CONFIG_BEHAVIOR === "mismatch" ? "dfmodel" : session.model;
-    return { configOptions: configOptions(selected) };
+    if (params.configId === "model") {
+      if (!modelValues.includes(params.value)) throw new Error(`invalid model: ${params.value}`);
+      session.model = params.value;
+      const selected = process.env.ACP_FAKE_CONFIG_BEHAVIOR === "mismatch" ? "dfmodel" : session.model;
+      return { configOptions: configOptions(selected, session.effort) };
+    }
+    if (params.configId === "reasoning_effort") {
+      if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "effort-error") throw new Error("reasoning effort rejected");
+      if (!reasoningEffortValues()?.includes(params.value)) throw new Error(`invalid reasoning effort: ${params.value}`);
+      session.effort = params.value;
+      return { configOptions: configOptions(session.model, session.effort) };
+    }
+    throw new Error(`invalid config option: ${params.configId}`);
   }
 
   update(sessionId, update) {

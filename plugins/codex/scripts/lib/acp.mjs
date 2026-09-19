@@ -12,18 +12,19 @@ export async function runAcpTurn(cwd, options = {}) {
   const job = { id: options.onProgress?.jobId ?? options.jobId, executor: "acp", workspaceRoot: cwd,
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
-    args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId });
+    args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
   const eventPump = (async () => { for await (const event of port.events()) options.onExecutorEvent?.(event); })();
   try {
     emitProgress(options.onProgress, options.resumeSessionId ? `Resuming ACP session ${options.resumeSessionId}.` : "Starting ACP session.", "starting",
       { executor: "acp", controlEndpoint: port.controlEndpoint });
     const session = options.resumeSessionId
       ? await port.resumeSession({ sessionId: options.resumeSessionId, cwd, additionalDirectories: options.additionalDirectories ?? [],
-          mcpServers: options.mcpServers ?? [], modeId: options.modeId, modelId: options.modelId })
+          mcpServers: options.mcpServers ?? [], modeId: options.modeId, modelId: options.modelId, effortId: options.effortId })
       : await port.startSession({ cwd, additionalDirectories: options.additionalDirectories ?? [], mcpServers: options.mcpServers ?? [],
-          modeId: options.modeId, modelId: options.modelId });
+          modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
     emitProgress(options.onProgress, `ACP session ready (${session.sessionId}).`, "starting", {
-      executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId, controlEndpoint: port.controlEndpoint
+      executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId, controlEndpoint: port.controlEndpoint,
+      executorEffort: session.effortId
     });
     const prompt = options.prompt?.trim() || options.defaultPrompt || "";
     if (!prompt) throw new Error("A prompt is required for this ACP run.");

@@ -35,13 +35,13 @@ async function setupPort(t, id = "acp-job", options = {}) {
   writeJobFile(cwd, id, job);
   upsertJob(cwd, job);
   const port = await openAcpExecutorJob({ cwd, job, command: process.execPath, args: [AGENT], env: options.env,
-    modelId: options.modelId });
+    modelId: options.modelId, effortId: options.effortId });
   t.after(() => port.close());
   const events = [];
   const pump = (async () => { for await (const event of port.events()) events.push(event); })();
   t.after(() => pump);
   const session = await port.startSession({ cwd, additionalDirectories: [], mcpServers: [], modeId: "default",
-    modelId: options.modelId });
+    modelId: options.modelId, effortId: options.effortId });
   return { cwd, job, port, events, session };
 }
 
@@ -107,6 +107,89 @@ test("CODEX_COMPANION_ACP_MODEL selects and persists the ACP model", (t) => {
   const request = readRecording(recording).find((entry) => entry.method === "session/set_config_option");
   assert.equal(request.params.value, "performance");
   assert.equal(listJobs(cwd)[0].executorModel, "performance");
+});
+
+test("ACP reasoning effort uses xhigh when the agent exposes it", async (t) => {
+  const recording = path.join(makeTempDir(), "acp-recording.jsonl");
+  const h = await setupPort(t, "acp-effort-xhigh", { effortId: "xhigh", env: { ...process.env,
+    ACP_FAKE_RECORDING: recording, ACP_FAKE_EFFORT_OPTIONS: "xhigh,max,high" } });
+  const request = readRecording(recording).find((entry) => entry.method === "session/set_config_option" &&
+    entry.params.configId === "reasoning_effort");
+  assert.deepEqual(request.params, { sessionId: h.session.sessionId, configId: "reasoning_effort", value: "xhigh" });
+});
+
+test("ACP reasoning effort falls back from xhigh to max when max is the strongest exposed option", async (t) => {
+  const recording = path.join(makeTempDir(), "acp-recording.jsonl");
+  await setupPort(t, "acp-effort-max", { effortId: "xhigh", env: { ...process.env,
+    ACP_FAKE_RECORDING: recording, ACP_FAKE_EFFORT_OPTIONS: "max,low,none" } });
+  const request = readRecording(recording).find((entry) => entry.method === "session/set_config_option" &&
+    entry.params.configId === "reasoning_effort");
+  assert.equal(request.params.value, "max");
+});
+
+test("ACP reasoning effort falls back from xhigh to high when high is the only preferred option", async (t) => {
+  const recording = path.join(makeTempDir(), "acp-recording.jsonl");
+  await setupPort(t, "acp-effort-high", { effortId: "xhigh", env: { ...process.env,
+    ACP_FAKE_RECORDING: recording, ACP_FAKE_EFFORT_OPTIONS: "high,low,none" } });
+  const request = readRecording(recording).find((entry) => entry.method === "session/set_config_option" &&
+    entry.params.configId === "reasoning_effort");
+  assert.equal(request.params.value, "high");
+});
+
+test("ACP reasoning effort skips an agent without reasoning_effort and completes the task", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const recording = path.join(makeTempDir(), "acp-recording.jsonl");
+  const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "xhigh", "--json", "basic"], { cwd,
+    env: { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_CONFIG_BEHAVIOR: "no-effort" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readRecording(recording).some((entry) => entry.method === "session/set_config_option" &&
+    entry.params.configId === "reasoning_effort"), false);
+  const job = listJobs(cwd)[0];
+  assert.equal(job.status, "completed");
+  assert.equal(job.executorEffort, undefined);
+  assert.match(fs.readFileSync(job.logFile, "utf8"), /does not expose reasoning_effort; keeping its default/i);
+});
+
+test("ACP reasoning effort fails the task when session/set_config_option returns an error", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "high", "--json", "basic"], { cwd,
+    env: { ...process.env, ACP_FAKE_CONFIG_BEHAVIOR: "effort-error" } });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ACP reasoning effort selection failed for high/i);
+  const job = listJobs(cwd)[0];
+  assert.equal(job.status, "failed");
+  assert.match(job.errorMessage, /ACP reasoning effort selection failed for high/i);
+});
+
+test("companion persists the effective ACP reasoning effort in job metadata", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "xhigh", "--json", "basic"], { cwd,
+    env: { ...process.env, ACP_FAKE_EFFORT_OPTIONS: "max,low,none" } });
+  assert.equal(result.status, 0, result.stderr);
+  const job = listJobs(cwd)[0];
+  assert.equal(job.executorEffort, "max");
+  assert.equal(job.request.executorEffort, "xhigh");
+  assert.match(fs.readFileSync(job.logFile, "utf8"), /reasoning effort xhigh is unavailable; using max/i);
+});
+
+test("CODEX_COMPANION_ACP_EFFORT selects and persists the ACP reasoning effort", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const env = { ...process.env, CODEX_COMPANION_ACP_EFFORT: "high", ACP_FAKE_EFFORT_OPTIONS: "high,low,none" };
+  const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--json", "basic"], { cwd, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(listJobs(cwd)[0].executorEffort, "high");
 });
 
 test("ACP basic turn normalizes all session update variants and preserves tool patches", async (t) => {
