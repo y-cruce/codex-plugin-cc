@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { assertCanonicalEventDraft } from "./executor-events.mjs";
+import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 const ACTIVE_STORES = new Map();
@@ -141,7 +143,8 @@ async function readSegment(directory, segment, afterSeq = -1n, limit = Infinity)
         if (!line) continue;
         const batch = JSON.parse(line);
         if (createHash("sha256").update(JSON.stringify(batch.events)).digest("hex") !== batch.sha256) throw historyError("HISTORY_CORRUPT", "History checksum mismatch");
-        for (const event of batch.events) {
+        for (const stored of batch.events) {
+          const event = upgradeLegacyJobEvent(stored);
           if (BigInt(event.seq) > afterSeq) events.push(event);
           if (events.length >= limit) return events;
         }
@@ -264,7 +267,12 @@ export class JobEventStore {
   append(event) {
     if (!this.manifest || this.closed) throw historyError("STORE_CLOSED", "History store is not open");
     if (this.failure) throw this.failure;
-    const record = { ...structuredClone(event), schemaVersion: 1, streamId: this.manifest.streamId, jobId: this.jobId, seq: String(this.nextSeq) };
+    const canonical = event?.schemaVersion === 2
+      ? structuredClone(event)
+      : upgradeLegacyJobEvent({ ...structuredClone(event), jobId: event?.jobId ?? this.jobId });
+    const record = { ...canonical, schemaVersion: 2, streamId: this.manifest.streamId, jobId: this.jobId,
+      identity: { ...canonical.identity, jobId: this.jobId }, seq: String(this.nextSeq) };
+    assertCanonicalEventDraft(record);
     const bytes = Buffer.byteLength(encodeBatch([record]));
     if (bytes > this.options.maxJobBytes) throw historyError("EVENT_TOO_LARGE", "One event exceeds the job history budget");
     if (this.uncommittedCount >= this.options.maxPendingEvents || (this.uncommittedCount && this.uncommittedBytes + bytes > this.options.maxPendingBytes)) {
@@ -440,7 +448,7 @@ async function retireHistory(directory, current, now) {
   catch (error) { if (error.code !== "ENOENT") throw error; }
   const original = current.metadata.job ?? {};
   const job = {};
-  for (const field of ["id", "label", "title", "status", "workspaceRoot", "sessionId", "createdAt", "startedAt", "completedAt", "threadId", "turnId"]) {
+  for (const field of ["id", "label", "title", "status", "workspaceRoot", "sessionId", "executor", "executorSessionId", "controlEndpoint", "createdAt", "startedAt", "completedAt", "threadId", "turnId"]) {
     if (original[field] !== undefined) job[field] = original[field];
   }
   job.id ??= current.jobId;
@@ -466,6 +474,7 @@ async function retireHistory(directory, current, now) {
     status: job.status, startedAt: previousView?.startedAt ?? job.startedAt ?? null,
     endedAt: previousView?.endedAt ?? job.completedAt ?? current.metadata.completedAt ?? null,
     threadId: previousView?.threadId ?? job.threadId ?? null, turnId: previousView?.turnId ?? job.turnId ?? null,
+    ...(previousView?.executor || job.executor ? { executor: previousView?.executor ?? { kind: job.executor, label: job.executor === "acp" ? "Qoder" : "Codex" } } : {}),
     activeCommands: [], lastMessage: null, files: [],
     usage: { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0, cachedInputTokens: usage.cachedInputTokens ?? 0, complete: usage.complete ?? false },
     pendingQuestion: null, history: { committedSeq: current.committedSeq, continuity: "partial" }, tail: []

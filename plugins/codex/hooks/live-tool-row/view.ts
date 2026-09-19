@@ -13,6 +13,7 @@ export type LiveView = {
   endedAt: string | null
   threadId: string | null
   turnId: string | null
+  executor?: { kind: 'codex' | 'acp'; label: string }
   activeCommands: { itemId: string; command: string; cwd: string; startedAt: string; agentThreadId?: string }[]
   lastMessage: { kind: 'assistant' | 'reasoning'; text: string; at: string } | null
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
@@ -46,7 +47,8 @@ export function agentSummaries(data: LiveView) {
 export function statusText(jobs: LiveView[], now: number): string | undefined {
   const running = jobs.filter(data => data.status === 'running' || data.status === 'waiting-for-answer')
   if (!running.length) return undefined
-  return `Codex · ${running.length} running · ${running.map(data => {
+  const executor = running[0]?.executor?.label ?? 'Codex'
+  return `${executor} · ${running.length} running · ${running.map(data => {
     const command = data.activeCommands.find(command => !command.agentThreadId)
     const detail = command ? `$ ${clip(command.command, 30)}`
       : data.files.length ? `✎ ${data.files.length} files` : clip(data.tail.at(-1)?.text ?? '', 30)
@@ -70,13 +72,14 @@ export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, ter
 
 export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }) {
   const { Box, Text } = ui
+  const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
   const stalled = data.status === 'running' && data.tail.length ? now - Date.parse(data.tail.at(-1)!.at) : 0
   const header = [
-    { text: '● Codex · ' },
+    { text: `● ${executor} · ` },
     { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
-    { text: ` · ${elapsed(data.startedAt, data.endedAt ? Date.parse(data.endedAt) : now)} · ${result ? `${data.files.length} files` : `↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens`}` },
+    { text: ` · ${elapsed(data.startedAt, data.endedAt ? Date.parse(data.endedAt) : now)} · ${result ? `${data.files.length} files` : !data.usage.complete && data.usage.inputTokens === 0 && data.usage.outputTokens === 0 && data.usage.cachedInputTokens === 0 ? 'tokens unavailable' : `↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens`}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.

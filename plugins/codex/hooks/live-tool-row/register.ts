@@ -88,14 +88,15 @@ function eventSeq(job: Job, type: string, identity: string): string {
 function notices($: EngineInterface, state: State, job: Job) {
   const data = job.data
   if (!data || job.error) return
-  const events = data.tail.filter(event => event.type === 'director.notified').map(event => ({ type: event.type, seq: event.seq, text: `Codex · ${clip(data.label, 80)} → ${clip(event.text, 160)}`, timeoutMs: 4000 }))
+  const executor = data.executor?.label ?? 'Codex'
+  const events = data.tail.filter(event => event.type === 'director.notified').map(event => ({ type: event.type, seq: event.seq, text: `${executor} · ${clip(data.label, 80)} → ${clip(event.text, 160)}`, timeoutMs: 4000 }))
   if (data.status === 'waiting-for-answer' && data.pendingQuestion) {
     const question = data.pendingQuestion
-    events.push({ type: 'waiting-for-answer', seq: eventSeq(job, 'question.opened', question.requestId), text: `Codex · ${clip(data.label, 80)} ? ${clip(question.text, 80)}`, timeoutMs: 8000 })
+    events.push({ type: 'waiting-for-answer', seq: eventSeq(job, 'question.opened', question.requestId), text: `${executor} · ${clip(data.label, 80)} ? ${clip(question.text, 80)}`, timeoutMs: 8000 })
   }
   // A job first seen already finished (a resumed transcript's result card) ends nothing now.
   if (job.sawLive && (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled')) {
-    events.push({ type: data.status, seq: eventSeq(job, `job.${data.status}`, data.endedAt ?? data.history.committedSeq), text: `Codex · ${clip(data.label, 80)} · ${data.status}`, timeoutMs: 4000 })
+    events.push({ type: data.status, seq: eventSeq(job, `job.${data.status}`, data.endedAt ?? data.history.committedSeq), text: `${executor} · ${clip(data.label, 80)} · ${data.status}`, timeoutMs: 4000 })
   }
   for (const event of events) {
     const key = JSON.stringify([job.follow.cwd, job.follow.jobId, event.type, event.seq])
@@ -123,7 +124,9 @@ async function poll($: EngineInterface, state: State) {
   }
 }
 
-function release(state: State, id: string) {
+function release(state: State, id: string, followed?: Set<string>) {
+  const job = state.rows.get(id)
+  if (job) followed?.delete(job.follow.jobId)
   state.rows.delete(id)
   if (!state.rows.size) {
     state.timer?.cancel()
@@ -136,19 +139,20 @@ function matchingFollow(call: Pick<ToolGroupCall, 'tool' | 'input' | 'isInterrup
   return call.tool === 'Bash' && !call.isInterrupted && !call.isErrored ? followOf(input?.command) : null
 }
 
-export function register(on: On) {
+export function register(on: On, followed?: Set<string>) {
   const state: State = { rows: new Map(), jobs: new Map(), terminalLabels: new Map(), followRows: new Set(), polling: false, now: 0, redrawnAt: 0, toasted: new Set() }
   on('ui.render', { component: 'PromptHint' }, ($, e, next) => {
     if (e.props.isDraft) return next(e)
-    const text = statusText([...new Set(state.rows.values())].flatMap(job => job.data ? [job.data] : []), state.now)
+    const jobs = [...new Set(state.rows.values())].flatMap(job => job.data ? [job.data] : [])
+    const text = statusText(jobs, state.now)
     if (!text) return next(e)
     const { Text } = $.ui.resolve(e)
     const columns = Math.max(1, e.viewport?.columns ?? 120)
     const hint = clip(e.props.hint, columns)
     const combined = `${text}  ${hint}`
     return Text({ wrap: 'truncate-end', children: [
-      Text({ color: 'cyan', children: 'Codex' }),
-      Text({ dimColor: true, children: text.slice(5) }),
+      Text({ color: 'cyan', children: jobs[0]?.executor?.label ?? 'Codex' }),
+      Text({ dimColor: true, children: text.slice((jobs[0]?.executor?.label ?? 'Codex').length) }),
       ...(hint === e.props.hint && clip(combined, columns) === combined ? [Text({ dimColor: true, children: `  ${hint}` })] : []),
     ] })
   })
@@ -156,7 +160,7 @@ export function register(on: On) {
     let expand = false
     for (const call of e.props.calls) {
       if (matchingFollow(call)) expand = true
-      if ((!call.isRunning || !matchingFollow(call)) && call.tool_use_id) release(state, call.tool_use_id)
+      if ((!call.isRunning || !matchingFollow(call)) && call.tool_use_id) release(state, call.tool_use_id, followed)
     }
     return expand ? next({ ...e, props: { ...e.props, isExpanded: true } }) : next(e)
   })
@@ -170,13 +174,13 @@ export function register(on: On) {
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const follow = matchingFollow(e.props)
     if (!follow) {
-      release(state, e.props.tool_use_id)
+      release(state, e.props.tool_use_id, followed)
       return next(e)
     }
     state.followRows.add(e.props.tool_use_id)
     const terminal = e.props.isRunning ? undefined : terminalOf(e.props.output)
     if (!e.props.isRunning) {
-      release(state, e.props.tool_use_id)
+      release(state, e.props.tool_use_id, followed)
       if (!terminal) return next(e)
     }
     const cwd = follow.cwd ?? await $.session.cwd()
@@ -207,6 +211,7 @@ export function register(on: On) {
     } else {
       job.finalReads?.delete(e.props.tool_use_id)
       state.rows.set(e.props.tool_use_id, job)
+      followed?.add(follow.jobId)
     }
     if (e.props.isRunning && !state.timer) {
       state.timer = $.clock.every(500, () => { void poll($, state) })

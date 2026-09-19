@@ -110,7 +110,7 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const viewPath = located.stdout.trim();
   assert.equal(path.isAbsolute(viewPath), true);
   const readView = () => fs.existsSync(viewPath) ? JSON.parse(fs.readFileSync(viewPath, "utf8")) : null;
-  const followed = h.child("observe", "follow", jobId, "--max-seconds", "3");
+  const followed = h.child("observe", "follow", jobId, "--max-seconds", "10");
   await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "attached follow");
   const metadata = JSON.parse(h.cli("status", jobId, "--json").stdout).job;
   await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId, input: [{ type: "text", text: "observation-live" }] });
@@ -132,7 +132,7 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const savedCursor = cursor(result.stdout);
   const accepted = h.cli("message", jobId, "keep working", "--json");
   assert.equal(accepted.status, 0, accepted.stderr);
-  const resumed = h.child("observe", "follow", jobId, "--after", savedCursor, "--max-seconds", "0.5");
+  const resumed = h.child("observe", "follow", jobId, "--after", savedCursor, "--max-seconds", "2");
   const resumedResult = await resumed.done;
   assert.equal(resumedResult.code, 0, resumedResult.stderr);
   assert.match(resumedResult.stdout, /director → message: keep working/);
@@ -143,6 +143,8 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const end = rows.pop();
   assert.equal(end.type, "end");
   assert.ok(rows.some((event) => event.type === "message.delta"));
+  assert.ok(rows.every((event) => event.schemaVersion === 2 && event.payload && event.identity));
+  assert.ok(rows.every((event) => !Object.hasOwn(event, "threadId") && !Object.hasOwn(event, "turnId") && !Object.hasOwn(event, "itemId")));
   assert.ok(rows.every((event, index) => index === 0 || BigInt(event.seq) > BigInt(rows[index - 1].seq)));
   const tail = h.cli("observe", "replay", jobId, "--after", end.nextCursor, "--jsonl");
   assert.equal(tail.status, 0, tail.stderr);

@@ -65,7 +65,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           continue;
         }
         const first = await claim(report.workspaceRoot ?? cwd, job.id, question.requestId);
-        const text = oneLine(question.questions?.[0]?.question).slice(0, 200);
+        const text = oneLine(question.message ?? question.questions?.[0]?.question).slice(0, 200);
         writeLine(first ? `QUESTION ${jobPrefix} request=${question.requestId} ${text}`
           : `QUESTION_PENDING ${jobPrefix} request=${question.requestId} still unanswered: ${text}`);
         lastActiveAt = now();

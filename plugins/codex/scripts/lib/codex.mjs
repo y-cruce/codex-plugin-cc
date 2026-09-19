@@ -44,24 +44,11 @@ import path from "node:path";
 import { readJsonFile } from "./fs.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { CodexExecutorJobPort, startCodexSession } from "./executors/codex-driver.mjs";
 import { registerObservedJob } from "./observation-client.mjs";
 import { binaryAvailable } from "./process.mjs";
 
-const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
-/** @type {import("./app-server-protocol").DynamicToolSpec} */
-const NOTIFY_DIRECTOR_TOOL = {
-  type: "function",
-  name: "notify_director",
-  description: "Send a short note to the director agent that started you, without stopping your work. Use it only for conclusions that change the plan, blockers you are working around, or a finished phase the director could act on now. Do not report routine progress. Returns immediately; the director does not reply through this tool. Notes longer than 400 characters are rejected.",
-  inputSchema: {
-    type: "object",
-    properties: { message: { type: "string", maxLength: 400 } },
-    required: ["message"],
-    additionalProperties: false
-  },
-  deferLoading: false
-};
 const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
@@ -73,35 +60,6 @@ function cleanCodexStderr(stderr) {
     .map((line) => line.trimEnd())
     .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"))
     .join("\n");
-}
-
-/** @returns {ThreadStartParams} */
-function buildThreadParams(cwd, options = {}) {
-  return {
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
-    serviceName: SERVICE_NAME,
-    ephemeral: options.ephemeral ?? true,
-    ...(options.persistThread ? { dynamicTools: [NOTIFY_DIRECTOR_TOOL] } : {})
-  };
-}
-
-/** @returns {ThreadResumeParams} */
-function buildResumeParams(threadId, cwd, options = {}) {
-  return {
-    threadId,
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
-  };
-}
-
-/** @returns {UserInput[]} */
-function buildTurnInput(prompt) {
-  return [{ type: "text", text: prompt, text_elements: [] }];
 }
 
 function shorten(text, limit = 72) {
@@ -591,6 +549,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   const previousHandler = client.notificationHandler;
 
   client.setNotificationHandler((message) => {
+    previousHandler?.(message);
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -602,10 +561,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     }
 
     if (!belongsToTurn(state, message)) {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-        return;
+      return;
     }
 
     applyTurnNotification(state, message);
@@ -621,10 +577,6 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     for (const message of state.bufferedNotifications) {
       if (belongsToTurn(state, message)) {
         applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
       }
     }
     state.bufferedNotifications.length = 0;
@@ -762,28 +714,6 @@ async function requestExternalAgentSessionImport(client, params) {
     clearTimeout(timeout);
     client.setNotificationHandler(previousHandler ?? null);
   }
-}
-
-async function startThread(client, cwd, options = {}) {
-  const response = await client.request("thread/start", buildThreadParams(cwd, options));
-  const threadId = response.thread.id;
-  if (options.threadName) {
-    try {
-      await client.request("thread/name/set", { threadId, name: options.threadName });
-    } catch (err) {
-      // Only suppress "unknown variant/method" errors from older CLI versions
-      // that don't support thread/name/set. Rethrow auth, network, or server errors.
-      const msg = String(err?.message ?? err ?? "");
-      if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
-        throw err;
-      }
-    }
-  }
-  return response;
-}
-
-async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
 }
 
 function buildResultStatus(turnState) {
@@ -1043,7 +973,7 @@ export async function runAppServerReview(cwd, options = {}) {
   return withAppServer(cwd, async (client) => {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     await registerObservedJob(client, cwd, options.onProgress);
-    const thread = await startThread(client, cwd, {
+    const thread = await startCodexSession(client, cwd, {
       model: options.model,
       sandbox: "read-only",
       ephemeral: true,
@@ -1135,85 +1065,84 @@ export async function runAppServerTurn(cwd, options = {}) {
   }
 
   return withAppServer(cwd, async (client) => {
-    let threadId;
-    await registerObservedJob(client, cwd, options.onProgress);
-
-    if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: false
-      });
-      threadId = response.thread.id;
-    } else {
-      emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: options.persistThread ? false : true,
-        persistThread: options.persistThread,
-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
-      });
-      threadId = response.thread.id;
-    }
-
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
-      threadId
-    });
-
-    const prompt = options.prompt?.trim() || options.defaultPrompt || "";
-    if (!prompt) {
-      throw new Error("A prompt is required for this Codex run.");
-    }
-
-    let turnState;
-    let input = buildTurnInput(prompt);
-    const fileChanges = [];
-    const interruptedTurns = [];
-    do {
-      turnState = await captureTurn(
-        client,
-        threadId,
-        () => client.request("turn/start", {
-          threadId,
-          input,
+    const job = { id: options.onProgress?.jobId ?? options.jobId ?? `direct-${crypto.randomUUID()}` };
+    const port = await CodexExecutorJobPort.open({ client, cwd, job, onProgress: options.onProgress, captureTurn });
+    const eventPump = (async () => {
+      for await (const event of port.events()) options.onExecutorEvent?.(event);
+    })();
+    try {
+      let session;
+      if (options.resumeThreadId) {
+        emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
+        session = await port.resumeSession({
+          sessionId: options.resumeThreadId,
           cwd,
-          approvalPolicy: "never",
-          sandboxPolicy: options.sandbox === "danger-full-access"
-            ? { type: "dangerFullAccess" }
-            : options.sandbox === "workspace-write"
-              ? { type: "workspaceWrite", writableRoots: [cwd], networkAccess: Boolean(options.network), excludeTmpdirEnvVar: false, excludeSlashTmp: false }
-              : { type: "readOnly", networkAccess: false },
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
-        }),
-        { onProgress: options.onProgress }
-      );
-      fileChanges.push(...turnState.fileChanges);
-      input = turnState.redirectInput;
-      if (input) {
-        interruptedTurns.push({ turnId: turnState.turnId, touchedFiles: collectTouchedFiles(turnState.fileChanges),
-          workspaceStatus: turnState.interruptedWorkspaceStatus });
-        emitProgress(options.onProgress, "Turn interrupted; continuing in the same thread with the new instruction. Existing file changes are retained.", "redirecting");
+          model: options.model,
+          sandbox: options.sandbox,
+          ephemeral: false
+        });
+      } else {
+        emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
+        session = await port.startSession({
+          cwd,
+          model: options.model,
+          sandbox: options.sandbox,
+          ephemeral: options.persistThread ? false : true,
+          persistThread: options.persistThread,
+          threadName: options.persistThread ? options.threadName : options.threadName ?? null
+        });
       }
-    } while (input);
+      const sessionId = session.sessionId;
+      emitProgress(options.onProgress, `Thread ready (${sessionId}).`, "starting", {
+        executor: "codex",
+        executorSessionId: sessionId,
+        threadId: sessionId,
+        controlEndpoint: client.endpoint ?? loadBrokerSession(cwd)?.endpoint ?? null
+      });
 
-    return {
-      status: buildResultStatus(turnState),
-      threadId,
-      turnId: turnState.turnId,
-      finalMessage: turnState.lastAgentMessage,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr),
-      fileChanges,
-      touchedFiles: collectTouchedFiles(fileChanges),
-      interruptedTurns,
-      commandExecutions: turnState.commandExecutions
-    };
+      const prompt = options.prompt?.trim() || options.defaultPrompt || "";
+      if (!prompt) throw new Error("A prompt is required for this Codex run.");
+
+      let terminal;
+      let turnState;
+      let input = [{ type: "text", text: prompt }];
+      const fileChanges = [];
+      const interruptedTurns = [];
+      do {
+        const turn = await port.startTurn({ sessionId, prompt: input, cwd, sandbox: options.sandbox,
+          network: options.network, model: options.model, effort: options.effort, outputSchema: options.outputSchema });
+        terminal = await turn.done;
+        turnState = await turn.capture;
+        fileChanges.push(...turnState.fileChanges);
+        input = turnState.redirectInput;
+        if (input) {
+          interruptedTurns.push({ turnId: turnState.turnId, touchedFiles: collectTouchedFiles(turnState.fileChanges),
+            workspaceStatus: turnState.interruptedWorkspaceStatus });
+          emitProgress(options.onProgress, "Turn interrupted; continuing in the same thread with the new instruction. Existing file changes are retained.", "redirecting");
+        }
+      } while (input);
+
+      return {
+        status: terminal.status === "completed" ? 0 : 1,
+        executor: "codex",
+        sessionId,
+        threadId: sessionId,
+        turnId: terminal.turnId,
+        terminal,
+        finalMessage: turnState.lastAgentMessage,
+        reasoningSummary: turnState.reasoningSummary,
+        turn: turnState.finalTurn,
+        error: turnState.error,
+        stderr: cleanCodexStderr(client.stderr),
+        fileChanges,
+        touchedFiles: collectTouchedFiles(fileChanges),
+        interruptedTurns,
+        commandExecutions: turnState.commandExecutions
+      };
+    } finally {
+      await port.close();
+      await eventPump;
+    }
   }, { requireBroker: options.persistThread });
 }
 

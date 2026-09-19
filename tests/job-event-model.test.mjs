@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeJobEvent, renderJobEvent, createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
+import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
+import { renderJobEvent, createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 
 function harness(job = {}) {
@@ -22,11 +24,11 @@ test("normalization preserves full source and event identity without modifying i
   assert.equal(event.type, "command.started");
   assert.equal(event.occurredAt, "1970-01-01T00:00:01.000Z");
   assert.equal(event.jobId, "job");
-  assert.equal(event.itemId, "item");
-  assert.deepEqual(event.source.message, message);
+  assert.equal(event.identity.toolCallId, "item");
+  assert.deepEqual(event.source.raw, message);
   assert.equal(renderJobEvent(event), `$ ${"x".repeat(500)}`);
   message.params.item.command = "changed";
-  assert.equal(event.source.message.params.item.command.length, 500);
+  assert.equal(event.source.raw.params.item.command.length, 500);
 });
 
 test("message deltas fold into one row, survive snapshot restoration and retain complete text", () => {
@@ -91,6 +93,15 @@ test("usage snapshots add increments rather than cumulative totals across turns"
   assert.deepEqual(view.usage, { inputTokens: 30, outputTokens: 8, cachedInputTokens: 4, complete: true });
 });
 
+test("resumed usage excludes tokens consumed before this job", () => {
+  const { view, accept } = harness({ request: { resumeThreadId: "thread-1" } });
+  accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 15 },
+    last: { inputTokens: 20, outputTokens: 5, cachedInputTokens: 3 } } });
+  accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 125, outputTokens: 32, cachedInputTokens: 16 },
+    last: { inputTokens: 25, outputTokens: 7, cachedInputTokens: 4 } } });
+  assert.deepEqual(view.usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 4, complete: false });
+});
+
 test("director controls and delivered answers appear in default output and tail", () => {
   const { view, accept } = harness();
   accept("companion/question", { requestId: 4, questions: [{ question: "Which?" }] });
@@ -102,7 +113,7 @@ test("director controls and delivered answers appear in default output and tail"
   assert.equal(view.status, "running");
   const text = "x".repeat(300);
   const control = accept("companion/control-message", { message: text, interrupt: true, status: "accepted" });
-  assert.equal(control.source.message.params.message, text);
+  assert.equal(control.source.raw.params.message, text);
   assert.equal(renderJobEvent(control), `director → interrupt: ${"x".repeat(200)}`);
   assert.equal(view.tail.at(-1).text, renderJobEvent(control));
 });
@@ -128,7 +139,7 @@ test("display hides usage, user echoes and blank reasoning but retains their sou
   for (const summary of [[], ["", " \n "]]) {
     const reasoning = accept("item/completed", { item: { type: "reasoning", id: "empty", summary } });
     assert.equal(renderJobEvent(reasoning), null);
-    assert.deepEqual(reasoning.source.message.params.item.summary, summary);
+    assert.deepEqual(reasoning.source.raw.params.item.summary, summary);
   }
   accept("item/reasoning/summaryTextDelta", { itemId: "blank", delta: " \n " });
   assert.deepEqual(view.tail, []);
@@ -153,7 +164,7 @@ test("display previews are bounded by Unicode characters while raw content and l
   body = renderJobEvent(completed).slice(`$ ${command} (exit 0) ⏎ `.length);
   assert.equal([...body].length, 120);
   assert.ok(body.endsWith("…"));
-  assert.equal(completed.source.message.params.item.aggregatedOutput, output);
+  assert.equal(completed.source.raw.params.item.aggregatedOutput, output);
   assert.ok(renderJobEvent(completed, { verbose: true }).endsWith(output.replace(/\n/g, " ⏎ ")));
   const message = `header\n${"文".repeat(350)}`;
   accept("item/agentMessage/delta", { itemId: "msg", delta: message });
@@ -162,7 +173,7 @@ test("display previews are bounded by Unicode characters while raw content and l
   assert.equal([...renderJobEvent(assistant)].length, 300);
   assert.ok(renderJobEvent(assistant).endsWith("…"));
   assert.equal(view.lastMessage.text, message);
-  assert.equal(assistant.source.message.params.item.text, message);
+  assert.equal(assistant.source.raw.params.item.text, message);
   assert.equal(renderJobEvent(assistant, { verbose: true }), `assistant: ${message.replace(/\n/g, " ⏎ ")}`);
   assert.ok(view.tail.every((row) => !row.text.includes("\n")));
 });
@@ -198,12 +209,12 @@ test("command projection unwraps shell arguments without altering inner text or 
     const start = accept("item/started", { item: { type: "commandExecution", id: "c", command, cwd: "/repo" } });
     assert.equal(view.activeCommands[0].command, expected, command);
     assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")}`, command);
-    assert.equal(start.source.message.params.item.command, command);
+    assert.equal(start.source.raw.params.item.command, command);
     accept("item/commandExecution/outputDelta", { itemId: "c", delta: "output" });
     assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")} ⏎ output`, command);
     const done = accept("item/completed", { item: { type: "commandExecution", id: "c", command, exitCode: 0, durationMs: 123, aggregatedOutput: "output" } });
     assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")} ⏎ output`, command);
-    assert.equal(done.source.message.params.item.command, command);
+    assert.equal(done.source.raw.params.item.command, command);
     assert.ok(renderJobEvent(done).includes("(exit 0)"));
   }
 });
@@ -249,10 +260,10 @@ test("large command delta streams keep a bounded preview without rescanning accu
   t.diagnostic(`500 × 8KiB deltas: ${elapsed.toFixed(1)}ms`);
   assert.equal(view.tail.length, 1);
   assert.equal(view.tail[0].text, `$ cat large.txt ⏎ ${"x".repeat(119)}…`);
-  const state = view._items["thread-1:turn-1:large"];
+  const state = view._items[JSON.stringify(["thread-1", "turn-1", "large"])];
   assert.equal(state.outputPreviewTruncated, true);
   assert.ok(state.output.length <= 242);
-  assert.equal(last.source.message.params.delta, chunk);
+  assert.equal(last.source.raw.params.delta, chunk);
 });
 
 test("bounded output preview handles CRLF and surrogate pairs split between deltas", () => {
@@ -270,5 +281,48 @@ test("empty terminal input is hidden only from tail, nonempty input remains visi
   const input = accept("item/commandExecution/terminalInteraction", { itemId: "c", processId: "5733", stdin: "y\n" });
   assert.equal(view.tail.length, 1);
   assert.equal(view.tail[0].text, "stdin 5733: y ⏎ ");
-  assert.equal(input.source.message.params.stdin, "y\n");
+  assert.equal(input.source.raw.params.stdin, "y\n");
+});
+
+test("live view consumes canonical payload and ignores contradictory raw source", () => {
+  const job = { id: "job-canonical", executor: "acp", threadId: "session-1" };
+  const view = createLiveView(job);
+  const event = createCanonicalEvent({
+    job,
+    executor: "acp",
+    type: "command.started",
+    identity: { sessionId: "session-1", turnId: "turn-1", toolCallId: "tool:with:colons" },
+    occurredAt: "2026-09-18T00:00:00.000Z",
+    receivedAt: "2026-09-18T00:00:00.000Z",
+    payload: { command: "Build project", commandKnown: false, cwd: "/repo", startedAt: "2026-09-18T00:00:00.000Z" },
+    source: { protocol: "acp", method: "session/update", raw: { command: "must not be used", cwd: "/wrong" } }
+  });
+  event.seq = "1";
+  applyJobEvent(view, event);
+  assert.deepEqual(view.activeCommands, [{ itemId: "tool:with:colons", command: "Build project", cwd: "/repo",
+    startedAt: "2026-09-18T00:00:00.000Z", _key: JSON.stringify(["session-1", "turn-1", "tool:with:colons"]) }]);
+  assert.equal(view.executor.label, "Qoder");
+  assert.deepEqual(view.subAgents ?? [], []);
+  assert.equal(view.tail[0].text, "$ Build project");
+});
+
+test("a canonical completion migrates and clears an active item from a legacy checkpoint", () => {
+  const job = { id: "job-legacy", threadId: "thread-1" };
+  const view = createLiveView(job);
+  const legacyKey = "thread-1:turn-1:command-1";
+  view._items[legacyKey] = { command: "npm test", turnId: "turn-1", tailSeq: "1" };
+  view.activeCommands.push({ itemId: "command-1", command: "npm test", cwd: "/repo",
+    startedAt: "2026-09-18T00:00:00.000Z", _key: legacyKey });
+  view.tail.push({ seq: "1", at: "2026-09-18T00:00:00.000Z", type: "command.started", text: "$ npm test" });
+  const event = createCanonicalEvent({ job, type: "command.completed",
+    identity: { sessionId: "thread-1", turnId: "turn-1", toolCallId: "command-1" },
+    payload: { command: "npm test", commandKnown: true, cwd: "/repo", status: "completed", exitCode: 0,
+      signal: null, durationMs: 10, output: [], outputText: null },
+    source: { protocol: "local", method: "test/completed", raw: null } });
+  event.seq = "2";
+  applyJobEvent(view, event);
+  assert.deepEqual(view.activeCommands, []);
+  assert.equal(view._items[legacyKey], undefined);
+  assert.equal(Object.keys(view._items).length, 0);
+  assert.equal(view.tail[0].exitCode, 0);
 });

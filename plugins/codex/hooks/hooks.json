@@ -1,6 +1,8 @@
 {
   "description": "Optional stop-time review gate for Codex Companion.",
-  "modules": ["./live-tool-row/register.ts"],
+  "modules": [
+    "./register.ts"
+  ],
   "hooks": {
     "SessionStart": [
       {

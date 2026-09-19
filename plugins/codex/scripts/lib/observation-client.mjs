@@ -4,11 +4,13 @@ import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import path from "node:path";
 import { readObservationJson } from "./observation-paths.mjs";
+import { readJobFile, resolveJobFile } from "./state.mjs";
 
 export class ObservationClient extends EventEmitter {
-  constructor(socket) {
+  constructor(socket, requestTimeoutMs = 10000) {
     super();
     this.socket = socket;
+    this.requestTimeoutMs = requestTimeoutMs;
     this.pending = new Map();
     this.nextId = 1;
     let buffer = "";
@@ -42,12 +44,13 @@ export class ObservationClient extends EventEmitter {
     });
   }
 
-  static async connect(cwd, { stateDir = undefined, fallback = false } = {}) {
+  static async connect(cwd, { stateDir = undefined, fallback = false, job = null, endpoint = null, brokerEndpoint = null, brokerTimeoutMs = 10000 } = {}) {
     const session = stateDir ? await readObservationJson(path.join(stateDir, "broker.json")) : loadBrokerSession(cwd);
-    const endpoint = (!fallback && process.env.CODEX_COMPANION_APP_SERVER_ENDPOINT) || session?.endpoint;
-    if (!endpoint) throw Object.assign(new Error("No live broker"), { code: "BROKER_UNAVAILABLE" });
-    const socket = net.createConnection({ path: parseBrokerEndpoint(endpoint).path });
-    const client = new ObservationClient(socket);
+    const resolvedEndpoint = endpoint ?? brokerEndpoint ?? job?.controlEndpoint ??
+      ((!fallback && process.env.CODEX_COMPANION_APP_SERVER_ENDPOINT) || session?.endpoint);
+    if (!resolvedEndpoint) throw Object.assign(new Error("No live executor endpoint"), { code: "BROKER_UNAVAILABLE" });
+    const socket = net.createConnection({ path: parseBrokerEndpoint(resolvedEndpoint).path });
+    const client = new ObservationClient(socket, brokerTimeoutMs);
     try {
       const initialized = await client.request("initialize", { clientInfo: { name: "codex-observer", version: "1" } });
       if (initialized?.observationVersion !== 1) throw Object.assign(new Error("OBSERVATION_UNSUPPORTED"), { code: "OBSERVATION_UNSUPPORTED" });
@@ -62,7 +65,7 @@ export class ObservationClient extends EventEmitter {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Broker request timed out: ${method}`));
-      }, 10000);
+      }, this.requestTimeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.write(`${JSON.stringify({ id, method, params })}\n`);
     });
@@ -80,7 +83,9 @@ export async function registerObservedJob(client, cwd, progress) {
 export async function finishObservedJob(cwd, jobId) {
   let client;
   try {
-    client = await ObservationClient.connect(cwd);
+    let job = null;
+    try { job = readJobFile(resolveJobFile(cwd, jobId)); } catch {}
+    client = await ObservationClient.connect(cwd, { job });
     await client.request("broker/job-finish", { cwd, jobId });
   } catch {
     // Old brokers remain supported; the new broker also reconciles terminal job files.

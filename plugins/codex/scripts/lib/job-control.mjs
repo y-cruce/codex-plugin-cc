@@ -32,7 +32,7 @@ export function lastJobProgressAt(job) {
 
 export function checkJobLiveness(cwd, job, live, brokerFailures, options = {}) {
   if (job.status !== "queued" && job.status !== "running") return job;
-  const failures = job.threadId && live?.unavailable ? (brokerFailures.get(job.id) ?? 0) + 1 : 0;
+  const failures = (job.executorSessionId ?? job.threadId) && live?.unavailable ? (brokerFailures.get(job.id) ?? 0) + 1 : 0;
   brokerFailures.set(job.id, failures);
   const reason = (options.ownerAlive ?? ownerProcessAlive)(job.pid) === false
     ? "owner process exited"

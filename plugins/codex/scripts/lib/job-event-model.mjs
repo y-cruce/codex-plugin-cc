@@ -1,44 +1,10 @@
 import { DEFAULT_INPUT_TIMEOUT_MS } from "./live-turn-control.mjs";
 
-const METHODS = {
-  "turn/started": "turn.started",
-  "turn/completed": "turn.completed",
-  "item/agentMessage/delta": "message.delta",
-  "item/reasoning/summaryTextDelta": "reasoning.summary.delta",
-  "item/reasoning/summaryPartAdded": "reasoning.summary.part",
-  "item/reasoning/textDelta": "reasoning.text.delta",
-  "item/commandExecution/outputDelta": "command.output.delta",
-  "item/commandExecution/terminalInteraction": "command.interaction",
-  "item/fileChange/patchUpdated": "fileChange.patch.updated",
-  "item/fileChange/outputDelta": "fileChange.output.delta",
-  "thread/tokenUsage/updated": "usage.updated",
-  "turn/diff/updated": "turn.diff.updated",
-  "turn/plan/updated": "plan.updated",
-  "item/plan/delta": "plan.delta",
-  "item/mcpToolCall/progress": "tool.progress",
-  "companion/question": "question.opened",
-  "companion/notification": "director.notified",
-  "companion/control-message": "control.message.updated",
-  "companion/answer-delivered": "question.resolved",
-  "serverRequest/resolved": "question.closed",
-  "companion/job-started": "job.started",
-  "companion/job-completed": "job.completed",
-  "error": "source.error",
-  "warning": "source.warning"
-};
-
-const ITEM_TYPES = {
-  commandExecution: "command", agentMessage: "message", reasoning: "reasoning",
-  fileChange: "fileChange", plan: "plan"
-};
 const oneLine = (text) => String(text ?? "").replace(/\r?\n/g, " ⏎ ");
 function preview(text, limit) {
-  // At most two UTF-16 units per code point. Include one extra point to
-  // distinguish an exact-length preview from truncated output.
   const characters = [...oneLine(String(text ?? "").slice(0, limit * 2 + 2))];
   return characters.length > limit ? `${characters.slice(0, limit - 1).join("")}…` : characters.join("");
 }
-const params = (event) => event.source?.message?.params ?? {};
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 
 function unwrapCommand(command) {
@@ -72,115 +38,86 @@ function unwrapCommand(command) {
   return quote ? command : result;
 }
 
-function changedFiles(changes = []) {
-  return changes.map((change) => {
-    let additions = null;
-    let deletions = null;
-    const diff = change.diff;
-    if (typeof diff === "string" && /^@@ /m.test(diff)) {
-      additions = 0;
-      deletions = 0;
-      let inHunk = false;
-      for (const line of diff.split("\n")) {
-        if (line.startsWith("@@ ")) { inHunk = true; continue; }
-        if (line.startsWith("diff ") || line.startsWith("--- ") || line.startsWith("+++ ")) {
-          inHunk = false;
-          continue;
-        }
-        if (inHunk && line.startsWith("+")) additions++;
-        if (inHunk && line.startsWith("-")) deletions++;
-      }
-    }
-    return { path: change.path, kind: change.kind?.type ?? change.kind ?? "update", additions, deletions };
-  });
+function blockText(block) {
+  if (block?.type === "text") return block.text;
+  if (block?.type === "image") return "[image]";
+  if (block?.type === "audio") return "[audio]";
+  if (block?.type === "resource_link") return `[resource: ${block.title ?? block.name}]`;
+  if (block?.type === "resource") return `[resource: ${block.resource?.uri ?? "embedded"}]`;
+  return block ? `[${block.type ?? "content"}]` : "";
 }
 
-export function normalizeJobEvent(message, job) {
-  const p = message.params ?? {};
-  let type = METHODS[message.method] ?? "source.unknown";
-  if (message.method === "item/started" || message.method === "item/completed") {
-    type = `${ITEM_TYPES[p.item?.type] ?? "tool"}.${message.method.endsWith("started") ? "started" : "completed"}`;
-    if (p.item?.type === "subAgentActivity") type = "agent.activity";
-  }
-  if (message.method === "companion/job-completed") {
-    type = `job.${p.job?.status ?? "completed"}`;
-  }
-  const receivedAt = new Date().toISOString();
-  const sourceTime = message.emittedAtMs ?? p.startedAtMs ?? p.completedAtMs;
-  const occurredAt = sourceTime != null && Number.isFinite(Number(sourceTime))
-    ? new Date(Number(sourceTime)).toISOString() : receivedAt;
-  const changes = p.item?.changes ?? p.changes;
-  return {
-    schemaVersion: 1,
-    streamId: job.streamId,
-    jobId: job.id ?? job.jobId,
-    occurredAt,
-    receivedAt,
-    type,
-    threadId: p.threadId ?? p.thread?.id ?? p.job?.threadId ?? job.threadId ?? null,
-    turnId: p.turnId ?? p.turn?.id ?? p.job?.turnId ?? job.turnId ?? null,
-    itemId: p.itemId ?? p.item?.id ?? null,
-    source: { protocol: message.method.startsWith("companion/") ? "companion" : "codex-app-server", message: structuredClone(message) },
-    derived: changes ? { files: changedFiles(changes) } : null
-  };
+function eventEntityKey(event) {
+  const identity = event.identity;
+  const id = identity.messageId ?? identity.toolCallId;
+  return id == null ? null : JSON.stringify([identity.sessionId, identity.turnId, id]);
+}
+
+function eventAgent(event, view) {
+  if (event.agent) return event.agent;
+  const id = event.identity.agentId;
+  const known = id ? view?.subAgents?.find((entry) => entry.threadId === id) : null;
+  return known ? { id, path: known.path, parentId: null } : null;
 }
 
 export function renderJobEvent(event, { verbose = false, tail = false } = {}) {
   const text = renderEventText(event, { verbose, tail });
-  if (text == null || !event.derived?.agent) return text;
-  const prefixed = `[${oneLine(event.derived.agent.path)}] ${text}`;
+  if (text == null || !event.agent) return text;
+  const prefixed = `[${oneLine(event.agent.path)}] ${text}`;
   return !verbose && /^(message|reasoning)\./.test(event.type) ? preview(prefixed, 300) : prefixed;
 }
 
 function renderEventText(event, { verbose = false, tail = false } = {}) {
-  const p = params(event);
-  const item = p.item ?? {};
+  const p = event.payload;
   if (isDelta(event)) {
     if (!verbose) return null;
-    return oneLine(`${event.type}: ${p.delta ?? `part ${p.summaryIndex ?? ""}`}`);
+    const delta = p.delta ?? blockText(p.block) ?? `part ${p.summaryIndex ?? ""}`;
+    return oneLine(`${event.type}: ${delta}`);
   }
   let text;
   switch (event.type) {
-    case "agent.activity": text = `⇢ sub-agent ${String(item.agentPath ?? item.agentThreadId).split("/").filter(Boolean).at(-1)} ${item.kind}`; break;
+    case "agent.activity": text = `⇢ sub-agent ${p.path} ${p.status}`; break;
     case "job.started": text = "Job started"; break;
     case "job.completed": case "job.failed": case "job.cancelled": text = `Job ${event.type.slice(4)}`; break;
-    case "turn.started": text = verbose ? `Turn started ${event.turnId ?? ""}` : "Turn started"; break;
-    case "turn.completed": text = `Turn ${p.turn?.status ?? "completed"}${verbose ? ` ${event.turnId ?? ""}` : ""}`; break;
-    case "command.started": text = `$ ${tail ? unwrapCommand(item.command) : item.command ?? ""}`; break;
-    case "command.completed": text = `$ ${tail ? unwrapCommand(item.command) : item.command ?? ""}${tail ? "" : ` (exit ${item.exitCode ?? "?"})`}${item.aggregatedOutput ? `\n${verbose ? item.aggregatedOutput : preview(item.aggregatedOutput, 120)}` : ""}`; break;
+    case "turn.started": text = verbose ? `Turn started ${event.identity.turnId ?? ""}` : "Turn started"; break;
+    case "turn.completed": text = `Turn ${p.status}${verbose ? ` ${event.identity.turnId ?? ""}` : ""}`; break;
+    case "command.started": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}`; break;
+    case "command.completed": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}${tail ? "" : ` (exit ${p.exitCode ?? "?"})`}${p.outputText ? `\n${verbose ? p.outputText : preview(p.outputText, 120)}` : ""}`; break;
     case "command.interaction":
       if (tail && !String(p.stdin ?? "")) return null;
       text = `stdin ${p.processId ?? ""}: ${p.stdin ?? ""}`;
       break;
-    case "message.completed": text = verbose ? `assistant: ${item.text ?? ""}` : preview(`assistant: ${item.text ?? ""}`, 300); break;
+    case "message.completed": text = verbose ? `assistant: ${p.message.text ?? ""}` : preview(`assistant: ${p.message.text ?? ""}`, 300); break;
     case "reasoning.completed": {
-      const summary = item.summary ?? [];
-      const body = Array.isArray(summary) ? summary.join("\n") : summary;
+      const body = p.message.text ?? "";
       if (!verbose && !String(body).trim()) return null;
       text = `reasoning: ${body}`;
       break;
     }
     case "fileChange.started": case "fileChange.patch.updated": case "fileChange.completed":
-      text = `Files ${item.status ?? event.type.split(".").at(-1)}: ${(event.derived?.files ?? []).map((file) => `${file.kind} ${file.path}${file.additions == null ? "" : ` (+${file.additions} −${file.deletions})`}`).join(", ")}`;
+      text = `Files ${p.status ?? event.type.split(".").at(-1)}: ${(p.files ?? []).map((file) => `${file.kind} ${file.path}${file.additions == null ? "" : ` (+${file.additions} −${file.deletions})`}`).join(", ")}`;
       break;
     case "usage.updated": {
       if (!verbose) return null;
-      const usage = p.tokenUsage?.total ?? {};
+      const usage = p.usage;
       text = `Tokens: input=${usage.inputTokens ?? 0} output=${usage.outputTokens ?? 0} cached=${usage.cachedInputTokens ?? 0}`;
       break;
     }
-    case "question.opened": text = `Question request=${p.requestId}: ${(p.questions ?? []).map((question) => question.question).join("; ")}`; break;
+    case "question.opened": text = `Question request=${p.requestId}: ${p.message}`; break;
     case "question.resolved": text = `director → answer delivered request=${p.requestId}`; break;
     case "question.closed": text = `Question resolved request=${p.requestId}`; break;
     case "director.notified": text = `notify_director: ${p.message ?? ""}`; break;
-    case "control.message.updated": text = `director → ${p.interrupt ? "interrupt" : "message"}: ${[...String(p.message ?? "")].slice(0, 200).join("")}`; break;
-    case "tool.started": case "tool.completed":
-      if (!verbose && item.type === "userMessage") return null;
-      text = `${item.type ?? "Tool"} ${event.type.endsWith("started") ? "started" : item.status ?? "completed"}: ${item.server ? `${item.server}/` : ""}${item.tool ?? item.query ?? item.path ?? item.text ?? item.id ?? ""}`;
+    case "control.message.updated": text = `director → ${p.mode === "interrupt" ? "interrupt" : "message"}: ${[...String(p.message ?? "")].slice(0, 200).join("")}`; break;
+    case "tool.started": case "tool.updated": case "tool.completed": {
+      const tool = p.tool;
+      if (!verbose && tool.name === "userMessage") return null;
+      const lifecycle = event.type === "tool.started" ? "started" : event.type === "tool.completed" ? tool.status : "updated";
+      text = `${tool.name ?? "Tool"} ${lifecycle}: ${tool.title ?? ""}`;
       break;
+    }
     case "tool.progress": text = p.message ?? ""; break;
-    case "plan.updated": text = `Plan: ${p.explanation ?? ""} ${(p.plan ?? []).map((step) => `${step.status}: ${step.step}`).join("; ")}`; break;
-    case "source.error": text = `Error: ${p.error?.message ?? p.message ?? "Unknown error"}`; break;
+    case "plan.updated": text = `Plan: ${p.markdown ?? ""} ${(p.entries ?? []).map((step) => `${step.status}: ${step.content}`).join("; ")}`; break;
+    case "source.error": text = `Error: ${p.message ?? "Unknown error"}`; break;
     case "source.warning": text = `Warning: ${p.message ?? ""}`; break;
     default: return null;
   }
@@ -188,6 +125,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
 }
 
 export function createLiveView(job) {
+  const executor = job.executor ?? "codex";
   return {
     schemaVersion: 1,
     jobId: job.id ?? job.jobId,
@@ -195,8 +133,9 @@ export function createLiveView(job) {
     status: job.status === "queued" ? "running" : job.status ?? "running",
     startedAt: job.startedAt ?? job.createdAt ?? null,
     endedAt: job.completedAt ?? null,
-    threadId: job.threadId ?? null,
+    threadId: job.executorSessionId ?? job.threadId ?? null,
     turnId: job.turnId ?? null,
+    executor: { kind: executor, label: executor === "acp" ? "Qoder" : "Codex" },
     activeCommands: [],
     lastMessage: null,
     files: [],
@@ -213,17 +152,16 @@ export function createLiveView(job) {
 function updateTail(view, event, text, key = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
   const row = { seq: String(event.seq), at: event.occurredAt, type: event.type, text: oneLine(text) };
-  const agentThreadId = event.type === "agent.activity" ? params(event).item.agentThreadId : event.derived?.agent?.threadId;
-  if (agentThreadId) row.agentThreadId = agentThreadId;
-  if (event.derived?.agent) {
-    row.agent = event.derived.agent.path;
+  const agent = event.type === "agent.activity" ? { id: event.payload.agentId, path: event.payload.path } : eventAgent(event, view);
+  if (agent?.id) row.agentThreadId = agent.id;
+  if (event.agent) {
+    row.agent = event.agent.path;
     row.text = `[${oneLine(row.agent)}] ${row.text}`;
     if (/^(message|reasoning)\./.test(event.type)) row.text = preview(row.text, 300);
   }
   if (event.type === "command.completed") {
-    const item = params(event).item ?? {};
-    row.exitCode = typeof item.exitCode === "number" ? item.exitCode : null;
-    row.durationMs = typeof item.durationMs === "number" ? item.durationMs : null;
+    row.exitCode = typeof event.payload.exitCode === "number" ? event.payload.exitCode : null;
+    row.durationMs = typeof event.payload.durationMs === "number" ? event.payload.durationMs : null;
   }
   const prior = key && view._items[key]?.tailSeq;
   const index = prior ? view.tail.findIndex((entry) => entry.seq === prior) : -1;
@@ -238,53 +176,57 @@ function updateTail(view, event, text, key = null) {
 }
 
 export function applyJobEvent(view, event) {
-  const p = params(event);
-  const item = p.item ?? {};
+  const p = event.payload;
+  const identity = event.identity;
   view._items ??= {};
   view._usage ??= {};
   view.history.committedSeq = String(event.seq);
-  const child = Boolean(event.derived?.agent);
-  if (!child && event.threadId && (!view.threadId || event.threadId === view.threadId)) {
-    view.threadId = event.threadId;
-    if (event.turnId) view.turnId = event.turnId;
+  const child = Boolean(event.agent);
+  if (!child && identity.sessionId && (!view.threadId || identity.sessionId === view.threadId)) {
+    view.threadId = identity.sessionId;
+    if (identity.turnId) view.turnId = identity.turnId;
   }
-  const key = event.itemId ? `${event.threadId}:${event.turnId}:${event.itemId}` : null;
+  const key = eventEntityKey(event);
+  const entityId = identity.messageId ?? identity.toolCallId;
+  const legacyKey = entityId == null ? null : `${identity.sessionId}:${identity.turnId}:${entityId}`;
+  if (key && legacyKey && key !== legacyKey && !view._items[key] && view._items[legacyKey]) {
+    view._items[key] = view._items[legacyKey];
+    delete view._items[legacyKey];
+    for (const command of view.activeCommands) if (command._key === legacyKey) command._key = key;
+  }
   const state = key ? (view._items[key] ??= { text: "", summary: [], output: "" }) : null;
   let text = renderEventText(event, { tail: true });
   let tailKey = null;
   switch (event.type) {
     case "agent.activity": {
       view.subAgents ??= [];
-      const threadId = item.agentThreadId;
+      const threadId = p.agentId;
       let agent = view.subAgents.find((entry) => entry.threadId === threadId);
       if (!agent) {
-        agent = { threadId, path: String(item.agentPath ?? threadId).split("/").filter(Boolean).at(-1),
-          status: item.kind, startedAt: item.kind === "started" ? event.occurredAt : null, endedAt: null, startedSeq: String(event.seq) };
+        agent = { threadId, path: p.path, status: p.status, startedAt: p.status === "started" ? event.occurredAt : null,
+          endedAt: null, startedSeq: String(event.seq) };
         view.subAgents.push(agent);
       }
-      if (item.agentPath) agent.path = String(item.agentPath).split("/").filter(Boolean).at(-1);
-      if (item.kind !== "interacted" && (item.kind !== "completed" || agent.status !== "failed")) agent.status = item.kind;
-      if (item.kind === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
-      if (["interrupted", "completed"].includes(item.kind)) agent.endedAt = event.occurredAt;
+      agent.path = p.path;
+      if (p.status !== "interacted" && (p.status !== "completed" || agent.status !== "failed")) agent.status = p.status;
+      if (p.status === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
+      if (["interrupted", "completed"].includes(p.status)) agent.endedAt = event.occurredAt;
       tailKey = key;
       break;
     }
-    case "job.started":
-      view.status = "running";
-      view.startedAt = p.job?.startedAt ?? view.startedAt ?? event.occurredAt;
-      break;
+    case "job.started": view.status = "running"; view.startedAt = p.startedAt ?? view.startedAt ?? event.occurredAt; break;
     case "job.completed": case "job.failed": case "job.cancelled":
       view.status = event.type.slice(4);
-      view.endedAt = p.job?.completedAt ?? event.occurredAt;
+      view.endedAt = p.completedAt ?? event.occurredAt;
       view.activeCommands = [];
       view.pendingQuestion = null;
       break;
     case "turn.started": if (!child) { view.status = "running"; view.pendingQuestion = null; } break;
-    case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== event.turnId); break;
+    case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== identity.turnId); break;
     case "command.started":
-      Object.assign(state, { command: unwrapCommand(item.command), cwd: item.cwd, turnId: event.turnId });
-      view.activeCommands.push({ itemId: event.itemId, command: state.command, cwd: item.cwd, startedAt: event.occurredAt, _key: key,
-        ...(child ? { agentThreadId: event.derived.agent.threadId } : {}) });
+      Object.assign(state, { command: unwrapCommand(p.command), cwd: p.cwd, turnId: identity.turnId });
+      view.activeCommands.push({ itemId: identity.toolCallId, command: state.command, cwd: p.cwd, startedAt: event.occurredAt, _key: key,
+        ...(child ? { agentThreadId: event.agent.id } : {}) });
       tailKey = key;
       break;
     case "command.output.delta":
@@ -299,14 +241,17 @@ export function applyJobEvent(view, event) {
       break;
     case "command.completed":
       view.activeCommands = view.activeCommands.filter((command) => command._key !== key);
+      if (state?.outputPreview) text = `$ ${state.command ?? unwrapCommand(p.command)}\n${state.outputPreview}`;
       tailKey = key;
       break;
-    case "message.delta":
-      state.text = (state.text ?? "") + (p.delta ?? "");
+    case "message.delta": {
+      const delta = blockText(p.block);
+      state.text = (state.text ?? "") + delta;
       if (!child) view.lastMessage = { kind: "assistant", text: state.text, at: event.occurredAt };
       text = preview(`assistant: ${state.text}`, 300);
       tailKey = key;
       break;
+    }
     case "reasoning.summary.delta":
       state.summary ??= [];
       state.summary[p.summaryIndex ?? 0] = (state.summary[p.summaryIndex ?? 0] ?? "") + (p.delta ?? "");
@@ -315,41 +260,43 @@ export function applyJobEvent(view, event) {
       tailKey = key;
       break;
     case "message.completed": case "reasoning.completed": {
-      const body = event.type === "message.completed" ? item.text ?? "" : (Array.isArray(item.summary) ? item.summary.join("\n") : item.summary ?? "");
+      const body = p.message.text ?? p.message.content.map(blockText).join("");
       if (!child) view.lastMessage = { kind: event.type === "message.completed" ? "assistant" : "reasoning", text: body, at: event.occurredAt };
       tailKey = key;
       break;
     }
     case "fileChange.completed": case "fileChange.patch.updated":
-      for (const file of event.derived?.files ?? []) {
+      for (const file of p.files ?? []) {
+        const value = { path: file.path, kind: file.kind, additions: file.additions, deletions: file.deletions };
         const index = view.files.findIndex((entry) => entry.path === file.path);
-        if (index < 0) view.files.push(file);
-        else view.files[index] = file;
+        if (index < 0) view.files.push(value);
+        else view.files[index] = value;
       }
       tailKey = key;
       break;
     case "usage.updated": {
-      const total = p.tokenUsage?.total;
-      if (!total) { view.usage.complete = false; break; }
-      const usageKey = event.threadId ?? "unknown";
+      const total = p.usage;
+      if (!total || total.inputTokens == null || total.outputTokens == null) { view.usage.complete = false; break; }
+      const usageKey = identity.sessionId ?? "unknown";
       const prior = view._usage[usageKey];
       const fields = ["inputTokens", "outputTokens", "cachedInputTokens"];
-      const first = prior ?? Object.fromEntries(fields.map((field) => [field, view._resumed ? Math.max(0, (total[field] ?? 0) - (p.tokenUsage?.last?.[field] ?? 0)) : 0]));
+      const first = prior ?? Object.fromEntries(fields.map((field) => [field, view._resumed ? total.baselineTokens?.[field] ?? total[field] ?? 0 : 0]));
       for (const field of fields) {
         const increment = (total[field] ?? 0) - (first[field] ?? 0);
         if (increment < 0) view.usage.complete = false;
         view.usage[field] += Math.max(0, increment);
       }
+      view.usage.complete &&= total.complete !== false;
       view._usage[usageKey] = total;
       break;
     }
     case "question.opened": {
       if (child) break;
-      const openedAt = event.occurredAt;
+      const openedAt = p.openedAt ?? event.occurredAt;
       const expires = p.expiresAt === undefined ? Date.parse(openedAt) + DEFAULT_INPUT_TIMEOUT_MS
-        : p.expiresAt === null ? NaN : typeof p.expiresAt === "number" ? p.expiresAt : Date.parse(p.expiresAt);
-      view.pendingQuestion = { requestId: String(p.requestId), text: (p.questions ?? []).map((question) => question.question).join("\n"),
-        openedAt, expiresAt: Number.isFinite(expires) ? new Date(expires).toISOString() : null };
+        : p.expiresAt === null ? NaN : Date.parse(p.expiresAt);
+      view.pendingQuestion = { requestId: String(p.requestId), text: p.message, openedAt,
+        expiresAt: Number.isFinite(expires) ? new Date(expires).toISOString() : null };
       view.status = "waiting-for-answer";
       break;
     }
@@ -366,18 +313,16 @@ export function applyJobEvent(view, event) {
   }
   if (child) {
     view.subAgents ??= [];
-    let agent = view.subAgents.find((entry) => entry.threadId === event.derived.agent.threadId);
+    let agent = view.subAgents.find((entry) => entry.threadId === event.agent.id);
     if (!agent) {
-      agent = { ...event.derived.agent, status: "started", startedAt: event.occurredAt, endedAt: null, startedSeq: String(event.seq) };
+      agent = { threadId: event.agent.id, path: event.agent.path, status: "started", startedAt: event.occurredAt, endedAt: null, startedSeq: String(event.seq) };
       view.subAgents.push(agent);
     }
-    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) {
-      agent.lastActivity = preview(text, 300);
-    }
-    if (!agent.endedAt && event.type === "turn.completed" && p.turn?.status === "failed") {
+    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) agent.lastActivity = preview(text, 300);
+    if (!agent.endedAt && event.type === "turn.completed" && p.status === "failed") {
       agent.status = "failed";
       agent.endedAt = event.occurredAt;
-      if (p.turn.error?.message) agent.lastActivity = preview(p.turn.error.message, 300);
+      if (p.reason?.message) agent.lastActivity = preview(p.reason.message, 300);
     }
   }
   updateTail(view, event, text, tailKey);

@@ -61,7 +61,7 @@ test("observe falls back to HOME data root, pins history/result reads, and merge
   assert.equal(view.stdout.trim(), path.join(recent.stateDir, "job-history/task-shared/live-view.json"));
   const replay = await h.cli(["replay", "task-shared", "--jsonl"]);
   assert.equal(replay.code, 0, replay.stderr);
-  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).source.message.params.item.text, "new");
+  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).source.raw.params.item.text, "new");
   const follow = await h.cli(["follow", "task-shared"]);
   assert.equal(follow.code, 0, follow.stderr);
   assert.match(follow.stdout, /result-new/);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 
+import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { JobEventStore, cleanupHistory, readHistory, resolveHistoryDir, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 
 async function fixture(t) {
@@ -23,7 +25,12 @@ async function fixture(t) {
 }
 
 function event(text = "hello") {
-  return { type: "message.delta", occurredAt: "2026-09-15T00:00:00.000Z", source: { message: { method: "item/agentMessage/delta", params: { delta: text } } } };
+  return createCanonicalEvent({ job: { id: "fixture" }, type: "message.delta",
+    identity: { sessionId: "thread", turnId: "turn", messageId: "message" },
+    occurredAt: "2026-09-15T00:00:00.000Z", receivedAt: "2026-09-15T00:00:00.000Z",
+    payload: { role: "assistant", block: { type: "text", text } },
+    source: { protocol: "codex-app-server", method: "item/agentMessage/delta",
+      raw: { method: "item/agentMessage/delta", params: { delta: text } } } });
 }
 
 test("history is invisible until a durable batch commit and cursors resume without duplicates", async (t) => {
@@ -45,7 +52,7 @@ test("history is invisible until a durable batch commit and cursors resume witho
   await store.flush();
   assert.equal(committed.length, 2);
   const page = await readHistory(cwd, "task-one", { limit: 1 });
-  assert.equal(page.events[0].source.message.params.delta, first.source.message.params.delta);
+  assert.equal(page.events[0].source.raw.params.delta, first.source.raw.params.delta);
   assert.deepEqual((await readHistory(cwd, "task-one", { after: page.nextCursor })).events.map((value) => value.seq), ["2"]);
   assert.equal(resolveLiveViewPath(cwd, "task-one"), path.join(resolveHistoryDir(cwd, "task-one"), "live-view.json"));
 });
@@ -61,6 +68,46 @@ test("automatic short-window batching commits pending events", async (t) => {
   t.after(() => clearTimeout(keepAlive));
   await done;
   assert.equal((await readHistory(cwd, "task-timer")).committedSeq, "1");
+});
+
+test("legacy v1 segments replay with v2 records and produce a canonical checkpoint", async (t) => {
+  const cwd = await fixture(t);
+  const jobId = "task-mixed";
+  const streamId = "legacy-stream";
+  const directory = resolveHistoryDir(cwd, jobId);
+  await fs.mkdir(path.join(directory, "segments"), { recursive: true });
+  const legacy = { schemaVersion: 1, streamId, jobId, seq: "1", type: "message.completed",
+    occurredAt: "2026-09-15T00:00:00.000Z", receivedAt: "2026-09-15T00:00:00.000Z",
+    threadId: "thread", turnId: "turn-1", itemId: "message-1", source: { message: { method: "item/completed",
+      params: { threadId: "thread", turnId: "turn-1", item: { type: "agentMessage", id: "message-1", text: "legacy" } } } } };
+  const data = JSON.stringify([legacy]);
+  const encoded = `${JSON.stringify({ events: [legacy], sha256: createHash("sha256").update(data).digest("hex") })}\n`;
+  const bytes = Buffer.byteLength(encoded);
+  await fs.writeFile(path.join(directory, "segments", "000001.events"), encoded);
+  await fs.writeFile(path.join(directory, "manifest.json"), `${JSON.stringify({ schemaVersion: 1, jobId, streamId,
+    earliestSeq: "1", committedSeq: "1", continuity: "complete", segments: [{ file: "000001.events", bytes,
+      firstSeq: "1", lastSeq: "1", blocks: [{ offset: 0, bytes, firstSeq: "1", lastSeq: "1" }] }], nextSegment: 2,
+    metadata: {}, createdAt: "2026-09-15T00:00:00.000Z", closed: true, writerPid: null })}\n`);
+  const first = await readHistory(cwd, jobId);
+  assert.equal(first.events[0].schemaVersion, 2);
+  assert.equal(first.events[0].payload.message.text, "legacy");
+  const projection = ["legacy"];
+  const store = await new JobEventStore(cwd, jobId, {
+    createCheckpoint: (events, manifest) => ({ messages: [...projection, ...events.map((entry) => entry.payload.message.text)],
+      history: { committedSeq: manifest.committedSeq } }),
+    onCommit: (events) => projection.push(...events.map((entry) => entry.payload.message.text))
+  }).initialize();
+  t.historyStores.push(store);
+  store.append(createCanonicalEvent({ job: { id: jobId }, type: "message.completed",
+    identity: { sessionId: "thread", turnId: "turn-2", messageId: "message-2" },
+    payload: { message: { messageId: "message-2", role: "assistant", content: [{ type: "text", text: "canonical" }], text: "canonical" } },
+    source: { protocol: "local", method: "test/canonical", raw: null } }));
+  await store.flush();
+  const history = await readHistory(cwd, jobId);
+  assert.deepEqual(history.events.map((entry) => [entry.schemaVersion, entry.seq, entry.payload.message.text]), [[2, "1", "legacy"], [2, "2", "canonical"]]);
+  assert.deepEqual((await readHistory(cwd, jobId, { after: first.nextCursor })).events.map((entry) => entry.seq), ["2"]);
+  assert.deepEqual(store.checkpoint.messages, ["legacy", "canonical"]);
+  assert.equal(store.checkpoint.history.committedSeq, "2");
 });
 
 test("terminated writer preserves every published cursor and recovery removes an uncommitted tail", async (t) => {
@@ -188,7 +235,7 @@ test("a crash between segment fsync and manifest publication never exposes the u
   assert.deepEqual((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events, []);
   assert.equal(store.append(event("after crash")).seq, "2");
   await store.flush();
-  assert.equal((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events[0].source.message.params.delta, "after crash");
+  assert.equal((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events[0].source.raw.params.delta, "after crash");
 });
 
 test("retention publishes a complete projection checkpoint before removing old event segments", async (t) => {
@@ -198,9 +245,9 @@ test("retention publishes a complete projection checkpoint before removing old e
     let view = { texts: [], history: { committedSeq: "0" } };
     const store = await new JobEventStore(process.argv[1], "task-checkpoint", {
       segmentBytes: 700, maxJobBytes: 1500,
-      createCheckpoint: (events, manifest) => ({ texts: [...view.texts, ...events.map(e => e.source.message.params.text)], history: { committedSeq: manifest.committedSeq } }),
+      createCheckpoint: (events, manifest) => ({ texts: [...view.texts, ...events.map(e => e.payload.message.text)], history: { committedSeq: manifest.committedSeq } }),
       onCommit: async (events) => {
-        view.texts.push(...events.map(e => e.source.message.params.text));
+        view.texts.push(...events.map(e => e.payload.message.text));
         view.history.committedSeq = events.at(-1).seq;
         if (view.history.committedSeq === "6") {
           process.stdout.write((await readHistory(process.argv[1], "task-checkpoint")).nextCursor + "\\n");

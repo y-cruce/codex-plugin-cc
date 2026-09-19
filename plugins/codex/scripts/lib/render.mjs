@@ -103,8 +103,22 @@ function escapeMarkdownCell(value) {
     .trim();
 }
 
+function isCodexJob(job) {
+  return (job?.executor ?? job?.request?.executor ?? "codex") === "codex";
+}
+
+// Only a Codex thread can be resumed with the codex CLI, and only Codex runs in
+// a sandbox; another executor's footer must not claim either.
+function formatSessionFooter(job, sessionId, indent = "") {
+  if (!sessionId) return [];
+  if (!isCodexJob(job)) {
+    return [`${indent}Session ID: ${sessionId}`];
+  }
+  return [`${indent}Codex session ID: ${sessionId}`, `${indent}Resume in Codex: codex resume ${sessionId}`];
+}
+
 function formatCodexResumeCommand(job) {
-  if (!job?.threadId) {
+  if (!job?.threadId || !isCodexJob(job)) {
     return null;
   }
   return `codex resume ${job.threadId}`;
@@ -126,6 +140,10 @@ function appendActiveJobsTable(lines, jobs) {
 }
 
 function formatSandboxDetails(job) {
+  if (job && !isCodexJob(job)) {
+    const mode = job.executorMode ?? job.request?.executorMode;
+    return mode ? `Mode: ${mode}` : "";
+  }
   const sandbox = job?.sandbox ?? job?.request?.sandbox;
   if (!sandbox) return "";
   const network = sandbox === "danger-full-access" ||
@@ -154,13 +172,7 @@ function pushJobDetails(lines, job, options = {}) {
   if (options.showDuration && job.duration) {
     lines.push(`  Duration: ${job.duration}`);
   }
-  if (job.threadId) {
-    lines.push(`  Codex session ID: ${job.threadId}`);
-  }
-  const resumeCommand = formatCodexResumeCommand(job);
-  if (resumeCommand) {
-    lines.push(`  Resume in Codex: ${resumeCommand}`);
-  }
+  lines.push(...formatSessionFooter(job, job.threadId, "  "));
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
   }
@@ -427,7 +439,8 @@ export function renderJobStatusReport(job) {
 
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
-  const resumeCommand = threadId ? `codex resume ${threadId}` : null;
+  const footerJob = storedJob ?? job;
+  const sessionFooter = formatSessionFooter(footerJob, threadId).join("\n");
   const sandboxDetails = formatSandboxDetails(storedJob) || formatSandboxDetails(job);
   const sandboxSuffix = sandboxDetails ? `\n${sandboxDetails}\n` : "";
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
@@ -435,7 +448,7 @@ export function renderStoredJobResult(job, storedJob) {
     if (!threadId) {
       return `${output}${sandboxSuffix}`;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n${sandboxSuffix}`;
+    return `${output}\n${sessionFooter}\n${sandboxSuffix}`;
   }
 
   const rawOutput =
@@ -447,7 +460,7 @@ export function renderStoredJobResult(job, storedJob) {
     if (!threadId) {
       return `${output}${sandboxSuffix}`;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n${sandboxSuffix}`;
+    return `${output}\n${sessionFooter}\n${sandboxSuffix}`;
   }
 
   if (storedJob?.rendered) {
@@ -455,7 +468,7 @@ export function renderStoredJobResult(job, storedJob) {
     if (!threadId) {
       return `${output}${sandboxSuffix}`;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n${sandboxSuffix}`;
+    return `${output}\n${sessionFooter}\n${sandboxSuffix}`;
   }
 
   const lines = [
@@ -466,10 +479,7 @@ export function renderStoredJobResult(job, storedJob) {
   ];
   if (sandboxDetails) lines.push(sandboxDetails);
 
-  if (threadId) {
-    lines.push(`Codex session ID: ${threadId}`);
-    lines.push(`Resume in Codex: ${resumeCommand}`);
-  }
+  lines.push(...formatSessionFooter(footerJob, threadId));
 
   if (job.summary) {
     lines.push(`Summary: ${job.summary}`);

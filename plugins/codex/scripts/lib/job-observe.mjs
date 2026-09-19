@@ -11,6 +11,7 @@ import { ObservationClient } from "./observation-client.mjs";
 import { readObservationJson, observationRoots, observationJobs, resolveObservationRoot } from "./observation-paths.mjs";
 import { liveStatus } from "./live-commands.mjs";
 import { claimQuestion } from "./question-report.mjs";
+import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ");
@@ -44,14 +45,17 @@ function prefix(job) {
 }
 
 async function eventExit(event, job, until, location) {
-  const p = event.source.message.params;
-  const threadId = event.threadId ?? job.threadId ?? "unknown";
+  const p = event.payload;
+  const threadId = event.identity.sessionId ?? job.executorSessionId ?? job.threadId ?? "unknown";
   if (event.type === "question.opened") {
     const endpoint = location.fallback ? (await readObservationJson(path.join(location.stateDir, "broker.json")))?.endpoint : undefined;
-    const live = await liveStatus(location.cwd, { threadId }, { brokerEndpoint: endpoint });
+    const live = job.executor || job.controlEndpoint || endpoint
+      ? await liveStatus(location.cwd, { ...job, executorSessionId: event.identity.sessionId ?? job.executorSessionId,
+          threadId: event.identity.sessionId ?? job.threadId }, { brokerEndpoint: endpoint })
+      : null;
     if (Array.isArray(live?.questions) && !live.questions.some((question) => String(question.requestId) === String(p.requestId))) return null;
     const first = await claimQuestion(location.stateDir, job.id, p.requestId);
-    const text = oneLine(p.questions?.[0]?.question).slice(0, 200);
+    const text = oneLine(p.message).slice(0, 200);
     return first ? `QUESTION ${prefix(job)} request=${p.requestId} ${text}`
       : `QUESTION_PENDING ${prefix(job)} request=${p.requestId} still unanswered: ${text}`;
   }
@@ -61,7 +65,7 @@ async function eventExit(event, job, until, location) {
   }
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
     if (event.type === "job.completed") return `DONE ${prefix(job)} thread=${threadId}`;
-    return `FAILED ${prefix(job)} thread=${threadId} ${oneLine(p.job?.errorMessage ?? p.job?.result?.error?.message ?? "unknown")}`;
+    return `FAILED ${prefix(job)} thread=${threadId} ${oneLine(p.error?.message ?? p.reason?.message ?? "unknown")}`;
   }
   return null;
 }
@@ -76,7 +80,14 @@ async function follow(location, job, options) {
   let manifest = await metadata(location, job.id);
   let initial = manifest ? await history(location, job.id, { after: options.after, limit: 1 }) : null;
   let client;
-  if (!terminal(job.status)) client = await ObservationClient.connect(cwd, location);
+  if (!terminal(job.status) && job.executor === "acp" && !job.controlEndpoint) {
+    const deadline = Date.now() + 10000;
+    while (!job.controlEndpoint && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      job = await findJob(location, job.id);
+    }
+  }
+  if (!terminal(job.status)) client = await ObservationClient.connect(cwd, { ...location, job });
   // Dispatch returns before its detached worker has registered with the broker.
   // Keep this connection open while that worker publishes the history identity.
   if (!manifest && client && job.status === "queued") {
@@ -95,7 +106,7 @@ async function follow(location, job, options) {
   let cursor = options.after ?? cursorFor({ jobId: job.id, streamId: initial.streamId }, BigInt(initial.earliestSeq) - 1n);
   let finished = false;
   let lastProgress = followStartedAt;
-  let lastThread = job.threadId;
+  let lastThread = job.executorSessionId ?? job.threadId;
   let resolveDone;
   let rejectDone;
   const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
@@ -115,12 +126,13 @@ async function follow(location, job, options) {
   const processPage = async (page) => {
     for (const event of page.events) {
       if (finished) return;
-      cursor = cursorFor({ jobId: job.id, streamId: page.streamId }, event.seq);
-      lastThread = event.threadId ?? lastThread;
-      lastProgress = Math.max(lastProgress, Date.parse(event.receivedAt) || 0);
-      const text = renderJobEvent(event, { verbose: Boolean(options.verbose) });
-      if (text != null && !options.quiet) await write(`${clock(event.occurredAt)} ${text}\n`);
-      const exit = await eventExit(event, job, until, location);
+      const canonical = upgradeLegacyJobEvent({ ...event, jobId: event.jobId ?? job.id });
+      cursor = cursorFor({ jobId: job.id, streamId: page.streamId }, canonical.seq);
+      lastThread = canonical.identity.sessionId ?? lastThread;
+      lastProgress = Math.max(lastProgress, Date.parse(canonical.receivedAt) || 0);
+      const text = renderJobEvent(canonical, { verbose: Boolean(options.verbose) });
+      if (text != null && !options.quiet) await write(`${clock(canonical.occurredAt)} ${text}\n`);
+      const exit = await eventExit(canonical, job, until, location);
       if (exit) { await finish(exit); return; }
     }
     if (!page.events.length) cursor = page.nextCursor;
@@ -172,7 +184,7 @@ async function follow(location, job, options) {
         after = page.nextCursor;
         if (finished) break;
         if (!page.events.length || page.events.at(-1).seq === page.committedSeq) {
-          await finish(`${job.status === "completed" ? "DONE" : "FAILED"} ${prefix(job)} thread=${job.threadId ?? "unknown"}${job.status === "completed" ? "" : ` ${oneLine(job.errorMessage ?? "unknown")}`}`);
+          await finish(`${job.status === "completed" ? "DONE" : "FAILED"} ${prefix(job)} thread=${job.executorSessionId ?? job.threadId ?? "unknown"}${job.status === "completed" ? "" : ` ${oneLine(job.errorMessage ?? "unknown")}`}`);
         }
       } while (!finished);
     }

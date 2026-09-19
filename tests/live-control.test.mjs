@@ -10,6 +10,7 @@ import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoi
 import { ensureBrokerSession, saveBrokerSession, sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
 import { initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
+import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -281,6 +282,20 @@ test("message --interrupt continues the original job and reports retained change
   assert.match(report.workspaceStatus, /partial.txt/);
   assert.equal(fs.readFileSync(path.join(h.repo, "partial.txt"), "utf8"), "partial");
   assert.equal(fs.readFileSync(path.join(h.repo, "written.txt"), "utf8"), "write redirected");
+});
+
+test("liveStatus resolves a running job from executorSessionId without threadId", async (t) => {
+  const h = await setup(t);
+  const { job, done } = await startJob(t, h, "hold");
+  assert.equal(job.executor, "codex");
+  assert.equal(job.executorSessionId, job.threadId);
+  assert.equal(job.controlEndpoint, h.endpoint);
+  const live = await liveStatus(h.repo, { ...job, threadId: undefined });
+  assert.equal(live.turnId, job.turnId);
+  assert.equal(live.capabilities.midTurnSteer, true);
+  const finished = h.cli("message", job.id, "finish");
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.equal((await done).code, 0);
 });
 
 test("CLI status exposes questions and answer resumes the original job", async (t) => {

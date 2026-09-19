@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
 import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
-import { normalizeJobEvent, applyJobEvent, createLiveView, renderJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { CodexEventAdapter, normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
+import { applyJobEvent, createLiveView, renderJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
@@ -23,26 +24,27 @@ test("subAgentActivity of every kind binds buffered and future child events to o
     upsertJob(cwd, job);
     const runtime = new JobRuntime();
     const owner = {};
+    const adapter = new CodexEventAdapter((event) => runtime.record(event));
     try {
       await runtime.register(owner, cwd, job.id);
-      await runtime.bind(owner, "parent");
-      await runtime.observe(childMessage("buffered"));
-      assert.equal(runtime.pendingThreads.get("child").length, 1);
-      await runtime.observe(activity(kind));
-      assert.equal(runtime.pendingThreads.has("child"), false);
-      await runtime.observe(childMessage("future"));
-      await runtime.observe(activity(kind, "item/completed"));
-      await runtime.observe(childMessage("late"));
+      await adapter.bindSession("parent", job);
+      await adapter.accept(childMessage("buffered"));
+      assert.equal(adapter.pending.get("child").length, 1);
+      await adapter.accept(activity(kind));
+      assert.equal(adapter.pending.has("child"), false);
+      await adapter.accept(childMessage("future"));
+      await adapter.accept(activity(kind, "item/completed"));
+      await adapter.accept(childMessage("late"));
       const entry = [...runtime.jobs.values()][0];
       await entry.store.flush();
       const history = await readHistory(cwd, job.id);
-      const children = history.events.filter((event) => event.threadId === "child");
+      const children = history.events.filter((event) => event.identity.sessionId === "child");
       assert.equal(children.length, 3);
       for (const event of children) {
         assert.equal(event.jobId, job.id);
-        assert.deepEqual(event.derived.agent, { threadId: "child", path: "review_41_44" });
+        assert.deepEqual(event.agent, { id: "child", path: "review_41_44", parentId: "parent" });
         assert.match(renderJobEvent(event), /^\[review_41_44\] assistant:/);
-        assert.equal(event.source.message.params.threadId, "child");
+        assert.equal(event.source.raw.params.threadId, "child");
       }
       assert.equal(entry.view.lastMessage, null);
       assert.equal(entry.view.subAgents[0].status, kind);
@@ -58,9 +60,8 @@ test("child messages and questions do not replace the parent's current state", (
   const view = createLiveView(job);
   let seq = 0;
   const accept = (message, agent = false) => {
-    const event = normalizeJobEvent(message, job);
+    const event = normalizeJobEvent(message, job, agent ? { id: "child", path: "review_41_44", parentId: "parent" } : null);
     event.seq = String(++seq);
-    if (agent) event.derived = { ...event.derived, agent: { threadId: "child", path: "review_41_44" } };
     applyJobEvent(view, event);
     return event;
   };
@@ -86,9 +87,8 @@ test("agent summaries retain activity and original positions after replacement, 
   const view = createLiveView(job);
   let seq = 0;
   const accept = (message, child = false) => {
-    const event = normalizeJobEvent(message, job);
+    const event = normalizeJobEvent(message, job, child ? { id: "child", path: "review_41_44", parentId: "parent" } : null);
     event.seq = String(++seq);
-    if (child) event.derived = { ...event.derived, agent: { threadId: "child", path: "review_41_44" } };
     applyJobEvent(view, event);
     return event;
   };
@@ -129,9 +129,8 @@ test("agent summaries retain activity and original positions after replacement, 
 test("a child observed before its lifecycle gets the eventual agent name without losing activity", () => {
   const job = { id: "task", threadId: "parent" };
   const view = createLiveView(job);
-  const message = normalizeJobEvent(childMessage("early progress"), job);
+  const message = normalizeJobEvent(childMessage("early progress"), job, { id: "child", path: "child", parentId: "parent" });
   message.seq = "1";
-  message.derived = { agent: { threadId: "child", path: "child" } };
   applyJobEvent(view, message);
   const started = normalizeJobEvent(activity("started"), job);
   started.seq = "2";

@@ -6,7 +6,8 @@ import { terminalOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } 
 import { clip, liveTree, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
 import { markdown } from '../plugins/codex/hooks/live-tool-row/markdown.ts';
 
-import { createLiveView, normalizeJobEvent, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
+import { createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 
 tier('user');
 describe('live ToolUse row', () => {
@@ -331,6 +332,19 @@ describe('live row polish', () => {
     assert.equal(waiting('2026-09-15T00:00:00Z', '2026-09-15T00:01:00Z', now), 'waiting 3m · expires in 0s');
     assert.equal(tailLimit(), 8);
   });
+  test('renders ACP executor labels and unavailable token degradation', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.executor = { kind: 'acp', label: 'Qoder' };
+    data.usage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false };
+    data.activeCommands = [{ itemId: 'tool-1', command: 'Build project', cwd: '/work', startedAt: data.startedAt }];
+    data.files = [];
+    data.subAgents = [];
+    const text = textOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt)));
+    assert.match(text, /^● Qoder · fixture task · running · 0s · tokens unavailable/m);
+    assert.match(text, /^\$ Build project · 0s$/m);
+    assert.equal(statusText([data], Date.parse(data.startedAt)), 'Qoder · 1 running · fixture task 0s $ Build project');
+  });
   test('renders a completed card once, preserves original output, and falls back on interruption/error', async ($, on) => {
     const { state, clock } = world($, on);
     const data = { ...fixture(), status: 'completed', endedAt: '2026-09-15T00:01:02Z' };
@@ -433,9 +447,9 @@ describe('live row polish', () => {
     const data = createLiveView({ id: "task", threadId: "parent", startedAt: fixture().startedAt });
     let seq = 0;
     const accept = (item, child = false, method = "item/completed") => {
-      const event = normalizeJobEvent({ method, params: { threadId: child ? "child" : "parent", turnId: "turn", item } }, { id: "task", threadId: "parent" });
+      const event = normalizeJobEvent({ method, params: { threadId: child ? "child" : "parent", turnId: "turn", item } },
+        { id: "task", threadId: "parent" }, child ? { id: "child", path: "baseline", parentId: "parent" } : null);
       event.seq = String(++seq);
-      if (child) event.derived = { ...event.derived, agent: { threadId: "child", path: "baseline" } };
       applyJobEvent(data, event);
     };
     const render = result => rowsOf(liveTree($.ui.resolve(row()), JSON.parse(JSON.stringify(data)), 120, 0, 16, result));

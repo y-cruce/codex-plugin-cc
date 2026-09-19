@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { finishObservedJob } from "./observation-client.mjs";
+import { jobStatusForTerminal } from "./executor-port.mjs";
 
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
@@ -15,8 +16,11 @@ function normalizeProgressEvent(value) {
     return {
       message: String(value.message ?? "").trim(),
       phase: typeof value.phase === "string" && value.phase.trim() ? value.phase.trim() : null,
+      executor: typeof value.executor === "string" && value.executor.trim() ? value.executor.trim() : null,
+      executorSessionId: typeof value.executorSessionId === "string" && value.executorSessionId.trim() ? value.executorSessionId.trim() : null,
       threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
       turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
+      controlEndpoint: typeof value.controlEndpoint === "string" && value.controlEndpoint.trim() ? value.controlEndpoint.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -26,8 +30,11 @@ function normalizeProgressEvent(value) {
   return {
     message: String(value ?? "").trim(),
     phase: null,
+    executor: null,
+    executorSessionId: null,
     threadId: null,
     turnId: null,
+    controlEndpoint: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -70,8 +77,11 @@ export function createJobRecord(base, options = {}) {
 
 export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
+  let lastExecutor = null;
+  let lastExecutorSessionId = null;
   let lastThreadId = null;
   let lastTurnId = null;
+  let lastControlEndpoint = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -84,6 +94,18 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       changed = true;
     }
 
+    if (normalized.executor && normalized.executor !== lastExecutor) {
+      lastExecutor = normalized.executor;
+      patch.executor = normalized.executor;
+      changed = true;
+    }
+
+    if (normalized.executorSessionId && normalized.executorSessionId !== lastExecutorSessionId) {
+      lastExecutorSessionId = normalized.executorSessionId;
+      patch.executorSessionId = normalized.executorSessionId;
+      changed = true;
+    }
+
     if (normalized.threadId && normalized.threadId !== lastThreadId) {
       lastThreadId = normalized.threadId;
       patch.threadId = normalized.threadId;
@@ -93,6 +115,12 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     if (normalized.turnId && normalized.turnId !== lastTurnId) {
       lastTurnId = normalized.turnId;
       patch.turnId = normalized.turnId;
+      changed = true;
+    }
+
+    if (normalized.controlEndpoint && normalized.controlEndpoint !== lastControlEndpoint) {
+      lastControlEndpoint = normalized.controlEndpoint;
+      patch.controlEndpoint = normalized.controlEndpoint;
       changed = true;
     }
 
@@ -154,27 +182,41 @@ export async function runTrackedJob(job, runner, options = {}) {
 
   try {
     const execution = await runner();
-    const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
+    const completionStatus = jobStatusForTerminal(execution.terminal, execution.exitStatus);
     const completedAt = nowIso();
+    const executorSessionId = execution.sessionId ?? execution.executorSessionId ?? execution.threadId ?? null;
+    const executor = execution.executor ?? runningRecord.executor ?? "codex";
+    const terminalMessage = completionStatus === "completed" ? null
+      : execution.terminal?.reason?.message ?? execution.terminal?.reason?.code ?? null;
+    const result = execution.terminal
+      ? { ...execution.payload, terminal: execution.terminal }
+      : execution.payload;
+    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     writeJobFile(job.workspaceRoot, job.id, {
-      ...runningRecord,
+      ...existing,
       status: completionStatus,
+      executor,
+      executorSessionId,
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       pid: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
+      phase: completionStatus === "completed" ? "done" : completionStatus,
       completedAt,
-      result: execution.payload,
+      ...(terminalMessage ? { errorMessage: terminalMessage } : {}),
+      result,
       rendered: execution.rendered
     });
     upsertJob(job.workspaceRoot, {
       id: job.id,
       status: completionStatus,
+      executor,
+      executorSessionId,
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       summary: execution.summary,
-      phase: completionStatus === "completed" ? "done" : "failed",
+      phase: completionStatus === "completed" ? "done" : completionStatus,
       pid: null,
+      ...(terminalMessage ? { errorMessage: terminalMessage } : {}),
       completedAt
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);

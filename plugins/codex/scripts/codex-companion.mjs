@@ -15,14 +15,14 @@ import {
     getCodexAvailability,
     getSessionRuntimeStatus,
     importExternalAgentSession,
-    interruptAppServerTurn,
     parseStructuredOutput,
     readOutputSchema,
     runAppServerReview,
     runAppServerTurn
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
-import { acknowledgeNotifications, liveStatus, sendLiveCommand } from "./lib/live-commands.mjs";
+import { runAcpTurn } from "./lib/acp.mjs";
+import { acknowledgeNotifications, cancelLiveJob, liveStatus, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
 import { finishObservedJob } from "./lib/observation-client.mjs";
@@ -317,11 +317,12 @@ function filterJobsForCurrentClaudeSession(jobs) {
   return jobs.filter((job) => job.sessionId === sessionId);
 }
 
-function findLatestResumableTaskJob(jobs) {
+function findLatestResumableTaskJob(jobs, executor = "codex") {
   return (
     jobs.find(
       (job) =>
         job.jobClass === "task" &&
+        (job.executor ?? "codex") === executor &&
         job.threadId &&
         job.status !== "queued" &&
         job.status !== "running"
@@ -341,12 +342,10 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
     snapshot.job.live = await liveStatus(snapshot.workspaceRoot, snapshot.job);
     snapshot.job = checkJobLiveness(snapshot.workspaceRoot, snapshot.job, snapshot.job.live, brokerFailures);
     if (!isActiveJobStatus(snapshot.job.status)) break;
-    if (snapshot.job.threadId) {
-      if (snapshot.job.live?.questions?.length) return { ...snapshot, waitingForAnswer: true, waitTimedOut: false, timeoutMs };
-      if (snapshot.job.live?.notifications?.length) {
-        await acknowledgeNotifications(snapshot.workspaceRoot, snapshot.job, snapshot.job.live.notifications.map((notification) => notification.id));
-        return { ...snapshot, hasNotifications: true, waitTimedOut: false, timeoutMs };
-      }
+    if (snapshot.job.live?.questions?.length) return { ...snapshot, waitingForAnswer: true, waitTimedOut: false, timeoutMs };
+    if (snapshot.job.live?.notifications?.length) {
+      await acknowledgeNotifications(snapshot.workspaceRoot, snapshot.job, snapshot.job.live.notifications.map((notification) => notification.id));
+      return { ...snapshot, hasNotifications: true, waitTimedOut: false, timeoutMs };
     }
     const lastStall = Date.parse(snapshot.job.lastStalledAt ?? "") || 0;
     if (snapshot.job.status === "running" && Date.now() - Math.max(lastJobProgressAt(snapshot.job), lastStall) >= stallMs) {
@@ -377,7 +376,8 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
   }
 
-  const trackedTask = findLatestResumableTaskJob(visibleJobs);
+  const executor = options.executor ?? "codex";
+  const trackedTask = findLatestResumableTaskJob(visibleJobs, executor);
   if (trackedTask) {
     return { id: trackedTask.threadId };
   }
@@ -386,11 +386,11 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
     return null;
   }
 
-  return findLatestTaskThread(workspaceRoot);
+  return executor === "codex" ? findLatestTaskThread(workspaceRoot) : null;
 }
 
-function requireTrackedThreadForWorkspace(workspaceRoot, threadId) {
-  if (listJobs(workspaceRoot).some((job) => job.threadId === threadId)) {
+function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "codex") {
+  if (listJobs(workspaceRoot).some((job) => job.threadId === threadId && (job.executor ?? "codex") === executor)) {
     return;
   }
 
@@ -486,8 +486,11 @@ async function executeReviewRun(request) {
 
   return {
     exitStatus: result.status,
+    executor: result.executor,
+    sessionId: result.sessionId,
     threadId: result.threadId,
     turnId: result.turnId,
+    terminal: result.terminal,
     payload,
     rendered: renderReviewResult(parsed, {
       reviewLabel: reviewName,
@@ -504,20 +507,22 @@ async function executeReviewRun(request) {
 
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  ensureCodexAvailable(request.cwd);
+  if (request.executor === "codex") ensureCodexAvailable(request.cwd);
   if (request.resumeThreadId && !request.allowOtherRepo) {
-    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId);
+    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId, request.executor);
   }
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
-    resumeLast: Boolean(request.resumeLast || request.resumeThreadId)
+    resumeLast: Boolean(request.resumeLast || request.resumeThreadId),
+    executor: request.executor
   });
 
   let resumeThreadId = request.resumeThreadId ?? null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
-      excludeJobId: request.jobId
+      excludeJobId: request.jobId,
+      executor: request.executor
     });
     if (!latestThread) {
       throw new Error("No previous Codex task thread was found for this repository.");
@@ -529,7 +534,7 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runAppServerTurn(workspaceRoot, {
+  const result = await (request.executor === "acp" ? runAcpTurn : runAppServerTurn)(workspaceRoot, {
     resumeThreadId,
     prompt: request.prompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
@@ -539,7 +544,13 @@ async function executeTaskRun(request) {
     network: Boolean(request.network),
     onProgress: request.onProgress,
     persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
+    resumeSessionId: resumeThreadId,
+    command: request.executorCommand,
+    args: request.executorArgs,
+    modeId: request.executorMode,
+    modelId: request.executorModel,
+    title: taskMetadata.title
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -558,8 +569,11 @@ async function executeTaskRun(request) {
   );
   const payload = {
     status: result.status,
+    executor: result.executor,
     threadId: result.threadId,
+    executorSessionId: result.sessionId,
     rawOutput,
+    finalContent: result.finalContent ?? [],
     touchedFiles: result.touchedFiles,
     interruptedTurns: result.interruptedTurns,
     error: result.error ?? null,
@@ -568,8 +582,11 @@ async function executeTaskRun(request) {
 
   return {
     exitStatus: result.status,
+    executor: result.executor,
+    sessionId: result.sessionId,
     threadId: result.threadId,
     turnId: result.turnId,
+    terminal: result.terminal,
     payload,
     rendered,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
@@ -587,7 +604,7 @@ function buildReviewJobMetadata(reviewName, target) {
   };
 }
 
-function buildTaskRunMetadata({ prompt, resumeLast = false }) {
+function buildTaskRunMetadata({ prompt, resumeLast = false, executor = "codex" }) {
   if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
       title: "Codex Stop Gate Review",
@@ -595,7 +612,8 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
     };
   }
 
-  const title = resumeLast ? "Codex Resume" : "Codex Task";
+  const label = executor === "acp" ? "ACP" : "Codex";
+  const title = resumeLast ? `${label} Resume` : `${label} Task`;
   const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
   return {
     title,
@@ -645,7 +663,7 @@ function createTrackedProgress(job, options = {}) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, label) {
+function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, label, executor = "codex") {
   return { ...createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -655,10 +673,11 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
     summary: taskMetadata.summary,
     write,
     label
-  }), sandbox, network };
+  }), executor, sandbox, network };
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId,
+  executor, executorCommand, executorArgs, executorMode, executorModel }) {
   return {
     cwd,
     model,
@@ -670,7 +689,12 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     resumeLast,
     resumeThreadId,
     allowOtherRepo,
-    jobId
+    jobId,
+    executor,
+    executorCommand,
+    executorArgs,
+    executorMode,
+    executorModel
   };
 }
 
@@ -824,7 +848,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -836,6 +860,24 @@ async function handleTask(argv) {
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
+  const executor = String(options.executor ?? process.env.CODEX_COMPANION_EXECUTOR ?? "codex").trim();
+  if (!["codex", "acp"].includes(executor)) throw new Error("--executor must be codex or acp.");
+  let executorCommand = null;
+  let executorArgs = [];
+  let executorMode = null;
+  let executorModel = null;
+  if (executor === "acp") {
+    executorCommand = options["executor-command"] ?? process.env.CODEX_COMPANION_ACP_COMMAND ?? null;
+    const executorArgsText = options["executor-args"] ?? process.env.CODEX_COMPANION_ACP_ARGS ?? "[]";
+    try { executorArgs = JSON.parse(executorArgsText); }
+    catch { throw new Error("--executor-args must be a JSON array of strings."); }
+    if (!Array.isArray(executorArgs) || executorArgs.some((value) => typeof value !== "string")) {
+      throw new Error("--executor-args must be a JSON array of strings.");
+    }
+    executorMode = options["executor-mode"] ?? process.env.CODEX_COMPANION_ACP_MODE ?? null;
+    executorModel = options["executor-model"] ?? process.env.CODEX_COMPANION_ACP_MODEL ?? null;
+    if (!executorCommand) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
+  }
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const resumeThreadId = options.thread == null ? null : String(options.thread).trim();
@@ -858,10 +900,12 @@ async function handleTask(argv) {
   const network = Boolean(options.network);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
-    resumeLast: Boolean(resumeLast || resumeThreadId)
+    resumeLast: Boolean(resumeLast || resumeThreadId),
+    executor
   });
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, options.label);
+  const job = { ...buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, options.label, executor),
+    ...(executorMode ? { executorMode } : {}), ...(executorModel ? { executorModel } : {}) };
   const request = buildTaskRequest({
     cwd,
     model,
@@ -873,15 +917,20 @@ async function handleTask(argv) {
     resumeLast,
     resumeThreadId,
     allowOtherRepo,
-    jobId: job.id
+    jobId: job.id,
+    executor,
+    executorCommand,
+    executorArgs,
+    executorMode,
+    executorModel
   });
   job.request = request;
 
   if (options.background) {
-    ensureCodexAvailable(cwd);
+    if (executor === "codex") ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, Boolean(resumeLast || resumeThreadId));
     if (resumeThreadId && !allowOtherRepo) {
-      requireTrackedThreadForWorkspace(workspaceRoot, resumeThreadId);
+      requireTrackedThreadForWorkspace(workspaceRoot, resumeThreadId, executor);
     }
 
     const { payload } = enqueueBackgroundTask(cwd, job, request);
@@ -1116,8 +1165,7 @@ async function handleCancel(argv) {
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
-
-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
+  const interrupt = await cancelLiveJob(cwd, { ...job, ...existing, threadId, turnId });
   if (interrupt.attempted) {
     appendLogLine(
       job.logFile,

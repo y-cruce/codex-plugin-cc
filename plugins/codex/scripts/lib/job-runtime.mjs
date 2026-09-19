@@ -1,18 +1,36 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { JobEventStore, readHistory, resolveLiveViewPath, cursorFor, cleanupHistory } from "./job-event-store.mjs";
-import { normalizeJobEvent, createLiveView, applyJobEvent } from "./job-event-model.mjs";
+import { createCanonicalEvent } from "./executor-events.mjs";
+import { createLiveView, applyJobEvent } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
+const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified"]);
+
+function jobEvent(job, type) {
+  const completedAt = job.completedAt ?? new Date().toISOString();
+  const status = type.slice(4);
+  const errorMessage = job.errorMessage ?? job.result?.error?.message ?? null;
+  const terminal = job.result?.terminal ?? null;
+  return createCanonicalEvent({
+    job,
+    type,
+    identity: { sessionId: job.executorSessionId ?? job.threadId ?? null, turnId: job.turnId ?? null },
+    occurredAt: type === "job.started" ? job.startedAt ?? job.createdAt : completedAt,
+    payload: type === "job.started"
+      ? { label: job.label ?? job.title ?? job.id, startedAt: job.startedAt ?? job.createdAt ?? completedAt }
+      : { status, reason: terminal?.reason ?? { code: status === "cancelled" ? "cancelled" : status === "completed" ? "end_turn" : "backend_error",
+        backendCode: status, message: errorMessage, retryable: false }, completedAt, finalMessages: terminal?.finalMessages ?? [],
+        error: errorMessage ? { message: errorMessage } : null },
+    source: { protocol: "local", method: type, raw: null }
+  });
+}
 
 export class JobRuntime {
   constructor() {
     this.jobs = new Map();
     this.owners = new Map();
-    this.threads = new Map();
-    this.agents = new Map();
-    this.pendingThreads = new Map();
     this.followers = new Map();
     this.reconciling = false;
     this.timer = setInterval(() => this.reconcile().catch((error) => this.diagnostic(error)), 1000);
@@ -76,12 +94,8 @@ export class JobRuntime {
         if (!history.events.length || history.events.at(-1).seq === history.committedSeq) break;
       } while (true);
       this.jobs.set(key, entry);
-      for (const agent of entry.view.subAgents ?? []) {
-        this.threads.set(agent.threadId, entry);
-        this.agents.set(agent.threadId, { threadId: agent.threadId, path: agent.path });
-      }
       if (entry.store.snapshot.committedSeq === "0") {
-        await this.append(entry, { method: "companion/job-started", params: { job } });
+        await this.append(entry, jobEvent(job, "job.started"));
         await entry.store.flush();
       }
       clearTimeout(entry.viewTimer);
@@ -93,55 +107,26 @@ export class JobRuntime {
     return { historyAvailable: true, jobId, streamId: entry.store.snapshot.streamId };
   }
 
-  async bind(socket, threadId) {
-    const entry = this.owners.get(socket);
-    if (!entry || !threadId) return;
-    this.threads.set(threadId, entry);
-    this.agents.delete(threadId);
-    await this.bindThread(entry, threadId);
+  jobForSocket(socket) {
+    return this.owners.get(socket)?.job ?? null;
   }
 
-  async bindThread(entry, threadId, agentPath) {
-    if (this.threads.has(threadId) && this.threads.get(threadId) !== entry) return;
-    this.threads.set(threadId, entry);
-    if (agentPath) this.agents.set(threadId, { threadId, path: agentPath.split("/").filter(Boolean).at(-1) ?? threadId });
-    const buffered = this.pendingThreads.get(threadId) ?? [];
-    this.pendingThreads.delete(threadId);
-    for (const message of buffered) await this.observe(message);
+  jobForId(cwd, jobId) {
+    const entry = [...this.jobs.values()].find((item) => item.cwd === cwd && item.job.id === jobId);
+    return entry ? readStoredJob(cwd, jobId) ?? entry.job : null;
   }
 
-  async observe(message) {
-    const p = message.params ?? {};
-    const threadId = p.threadId ?? p.thread?.id;
-    const parentId = p.thread?.source?.subagent?.thread_spawn?.parent_thread_id;
-    if (threadId && parentId && this.threads.has(parentId) && !this.threads.has(threadId)) {
-      await this.bindThread(this.threads.get(parentId), threadId, p.thread?.name ?? threadId);
-    }
-    const entry = this.threads.get(threadId);
-    if (!entry) {
-      if (threadId && this.pendingThreads.size < 64) {
-        const pending = this.pendingThreads.get(threadId) ?? [];
-        if (pending.length < 256) pending.push(structuredClone(message));
-        this.pendingThreads.set(threadId, pending);
-      }
-      return;
-    }
-    await this.append(entry, message);
-    if (p.item?.type === "subAgentActivity" && p.item.agentThreadId) {
-      await this.bindThread(entry, p.item.agentThreadId, p.item.agentPath ?? p.item.agentThreadId);
-    } else if (p.item?.type === "collabAgentToolCall") {
-      for (const childId of p.item.receiverThreadIds ?? []) {
-        await this.bindThread(entry, childId, this.agents.get(childId)?.path ?? childId);
-      }
-    }
+  async record(event) {
+    const entry = [...this.jobs.values()].find((item) => item.job.id === event.jobId);
+    if (!entry) return false;
+    await this.append(entry, event);
+    if (immediateEvents.has(event.type)) await entry.store.flush();
+    return true;
   }
 
-  async append(entry, message) {
+  async append(entry, event) {
     if (entry.failure) return;
     try {
-      const event = normalizeJobEvent(structuredClone(message), entry.job);
-      const agent = this.agents.get(event.threadId);
-      if (agent) event.derived = { ...event.derived, agent: { ...agent } };
       try { entry.store.append(event); }
       catch (error) {
         if (error.code !== "HISTORY_BACKPRESSURE") throw error;
@@ -189,7 +174,7 @@ export class JobRuntime {
     if (!job || !terminal(job.status) || entry.ended) return { recorded: entry.ended };
     entry.ended = true;
     entry.job = job;
-    await this.append(entry, { method: "companion/job-completed", params: { job } });
+    await this.append(entry, jobEvent(job, `job.${job.status}`));
     await entry.store.flush();
     await entry.store.updateMetadata({ job, status: job.status, completedAt: job.completedAt });
     clearTimeout(entry.viewTimer);
@@ -210,7 +195,7 @@ export class JobRuntime {
         else if (job && ownerProcessAlive(job.pid) === false) {
           entry.ended = true;
           entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
-          await this.append(entry, { method: "companion/job-completed", params: { job: entry.job } });
+          await this.append(entry, jobEvent(entry.job, "job.failed"));
           await entry.store.flush();
           await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
           await this.writeView(entry);

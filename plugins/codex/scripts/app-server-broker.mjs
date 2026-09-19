@@ -10,8 +10,39 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { LiveTurnControl, DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
 import { JobRuntime } from "./lib/job-runtime.mjs";
+import { CodexEventAdapter } from "./lib/executors/codex-event-adapter.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
+const EXECUTOR_CONTROL_METHODS = new Set([
+  "executor/status",
+  "executor/ack-notifications",
+  "executor/answer-question",
+  "executor/steer",
+  "executor/interrupt-turn",
+  "executor/cancel-job"
+]);
+
+function executorControlRequest(message, jobs, cwd) {
+  if (!EXECUTOR_CONTROL_METHODS.has(message.method)) return null;
+  const p = message.params ?? {};
+  const job = p.jobId ? jobs.jobForId(p.cwd ?? cwd, p.jobId) : null;
+  const threadId = p.executorSessionId ?? job?.executorSessionId ?? job?.threadId;
+  if (!threadId) throw new Error("Executor session is not available for this job.");
+  const input = (p.prompt ?? p.replacementPrompt ?? []).map((block) => block.type === "text"
+    ? { type: "text", text: block.text, text_elements: [] }
+    : block);
+  switch (message.method) {
+    case "executor/status": return { method: "broker/status", params: { threadId } };
+    case "executor/ack-notifications": return { method: "broker/ack-notifications", params: { threadId, ids: p.ids ?? [] } };
+    case "executor/answer-question": return { method: "broker/answer", params: { threadId, turnId: p.turnId,
+      requestId: p.requestId, answers: p.values } };
+    case "executor/steer": return { method: "turn/steer", params: { threadId, expectedTurnId: p.turnId, input } };
+    case "executor/interrupt-turn": return { method: p.replacementPrompt ? "broker/redirect" : "turn/interrupt",
+      params: { threadId, turnId: p.turnId, input } };
+    case "executor/cancel-job": return { method: "turn/interrupt", params: { threadId, turnId: p.turnId } };
+    default: return null;
+  }
+}
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -73,6 +104,7 @@ async function main() {
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, requestUserInput: true });
   const controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs);
   const jobs = new JobRuntime();
+  const codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   let activeRequestSocket = null;
   const streamOwners = new Map();
   const pendingThreadStarts = new Map();
@@ -104,7 +136,7 @@ async function main() {
   }
 
   function routeNotification(message) {
-    const recorded = jobs.observe(structuredClone(message));
+    const recorded = codexEvents.accept(structuredClone(message));
     controls.observe(message);
     deliverNotification(message);
     return recorded;
@@ -165,7 +197,7 @@ async function main() {
 
   appClient.setNotificationHandler(routeNotification);
   appClient.setServerRequestHandler(async (message) => {
-    await jobs.observe(message);
+    await codexEvents.accept(message);
     return controls.handleServerRequest(message);
   });
 
@@ -244,19 +276,23 @@ async function main() {
           continue;
         }
 
-        if (controls.handles(message.method)) {
+        if (controls.handles(message.method) || EXECUTOR_CONTROL_METHODS.has(message.method)) {
           try {
-            if (message.method === "broker/redirect" && !streamOwners.has(message.params?.threadId)) {
+            const control = executorControlRequest(message, jobs, cwd) ?? { method: message.method, params: message.params ?? {} };
+            if (control.method === "broker/redirect" && !streamOwners.has(control.params?.threadId)) {
               throw new Error("No task owner is connected to continue after interruption.");
             }
-            const result = await controls.request(message.method, message.params ?? {});
-            const p = message.params ?? {};
-            if (message.method === "turn/steer" || message.method === "broker/redirect") {
-              await jobs.observe({ method: "companion/control-message", params: { threadId: p.threadId,
+            let result = await controls.request(control.method, control.params);
+            if (message.method === "executor/status") {
+              result = { ...result, capabilities: { midTurnSteer: true } };
+            }
+            const p = control.params;
+            if (control.method === "turn/steer" || control.method === "broker/redirect") {
+              await codexEvents.accept({ method: "companion/control-message", params: { threadId: p.threadId,
                 turnId: p.expectedTurnId ?? p.turnId, message: p.input.map((item) => item.text).join("\n"),
-                interrupt: message.method === "broker/redirect", status: "accepted" } });
-            } else if (message.method === "broker/answer") {
-              await jobs.observe({ method: "companion/answer-delivered", params: { ...p } });
+                interrupt: control.method === "broker/redirect", status: "accepted" } });
+            } else if (control.method === "broker/answer") {
+              await codexEvents.accept({ method: "companion/answer-delivered", params: { ...p } });
             }
             send(socket, { id: message.id, result });
           } catch (error) {
@@ -285,11 +321,12 @@ async function main() {
             resetIdleTimer();
           } else activeRequestSocket = socket;
           if (message.method === "turn/start") controls.starting(message.params ?? {});
-          if (message.params?.threadId) await jobs.bind(socket, message.params.threadId);
+          const job = jobs.jobForSocket(socket);
+          if (message.params?.threadId && job) await codexEvents.bindSession(message.params.threadId, job);
           try {
             const result = await appClient.request(message.method, message.params ?? {});
-            if (result.thread?.id) await jobs.bind(socket, result.thread.id);
-            if (result.reviewThreadId) await jobs.bind(socket, result.reviewThreadId);
+            if (result.thread?.id && job) await codexEvents.bindSession(result.thread.id, job);
+            if (result.reviewThreadId && job) await codexEvents.bindSession(result.reviewThreadId, job);
             if (message.method === "thread/start") pendingThreadStarts.delete(result.thread?.id);
             if (isStreaming && !socket.destroyed) {
               for (const id of buildStreamThreadIds(message.method, message.params, result)) {
