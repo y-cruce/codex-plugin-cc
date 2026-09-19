@@ -140,7 +140,7 @@ async function poll($: EngineInterface, state: State) {
     await refreshViews($, state)
     if (state.views.size && !state.opened) {
       state.opened = true
-      await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 12 })
+      await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
     }
     if (!lines.length) {
@@ -187,7 +187,14 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
       { cwd: state.cwd, timeoutMs: 3000 })
     if (found.exitCode !== 0) return
     state.script = found.stdout.trim()
-    state.since = await $.clock.now() - 60_000
+    // A module reload re-runs this, so the scan floor must be when the session
+    // began, not when the module last loaded: otherwise every job dispatched
+    // before the reload drops out of the pane.
+    const now = await $.clock.now()
+    const sinceKey = `${state.key}:since`
+    const stored = await $.store.get(sinceKey)
+    state.since = typeof stored === 'number' ? stored : now - 60_000
+    if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state) })
     void poll($, state)
@@ -203,7 +210,7 @@ function visibleJobs(state: State): LiveView[] {
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
 }
 
-export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), push = true) {
+export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
@@ -260,7 +267,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.selected = match.jobId
     }
     state.opened = true
-    await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 12 })
+    await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
     const shown = jobs.find(view => view.jobId === state.selected) ?? jobs[0]!
     return { text: `Codex tasks · ${shown.label}` }
@@ -277,7 +284,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
       label: `Codex tasks${running ? ` · ${running} running` : ''}`,
-      onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 12 }) },
+      onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 }) },
     })] })
   })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
@@ -290,6 +297,6 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       $.ui.invalidate('ui.render')
     }
     return paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
-      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select)
+      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
   })
 }

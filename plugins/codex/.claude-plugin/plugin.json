@@ -4,5 +4,13 @@
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"
+  },
+  "userConfig": {
+    "paneBackground": {
+      "type": "string",
+      "title": "Tasks pane background",
+      "description": "Colour the Codex tasks pane paints behind itself, so it matches your terminal instead of the engine's grey. Something like rgb(42,42,42) or #1e1e1e; empty keeps the engine's own.",
+      "default": "rgb(42,42,42)"
+    }
   }
 }

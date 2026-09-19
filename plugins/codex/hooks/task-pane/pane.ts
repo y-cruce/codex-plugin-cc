@@ -21,11 +21,14 @@ export function paneBody(
   now: number,
   selected: string | null,
   onSelect: (jobId: string) => void,
+  background?: string,
 ) {
   const { Box, Text, Button } = ui
   const width = Math.max(24, columns)
   if (!jobs.length) {
-    return Box({ children: [Text({ dimColor: true, children: 'No tasks dispatched from this session yet.' })] })
+    return Box({ backgroundColor: background, width: columns, minHeight: rows, children: [
+      Text({ dimColor: true, children: 'No tasks dispatched from this session yet.' }),
+    ] })
   }
   // One task is always in view: the height belongs to its trace, not to a list
   // of tasks each spending two rows on itself.
@@ -61,9 +64,15 @@ export function paneBody(
   // files, questions and messages, and drops the bookkeeping events.
   const tabRows = Math.max(1, Math.ceil((focusedWidth + (jobs.length - 1) * share + jobs.length * 5) / width))
   const body = Math.max(4, rows - tabRows - (jobs.length > 1 ? 2 : 1))
-  return Box({ flexDirection: 'column', children: [
+  // The whole trace is drawn and the pane scrolls it; the visible height only
+  // sets how much of it shows at once.
+  const TAIL = 200
+  // The pane's own ground is a mid grey the engine paints, which reads as a slab
+  // in the middle of a dark session. There is no value meaning "the terminal's
+  // own", so the colour is a plugin option; empty keeps the engine's.
+  return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
     Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: tabs }),
-    Box({ marginTop: 1, children: [liveTree(ui, trimmed, width, now, body)] }),
+    Box({ marginTop: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL)] }),
     ...(jobs.length > 1 ? [Text({ dimColor: true, dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
   ] })
 }

@@ -314,8 +314,24 @@ describe('live row polish', () => {
     assert.equal(textOf(answer), '→ answer delivered');
     assert.equal(answer.props.color, 'cyan');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
-    assert.match(textOf(tree), /regular tool started\nregular tool completed/);
+    assert.match(textOf(tree), /● regular tool started\n● regular tool completed/);
     assert.equal(nodes.filter(node => node.props.color === 'magenta').length, 1);
+  });
+  test('collapses a finished tool onto one row titled by the work itself', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.tail = [
+      { type: 'tool.started', text: 'Read started: /repo/src/main.ts' },
+      { type: 'tool.completed', text: 'Read completed: /repo/src/main.ts' },
+      { type: 'tool.started', text: 'Write started: /repo/src/pending.ts' },
+    ];
+    const text = textOf(liveTree($.ui.resolve(row()), data, 120, 0, 40));
+    // The completion carries the row, so the start of the same tool is dropped; a
+    // tool still running keeps its own row.
+    assert.equal(text.match(/main\.ts/g).length, 1);
+    assert.match(text, /● \S*main\.ts/);
+    assert.match(text, /● \S*pending\.ts/);
+    assert.doesNotMatch(text, /Read started|Read completed|Write started/);
   });
   test('formats tokens, durations, paths and waiting without controls', () => {
     assert.equal(tokens(82400), '82.4k');

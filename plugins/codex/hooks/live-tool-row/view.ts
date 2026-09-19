@@ -70,7 +70,17 @@ export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, ter
   ] })
 }
 
-export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }) {
+// `Tool started: Read /very/long/path` is the event's own wording; a row should
+// read as the work itself, with the path cut to what fits.
+function toolTitle(text: string, columns: number): string {
+  const title = text.replace(/^\S+\s+(started|completed|failed|cancelled|updated|in_progress|pending):\s*/, '')
+  return title.replace(/(^|\s)(\/\S+)/g, (_, space, path) => `${space}${shortPath(path, Math.max(12, Math.floor(columns / 2)))}`)
+}
+
+// `maxTail` lets a caller that scrolls (the tasks pane) draw the whole trace and
+// let its surface window it; a tool row inline in the transcript must not grow
+// that far, so it keeps the row-derived limit.
+export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number) {
   const { Box, Text } = ui
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
@@ -142,12 +152,16 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (event.type === 'job.started') return false
     if (event.type === 'question.closed') return false
     if ((event.type === 'tool.started' || event.type === 'tool.completed') && event.text.startsWith('dynamicToolCall')) return false
+    if (event.type === 'tool.started') {
+      const title = toolTitle(event.text, columns)
+      if (data.tail.some(later => later.type === 'tool.completed' && toolTitle(later.text, columns) === title)) return false
+    }
     if (event.type === 'source.warning') {
       if (warnings.has(event.text)) return false
       warnings.add(event.text)
     }
     return true
-  }).slice(-tailLimit(rows))
+  }).slice(-(maxTail ?? tailLimit(rows)))
   const grouped: LiveView['tail'] = []
   for (const agent of agents.filter(agent => agent.index < 0)) grouped.push({ seq: '', at: '', type: 'agent.summary', text: agent.text })
   data.tail.forEach((event, index) => {
@@ -188,7 +202,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (type.startsWith('message')) {
       separate(true)
       lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && type.endsWith('.delta')))
-    } else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
+    } else if (type.startsWith('tool.')) add(`● ${toolTitle(text, columns)}`, props)
+    else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
   })
   return tree()
