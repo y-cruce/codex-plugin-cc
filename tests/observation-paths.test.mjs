@@ -39,6 +39,14 @@ async function setup(t, customConfig = false) {
     fs.utimesSync(path.join(stateDir, "jobs", `${id}.json`), mtime, mtime);
     return { job, stateDir };
   };
+  const keepHistoryOnly = ({ job, stateDir }, mtime = 0) => {
+    const stateFile = path.join(stateDir, "state.json");
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    state.jobs = state.jobs.filter((entry) => entry.id !== job.id);
+    fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+    fs.unlinkSync(path.join(stateDir, "jobs", `${job.id}.json`));
+    if (mtime) fs.utimesSync(path.join(stateDir, "job-history", job.id, "manifest.json"), mtime, mtime);
+  };
   const cli = (args, extraEnv = {}) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SCRIPT, "observe", ...args, "--cwd", cwd], { env: { ...env, ...extraEnv } });
     let stdout = "";
@@ -48,7 +56,7 @@ async function setup(t, customConfig = false) {
     child.on("error", reject);
     child.on("exit", (code) => resolve({ code, stdout, stderr }));
   });
-  return { cwd, env, config, key, put, cli };
+  return { cwd, env, config, key, put, keepHistoryOnly, cli };
 }
 
 test("observe falls back to HOME data root, pins history/result reads, and merges newest jobs", async (t) => {
@@ -76,6 +84,43 @@ test("observe falls back to HOME data root, pins history/result reads, and merge
   const missing = await h.cli(["view-path", "missing"]);
   assert.equal(missing.code, 1);
   assert.equal(missing.stderr.trim(), "UNKNOWN_JOB missing");
+});
+
+test("observe resolves history-only jobs across data roots", async (t) => {
+  const h = await setup(t);
+  const entry = await h.put("codex-inline", "task-history-only", "history-only", 100);
+  h.keepHistoryOnly(entry);
+
+  const list = await h.cli(["list", "--json"]);
+  assert.equal(list.code, 0, list.stderr);
+  assert.equal(JSON.parse(list.stdout).jobs.some((job) => job.id === entry.job.id), true);
+
+  const view = await h.cli(["view-path", entry.job.id]);
+  assert.equal(view.code, 0, view.stderr);
+  assert.equal(view.stdout.trim(), path.join(entry.stateDir, "job-history", entry.job.id, "live-view.json"));
+
+  const replay = await h.cli(["replay", entry.job.id, "--jsonl"]);
+  assert.equal(replay.code, 0, replay.stderr);
+  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).source.raw.params.item.text, "history-only");
+
+  const follow = await h.cli(["follow", entry.job.id]);
+  assert.equal(follow.code, 0, follow.stderr);
+  assert.match(follow.stdout, /result-history-only/);
+});
+
+test("observe prefers a retained job record over newer history-only data", async (t) => {
+  const h = await setup(t);
+  const history = await h.put("codex-inline", "task-priority", "history", 300);
+  h.keepHistoryOnly(history, 300);
+  const recorded = await h.put("codex-market", "task-priority", "recorded", 100);
+
+  const view = await h.cli(["view-path", "task-priority"]);
+  assert.equal(view.code, 0, view.stderr);
+  assert.equal(view.stdout.trim(), path.join(recorded.stateDir, "job-history/task-priority/live-view.json"));
+
+  const list = await h.cli(["list", "--json"]);
+  assert.equal(list.code, 0, list.stderr);
+  assert.equal(JSON.parse(list.stdout).jobs.find((job) => job.id === "task-priority").label, "recorded");
 });
 
 test("observe respects CLAUDE_CONFIG_DIR and uses the matched broker instead of inherited endpoint", async (t) => {

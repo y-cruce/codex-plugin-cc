@@ -46,14 +46,12 @@ export async function observationJobs(stateDir) {
 export async function resolveObservationRoot(cwd, id) {
   if (!id || path.basename(id) !== id || id === "." || id === "..") throw Object.assign(new Error(`UNKNOWN_JOB ${id}`), { code: "UNKNOWN_JOB" });
   const current = resolveStateDir(cwd);
-  if ((await observationJobs(current)).some((entry) => entry.job.id === id)) return current;
+  if (process.env.CLAUDE_PLUGIN_DATA && (await observationJobs(current)).some((entry) => entry.job.id === id)) return current;
   const roots = await observationRoots(cwd);
   let selected = null;
-  for (const stateDir of roots.slice(1)) {
-    try {
-      const stat = await fs.stat(path.join(stateDir, "jobs", `${id}.json`));
-      if (stat.isFile() && (!selected || stat.mtimeMs > selected.mtime)) selected = { stateDir, mtime: stat.mtimeMs };
-    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  for (const stateDir of roots) {
+    const entry = (await observationJobs(stateDir)).find((candidate) => candidate.job.id === id);
+    if (entry && (!selected || entry.mtime > selected.mtime)) selected = entry;
   }
   return selected?.stateDir ?? roots[0];
 }
