@@ -93,9 +93,20 @@ export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '
       }
     }
     if (boundary) nodes.push(...markdown(ui, lines.slice(0, boundary).join('\n') + '\n', props, prefix, columns))
-    // The block still being written is not drawn at all: completed blocks
-    // appear whole, like Claude Code's own replies, instead of a typewriter
-    // of raw Markdown that later snaps into its rendered form.
+    // A block still being written is normally not drawn: completed blocks
+    // appear whole, like Claude Code's own replies, instead of a typewriter of
+    // raw Markdown that later snaps into its rendered form. But an agent that
+    // streams a whole answer as one unbroken line commits nothing for minutes,
+    // and the row would show the marker alone. Prose has no block form to snap
+    // into, so it is drawn as it arrives; a heading, table, list, quote or
+    // fence still waits.
+    const pending = lines.slice(boundary).join('\n').trim()
+    if (!closing && pending && !/^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||`{3,}|~{3,})/m.test(pending)) {
+      nodes.push(ui.Text({ ...props, wrap: 'wrap', children: [
+        ...(nodes.length === 0 && prefix ? [ui.Text({ children: prefix })] : []),
+        ...inline(ui, pending),
+      ] }))
+    }
     nodes.push(ui.Text({ ...props, dimColor: true, children: `${nodes.length ? '' : prefix}…` }))
     return nodes
   }

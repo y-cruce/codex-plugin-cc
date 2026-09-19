@@ -348,7 +348,7 @@ describe('live row polish', () => {
     assert.equal(waiting('2026-09-15T00:00:00Z', '2026-09-15T00:01:00Z', now), 'waiting 3m · expires in 0s');
     assert.equal(tailLimit(), 8);
   });
-  test('renders ACP executor labels and unavailable token degradation', ($, on) => {
+  test('renders ACP executor labels and drops the token segment it cannot fill', ($, on) => {
     world($, on);
     const data = fixture();
     data.executor = { kind: 'acp', label: 'Qoder' };
@@ -357,7 +357,10 @@ describe('live row polish', () => {
     data.files = [];
     data.subAgents = [];
     const text = textOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt)));
-    assert.match(text, /^● Qoder · fixture task · running · 0s · tokens unavailable/m);
+    // An ACP agent never reports usage, so the counts stay at zero for the whole
+    // run: the segment goes rather than repeating that it has nothing to say.
+    assert.match(text, /^● Qoder · fixture task · running · 0s$/m);
+    assert.doesNotMatch(text, /tokens/);
     assert.match(text, /^\$ Build project · 0s$/m);
     assert.equal(statusText([data], Date.parse(data.startedAt)), 'Qoder · 1 running · fixture task 0s $ Build project');
   });
@@ -597,17 +600,21 @@ describe('live row polish', () => {
 });
 
 describe('Markdown and prompt footer', () => {
-  test('commits earlier Markdown blocks and hides the streaming last block behind an ellipsis', ($, on) => {
+  test('commits earlier Markdown blocks and streams the unfinished prose that follows', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
     const committed = '# Heading\n\n- **item**\n\n| A | B |\n|--|--|\n| one | two |\n\n```ts\nconst x = 1\n\nreturn x\n```\n\n';
     const last = '**writing** `code` [a](/x/y\u001b';
     const nodes = markdown(ui, committed + last, { dimColor: true }, '› ', 100, true);
-    assert.deepEqual(nodes.slice(0, -1), markdown(ui, committed, { dimColor: true }, '› ', 100));
+    // Everything before the unfinished block still renders as it finally will.
+    assert.deepEqual(nodes.slice(0, -2), markdown(ui, committed, { dimColor: true }, '› ', 100));
+    // Prose has no block form to snap into, so it is shown as it arrives: an
+    // agent that streams one unbroken paragraph would otherwise show nothing
+    // but the marker for the whole run.
+    assert.match(textOf(nodes.at(-2)), /writing/);
     assert.equal(nodes.at(-1).type, 'Text');
     assert.equal(nodes.at(-1).props.dimColor, true);
     assert.equal(textOf(nodes.at(-1)), '…');
-    assert.doesNotMatch(textOf({ type: 'Box', children: nodes }), /writing|\[a\]/);
     assert.ok(nodes.some(node => node.type === 'Code'));
     assert.ok(nodes.some(node => node.type === 'Box'));
   });
