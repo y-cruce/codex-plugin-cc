@@ -217,7 +217,7 @@ test("follow notification records the pending request at emission", async (t) =>
   assert.match(question.stdout, /^QUESTION job=/m);
   const notified = await h.child("observe", "follow", jobId, "--after", cursor(question.stdout), "--quiet").done;
   assert.equal(notified.code, 0, notified.stderr);
-  assert.match(notified.stdout, /^NOTIFIED job=.*pending_request=question-1 Source decision needed$/m);
+  assert.match(notified.stdout, new RegExp(`^NOTIFIED job=${jobId} \\[pending notification\\] thread=.*pending_request=question-1 Source decision needed$`, "m"));
   const repeated = await h.child("observe", "follow", jobId, "--quiet").done;
   assert.equal(repeated.code, 0, repeated.stderr);
   assert.match(repeated.stdout, /^QUESTION_PENDING job=.*request=question-1 still unanswered: Which source\?$/m);

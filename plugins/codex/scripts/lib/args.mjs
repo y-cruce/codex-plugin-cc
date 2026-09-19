@@ -2,9 +2,16 @@ export function parseArgs(argv, config = {}) {
   const valueOptions = new Set(config.valueOptions ?? []);
   const booleanOptions = new Set(config.booleanOptions ?? []);
   const aliasMap = config.aliasMap ?? {};
+  const supportedOptions = [...valueOptions, ...booleanOptions].map((option) => `--${option}`).join(", ");
   const options = {};
   const positionals = [];
   let passthrough = false;
+
+  const rejectUnknownOption = (option) => {
+    if (!config.rejectUnknownOptions) return false;
+    const context = config.optionContext ? ` for ${config.optionContext}` : "";
+    throw new Error(`Unknown option ${option}. Supported options${context}: ${supportedOptions}`);
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -45,6 +52,7 @@ export function parseArgs(argv, config = {}) {
         continue;
       }
 
+      rejectUnknownOption(`--${rawKey}`);
       positionals.push(token);
       continue;
     }
@@ -67,6 +75,7 @@ export function parseArgs(argv, config = {}) {
       continue;
     }
 
+    rejectUnknownOption(`-${shortKey}`);
     positionals.push(token);
   }
 

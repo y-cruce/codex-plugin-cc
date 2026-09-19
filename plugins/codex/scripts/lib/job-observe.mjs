@@ -63,7 +63,7 @@ async function eventExit(event, job, until, location) {
   }
   if (event.type === "director.notified" && until !== "done") {
     const pending = p.pendingRequestId == null ? "" : ` pending_request=${p.pendingRequestId}`;
-    return `NOTIFIED job=${job.id} thread=${threadId}${pending} ${oneLine(p.message)}`;
+    return `NOTIFIED ${prefix(job)} thread=${threadId}${pending} ${oneLine(p.message)}`;
   }
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
     if (event.type === "job.completed") return `DONE ${prefix(job)} thread=${threadId}`;
@@ -228,7 +228,12 @@ async function follow(location, job, options) {
 
 export async function handleObserve(argv) {
   const [command, ...rest] = argv;
-  const { options, positionals } = parseArgs(rest, {
+  const { options, positionals } = parseArgs(rest, command === "follow" ? {
+    valueOptions: ["cwd", "after", "until", "max-seconds"],
+    booleanOptions: ["verbose", "quiet"],
+    rejectUnknownOptions: true,
+    optionContext: "observe follow"
+  } : {
     valueOptions: ["cwd", "after", "limit", "until", "max-seconds"],
     booleanOptions: ["json", "jsonl", "verbose", "quiet"]
   });
