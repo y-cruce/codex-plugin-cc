@@ -79,7 +79,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     { text: `● ${executor} · ` },
     { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
-    { text: ` · ${elapsed(data.startedAt, data.endedAt ? Date.parse(data.endedAt) : now)} · ${result ? `${data.files.length} files` : !data.usage.complete && data.usage.inputTokens === 0 && data.usage.outputTokens === 0 && data.usage.cachedInputTokens === 0 ? 'tokens unavailable' : `↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens`}` },
+    { text: ` · ${elapsed(data.startedAt, data.endedAt ? Date.parse(data.endedAt) : now)} · ${result ? `${data.files.length} files` : data.usage.inputTokens === 0 && data.usage.outputTokens === 0 && data.usage.cachedInputTokens === 0 ? 'tokens unavailable' : `↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens`}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.

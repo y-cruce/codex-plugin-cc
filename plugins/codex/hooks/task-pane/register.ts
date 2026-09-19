@@ -37,7 +37,7 @@ const RESCAN_TICKS = 15
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
   const result = await $.process.run(['node', state.script, 'observe', ...args, '--cwd', cwd], {
-    cwd, env: { CODEX_COMPANION_SESSION_ID: state.sessionId }, timeoutMs: 5000,
+    cwd, env: { CODEX_COMPANION_SESSION_ID: state.sessionId }, timeoutMs: 20000,
   })
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `observe ${args[0]} failed`)
   return result.stdout
@@ -196,6 +196,13 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
   }
 }
 
+// Everything this session started, newest first, dropping what ended long ago.
+function visibleJobs(state: State): LiveView[] {
+  return [...state.views.values()]
+    .filter(view => !DONE.includes(view.status) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - 15 * 60_000)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+}
+
 export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), push = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
@@ -233,25 +240,56 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     return result
   })
+  // `/codex:tasks` opens the pane and switches it; answering without next()
+  // keeps the command inside the session instead of sending it to the model.
+  on('command.run', async ($, e, next) => {
+    if (!/(^|:)tasks$/.test(e.command)) return next(e)
+    let jobs = visibleJobs(state)
+    if (!jobs.length) {
+      await poll($, state)
+      jobs = visibleJobs(state)
+    }
+    if (!jobs.length) return { text: 'No Codex tasks in this session yet.' }
+    const wanted = e.args.trim()
+    if (wanted) {
+      const index = Number(wanted)
+      const match = Number.isInteger(index) && index >= 1 && index <= jobs.length
+        ? jobs[index - 1]
+        : jobs.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
+      if (!match) return { text: `No task matches "${wanted}". Open tasks: ${jobs.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
+      state.selected = match.jobId
+    }
+    state.opened = true
+    await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 12 })
+    $.ui.invalidate('ui.render')
+    const shown = jobs.find(view => view.jobId === state.selected) ?? jobs[0]!
+    return { text: `Codex tasks · ${shown.label}` }
+  })
+  // Closing the pane is the person's call, so it is not reopened for them.
+  on('ui.close', ($, e, next) => {
+    if (e.id === PANE) state.opened = false
+    return next(e)
+  })
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (e.props.hasSurvey || !state.views.size) return next(e)
+    if (e.props.hasSurvey || state.opened || !state.views.size) return next(e)
     const { Box, Button } = $.ui.resolve(e)
+    const running = [...state.views.values()].filter(view => !DONE.includes(view.status)).length
     return Box({ children: [Button({
-      key: 'codex_tasks_open', label: 'Codex tasks', plain: true,
-      onPress: () => { void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 12 }) },
+      key: 'codex_tasks_open', plain: true,
+      label: `Codex tasks${running ? ` · ${running} running` : ''}`,
+      onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 12 }) },
     })] })
   })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const jobs = [...state.views.values()]
-      .filter(view => !DONE.includes(view.status) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - 15 * 60_000)
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    const jobs = visibleJobs(state)
     // A task that leaves the pane takes the focus with it.
     if (state.selected && !jobs.some(view => view.jobId === state.selected)) state.selected = null
     const select = (jobId: string) => {
       state.selected = state.selected === jobId ? null : jobId
       $.ui.invalidate('ui.render')
     }
-    return paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns), await $.clock.now(), state.selected, select)
+    return paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
+      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select)
   })
 }

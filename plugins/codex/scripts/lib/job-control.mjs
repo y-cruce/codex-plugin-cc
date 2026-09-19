@@ -237,7 +237,7 @@ export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
-function matchJobReference(jobs, reference, predicate = () => true) {
+function matchJobReference(jobs, reference, predicate = () => true, options = {}) {
   const filtered = jobs.filter(predicate);
   if (!reference) {
     return filtered[0] ?? null;
@@ -254,6 +254,9 @@ function matchJobReference(jobs, reference, predicate = () => true) {
   }
   if (prefixMatches.length > 1) {
     throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
+  }
+  if (options.allowMissing) {
+    return null;
   }
 
   throw new Error(`No job found for "${reference}". Run /codex:status to list known jobs.`);
@@ -308,14 +311,15 @@ export function resolveResultJob(cwd, reference) {
   const selected = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled",
+    { allowMissing: true }
   );
 
   if (selected) {
     return { workspaceRoot, job: selected };
   }
 
-  const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
+  const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running", { allowMissing: true });
   if (active) {
     throw new Error(`Job ${active.id} is still ${active.status}. Check /codex:status and try again once it finishes.`);
   }

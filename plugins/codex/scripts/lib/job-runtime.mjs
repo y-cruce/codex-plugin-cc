@@ -6,7 +6,8 @@ import { createLiveView, applyJobEvent } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
-const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified"]);
+const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified",
+  "job.completed", "job.failed", "job.cancelled"]);
 
 function jobEvent(job, type) {
   const completedAt = job.completedAt ?? new Date().toISOString();

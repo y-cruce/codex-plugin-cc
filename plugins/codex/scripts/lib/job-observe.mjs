@@ -16,6 +16,8 @@ import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ");
 const errorFor = (code, message) => Object.assign(new Error(message ?? code), { code });
+const endpointUnavailable = (error) => ["BROKER_UNAVAILABLE", "ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes(error?.code) ||
+  /broker disconnected/i.test(error?.message ?? "");
 
 async function metadata(location, id) {
   return readObservationJson(path.join(location.stateDir, "job-history", id, "manifest.json"));
@@ -87,7 +89,14 @@ async function follow(location, job, options) {
       job = await findJob(location, job.id);
     }
   }
-  if (!terminal(job.status)) client = await ObservationClient.connect(cwd, { ...location, job });
+  let connectionError = null;
+  if (!terminal(job.status)) {
+    try { client = await ObservationClient.connect(cwd, { ...location, job }); }
+    catch (error) {
+      if (!endpointUnavailable(error)) throw error;
+      connectionError = error;
+    }
+  }
   // Dispatch returns before its detached worker has registered with the broker.
   // Keep this connection open while that worker publishes the history identity.
   if (!manifest && client && job.status === "queued") {
@@ -137,6 +146,26 @@ async function follow(location, job, options) {
     }
     if (!page.events.length) cursor = page.nextCursor;
   };
+  const replayCommitted = async () => {
+    while (!finished) {
+      const page = await history(location, job.id, { after: cursor, limit: 256 });
+      await processPage(page);
+      if (!page.events.length || page.events.at(-1).seq === page.committedSeq) return;
+    }
+  };
+  const finishFromStoredJob = async () => {
+    const current = await findJob(location, job.id);
+    if (!terminal(current.status)) return false;
+    job = current;
+    await finish(`${current.status === "completed" ? "DONE" : "FAILED"} ${prefix(current)} thread=${current.executorSessionId ?? current.threadId ?? lastThread ?? "unknown"}${current.status === "completed" ? "" : ` ${oneLine(current.errorMessage ?? "unknown")}`}`);
+    return true;
+  };
+  const recoverUnavailable = async () => {
+    await replayCommitted();
+    if (finished || await finishFromStoredJob()) return;
+    await write(`CURSOR: ${cursor}\n`);
+    throw errorFor("BROKER_UNAVAILABLE", "Broker disconnected; continue with --after");
+  };
   const enqueue = (action) => {
     chain = chain.then(action).catch((error) => { finished = true; rejectDone(error); });
     return chain;
@@ -159,6 +188,12 @@ async function follow(location, job, options) {
       if (Date.now() - lastProgress >= 15 * 60 * 1000) enqueue(() => finish(`STALLED ${prefix(job)} thread=${lastThread ?? "unknown"} ${Math.floor((Date.now() - lastProgress) / 60000)}m without progress`));
     }, 1000);
     if (client) {
+      let recoveryQueued = false;
+      const queueRecovery = () => {
+        if (finished || recoveryQueued) return;
+        recoveryQueued = true;
+        enqueue(recoverUnavailable);
+      };
       client.on("notification", (message) => {
         client.socket.pause();
         enqueue(async () => {
@@ -166,27 +201,17 @@ async function follow(location, job, options) {
           if (message.method === "broker/observation") await processPage(message.params);
         }).finally(() => { if (!finished) client.socket.resume(); });
       });
-      client.on("closed", () => enqueue(async () => {
-        if (finished) return;
-        while (!finished) {
-          const page = await history(location, job.id, { after: cursor, limit: 256 });
-          await processPage(page);
-          if (!page.events.length || page.events.at(-1).seq === page.committedSeq) break;
-        }
-        if (!finished) throw errorFor("BROKER_UNAVAILABLE", "Broker disconnected; continue with --after");
-      }));
-      await client.request("broker/observe-follow", { cwd, jobId: job.id, after: options.after });
+      client.on("closed", queueRecovery);
+      try { await client.request("broker/observe-follow", { cwd, jobId: job.id, after: options.after }); }
+      catch (error) {
+        if (!endpointUnavailable(error)) throw error;
+        queueRecovery();
+      }
+    } else if (connectionError) {
+      await recoverUnavailable();
     } else {
-      let after = options.after;
-      do {
-        const page = await history(location, job.id, { after, limit: 256 });
-        await processPage(page);
-        after = page.nextCursor;
-        if (finished) break;
-        if (!page.events.length || page.events.at(-1).seq === page.committedSeq) {
-          await finish(`${job.status === "completed" ? "DONE" : "FAILED"} ${prefix(job)} thread=${job.executorSessionId ?? job.threadId ?? "unknown"}${job.status === "completed" ? "" : ` ${oneLine(job.errorMessage ?? "unknown")}`}`);
-        }
-      } while (!finished);
+      await replayCommitted();
+      if (!finished) await finishFromStoredJob();
     }
     await done;
   } finally {

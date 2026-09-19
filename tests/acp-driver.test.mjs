@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
@@ -208,6 +210,66 @@ test("ACP observation endpoint follows events and persists a nonblank live view"
   assert.equal(view.executor.kind, "acp");
   assert.equal(view.lastMessage.text, "Basic complete");
   assert.equal(view.files.length, 1);
+});
+
+test("ACP follow replays a committed terminal event after its endpoint closes", async (t) => {
+  const h = await setupPort(t, "acp-follow-close-race");
+  const running = { ...h.job, executorSessionId: h.session.sessionId, controlEndpoint: h.port.controlEndpoint };
+  writeJobFile(h.cwd, h.job.id, running);
+  upsertJob(h.cwd, running);
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "basic" }] });
+  const terminal = await turn.done;
+  await h.port.adapter.completeJob(terminal);
+  await h.port.close();
+
+  const followed = run(process.execPath, [SCRIPT, "observe", "follow", h.job.id, "--cwd", h.cwd, "--quiet"], { cwd: h.cwd });
+  assert.equal(followed.status, 0, followed.stderr);
+  assert.match(followed.stdout, /^CURSOR: /m);
+  assert.match(followed.stdout, /^DONE job=acp-follow-close-race /m);
+});
+
+test("ACP follow reaches DONE when the endpoint closes while it is waiting", async (t) => {
+  const h = await setupPort(t, "acp-follow-connected-close");
+  const running = { ...h.job, executorSessionId: h.session.sessionId, controlEndpoint: h.port.controlEndpoint };
+  writeJobFile(h.cwd, h.job.id, running);
+  upsertJob(h.cwd, running);
+  const child = spawn(process.execPath, [SCRIPT, "observe", "follow", h.job.id, "--cwd", h.cwd, "--quiet"], {
+    cwd: h.cwd,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const exited = once(child, "exit");
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  await waitFor(() => h.port.runtime.followers.size === 1);
+
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "basic" }] });
+  const terminal = await turn.done;
+  await h.port.adapter.completeJob(terminal);
+  await h.port.close();
+  const [code] = await exited;
+
+  assert.equal(code, 0, stderr);
+  assert.match(stdout, /^CURSOR: /m);
+  assert.match(stdout, /^DONE job=acp-follow-connected-close /m);
+});
+
+test("ACP follow prints a recovery cursor when its endpoint closes before a terminal event", async (t) => {
+  const h = await setupPort(t, "acp-follow-unavailable");
+  const running = { ...h.job, executorSessionId: h.session.sessionId, controlEndpoint: h.port.controlEndpoint };
+  writeJobFile(h.cwd, h.job.id, running);
+  upsertJob(h.cwd, running);
+  await h.port.close();
+
+  const followed = run(process.execPath, [SCRIPT, "observe", "follow", h.job.id, "--cwd", h.cwd, "--quiet"], { cwd: h.cwd });
+  assert.equal(followed.status, 1);
+  assert.match(followed.stdout, /^CURSOR: /m);
+  assert.match(followed.stderr, /^BROKER_UNAVAILABLE Broker disconnected; continue with --after$/m);
 });
 
 test("companion selects the ACP executor without changing the Codex default", (t) => {
