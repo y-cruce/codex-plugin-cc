@@ -46,6 +46,42 @@ test("message deltas fold into one row, survive snapshot restoration and retain 
   assert.equal(restored.history.committedSeq, "2");
 });
 
+test("completed streaming messages move after intervening tools while in-progress rows stay anchored", () => {
+  const job = { id: "job-acp", executor: "acp", threadId: "session-1" };
+  const view = createLiveView(job);
+  let seq = 0;
+  const accept = (type, identity, payload) => {
+    const event = createCanonicalEvent({
+      job,
+      executor: "acp",
+      type,
+      identity: { sessionId: "session-1", turnId: "turn-1", ...identity },
+      occurredAt: "2026-09-19T00:00:00.000Z",
+      receivedAt: "2026-09-19T00:00:00.000Z",
+      payload
+    });
+    event.seq = String(++seq);
+    applyJobEvent(view, event);
+  };
+
+  accept("message.delta", { messageId: "message-1" }, { role: "assistant", block: { type: "text", text: "working" } });
+  accept("message.delta", { messageId: "message-1" }, { role: "assistant", block: { type: "text", text: "..." } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta"]);
+  assert.equal(view.tail[0].positionSeq, "1");
+
+  const startedTool = { toolCallId: "tool-1", name: "Read", kind: "other", status: "in_progress", title: "/repo/package.json", content: [], locations: [] };
+  accept("tool.started", { toolCallId: "tool-1" }, { tool: startedTool });
+  accept("tool.completed", { toolCallId: "tool-1" }, { tool: { ...startedTool, status: "completed" } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed"]);
+
+  accept("message.completed", { messageId: "message-1" }, { message: {
+    messageId: "message-1", role: "assistant", content: [{ type: "text", text: "working... done" }], text: "working... done"
+  } });
+  assert.deepEqual(view.tail.map((row) => row.type), ["tool.started", "tool.completed", "message.completed"]);
+  assert.deepEqual(view.tail.map((row) => row.seq), ["3", "4", "5"]);
+  assert.ok(view.tail.every((row, index) => index === 0 || BigInt(row.seq) > BigInt(view.tail[index - 1].seq)));
+});
+
 test("command output updates one item while completion removes active command", () => {
   const { view, accept } = harness();
   accept("item/started", { item: { type: "commandExecution", id: "c", command: "npm test", cwd: "/repo" } });
@@ -126,6 +162,17 @@ test("tail is bounded and terminal snapshot settles fields", () => {
   accept("companion/job-completed", { job: { status: "completed", completedAt: "2026-01-01T00:00:00.000Z" } });
   assert.equal(view.status, "completed");
   assert.equal(view.endedAt, "2026-01-01T00:00:00.000Z");
+});
+
+test("moving a completed message within a full tail does not trim another row", () => {
+  const { view, accept } = harness();
+  accept("item/agentMessage/delta", { itemId: "message", delta: "working" });
+  for (let n = 0; n < 199; n++) accept("companion/notification", { message: `note ${n}` });
+  accept("item/completed", { item: { type: "agentMessage", id: "message", text: "done" } });
+  assert.equal(view.tail.length, 200);
+  assert.equal(view.tail[0].text, "notify_director: note 0");
+  assert.equal(view.tail.at(-1).text, "assistant: done");
+  assert.equal(view.tail.filter((row) => row.type === "director.notified").length, 199);
 });
 
 test("display hides usage, user echoes and blank reasoning but retains their source and usage state", () => {
