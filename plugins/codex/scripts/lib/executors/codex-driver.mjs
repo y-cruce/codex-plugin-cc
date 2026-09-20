@@ -146,13 +146,15 @@ export class CodexExecutorJobPort {
       rejectStarted(error);
       throw error;
     });
-    const turnId = await started;
-    const turn = { turnId, done, capture };
-    this.activeTurn = turn;
+    // Settled before the await: a capture that fails rejects `started` too, and
+    // an unhandled `done` would take the worker down before the caller sees it.
+    const turn = { turnId: null, done, capture };
     done.then(
       () => { if (this.activeTurn === turn) this.activeTurn = null; },
       () => { if (this.activeTurn === turn) this.activeTurn = null; }
     );
+    turn.turnId = await started;
+    this.activeTurn = turn;
     return turn;
   }
 
