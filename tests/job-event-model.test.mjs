@@ -156,10 +156,12 @@ test("a plan is one checklist that updates in place", () => {
   const plan = (statuses) => ({ plan: statuses.map((status, index) => ({ step: `#${index + 1} step`, status })) });
   accept("turn/plan/updated", plan(["pending", "pending"]));
   accept("turn/plan/updated", plan(["completed", "in_progress"]));
-  assert.deepEqual(view.tail.map((row) => row.type), ["plan.updated"]);
-  assert.equal(view.tail[0].text, "Plan · 1/2\n  ☑ #1 step\n  ▸ #2 step");
-  // The row keeps the place it was first drawn in.
-  assert.equal(view.tail[0].positionSeq, "1");
+  // The plan lives on the view, where the pane draws it at its foot, and
+  // leaves the trace alone: appended as a row, every redraw put another copy
+  // of the whole checklist in it.
+  assert.deepEqual(view.tail, []);
+  assert.deepEqual(view.plan.entries.map((step) => [step.content, step.status]),
+    [["#1 step", "completed"], ["#2 step", "in_progress"]]);
 });
 
 test("command output updates one item while completion removes active command", () => {

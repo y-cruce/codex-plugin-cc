@@ -56,8 +56,14 @@ function toolSnapshot(tool) {
   return {
     toolCallId: String(tool.toolCallId),
     name: tool.name ?? vendorTool(tool),
-    title: [vendorTool(tool), tool.title ?? tool.name ?? String(tool.toolCallId)]
-      .filter((part, index, parts) => part && parts.indexOf(part) === index).join(" · "),
+    // The title already says what the tool did ("Read …/register.ts"), and the
+    // pane drops the name a row is prefixed with, so naming the tool again
+    // reads as "Read · Read …/register.ts". The name is worth having only
+    // where the title misleads: a tool that calls itself an edit and changes
+    // no file is Qoder's task list, and "Edit file" is not what it did.
+    title: vendorTool(tool) && tool._files === false && ["edit", "delete", "move"].includes(tool.kind)
+      ? vendorTool(tool)
+      : tool.title ?? tool.name ?? vendorTool(tool) ?? String(tool.toolCallId),
     kind: tool.kind ?? "other",
     status: tool.status ?? "pending",
     content: toolContent(tool),

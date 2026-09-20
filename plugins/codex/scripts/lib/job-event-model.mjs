@@ -127,17 +127,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       break;
     }
     case "tool.progress": text = p.message ?? ""; break;
-    case "plan.updated": {
-      const entries = p.entries ?? [];
-      // A plan is a checklist the reader scans, not a sentence: one line per
-      // step, marked with where it stands, and a count of what is done.
-      if (!tail) { text = `Plan: ${p.markdown ?? ""} ${entries.map((step) => `${step.status}: ${step.content}`).join("; ")}`; break; }
-      const mark = { completed: "☑", in_progress: "▸" };
-      const done = entries.filter((step) => step.status === "completed").length;
-      const head = `Plan${entries.length ? ` · ${done}/${entries.length}` : ""}${p.markdown ? `: ${p.markdown}` : ""}`;
-      text = [head, ...entries.map((step) => `  ${mark[step.status] ?? "☐"} ${step.content}`)].join("\n");
-      break;
-    }
+    case "plan.updated": text = `Plan: ${p.markdown ?? ""} ${(p.entries ?? []).map((step) => `${step.status}: ${step.content}`).join("; ")}`; break;
     case "source.error": text = `Error: ${p.message ?? "Unknown error"}`; break;
     case "source.warning": text = `Warning: ${p.message ?? ""}`; break;
     default: return null;
@@ -165,6 +155,7 @@ export function createLiveView(job) {
     files: [],
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: !job.request?.resumeThreadId },
     pendingQuestion: null,
+    plan: null,
     history: { committedSeq: "0", continuity: "complete" },
     tail: [],
     _items: {},
@@ -356,10 +347,12 @@ export function applyJobEvent(view, event, options = {}) {
       tailKey = key;
       break;
     case "plan.updated":
-      // One plan per turn, redrawn every time a step moves: without a key of
-      // its own each update appended another copy of the whole checklist, and
-      // a seven-step plan filled the trace with itself eight times over.
-      tailKey = `plan:${identity.turnId ?? "turn"}`;
+      // The plan is the shape of the work, not a thing that happened: it sits
+      // at the foot of the pane where the reader can always see it, so the
+      // view carries it and the trace does not. Appended as a row, every
+      // redraw put another copy of the whole checklist in the trace.
+      view.plan = { entries: p.entries ?? [], markdown: p.markdown ?? null };
+      text = null;
       break;
     case "usage.updated": {
       const total = p.usage;

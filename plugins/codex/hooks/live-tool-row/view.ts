@@ -19,6 +19,7 @@ export type LiveView = {
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
+  plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null } | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; startedSeq?: string }[]
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
@@ -91,6 +92,23 @@ function toolTitle(text: string, columns: number): string {
 // `headingLast` puts the status line under the trace: a row in the transcript
 // is read top down and announces itself first, while a pane already names the
 // task in its tabs and wants its foot to say how the task is doing.
+// The plan is where the work is going, so it sits at the foot of the pane
+// rather than scrolling away in the trace: one line per step, marked with
+// where it stands. A plan whose steps are all done has nothing left to say,
+// and neither has one on a job that is over, so both draw nothing.
+function planLines(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, data: LiveView, columns: number) {
+  const { Box, Text } = ui
+  const entries = data.plan?.entries ?? []
+  const done = entries.filter(step => step.status === 'completed').length
+  if (!entries.length || done === entries.length || isOver(data)) return []
+  const mark: Record<string, string> = { completed: '☑', in_progress: '▸' }
+  return [Text({ children: ' ' }), Box({ flexDirection: 'column', width: columns, children: [
+    Text({ dimColor: true, wrap: 'truncate-end', children: clip(`Plan · ${done}/${entries.length}${data.plan?.markdown ? `: ${data.plan.markdown}` : ''}`, columns) }),
+    ...entries.map(step => Text({ dimColor: step.status !== 'in_progress', wrap: 'truncate-end',
+      children: clip(`  ${mark[step.status] ?? '☐'} ${step.content}`, columns) })),
+  ] })]
+}
+
 export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number, headingLast = false) {
   const { Box, Text } = ui
   const executor = data.executor?.label ?? 'Codex'
@@ -122,9 +140,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     // heading above one gets for free from the row that precedes it. The gap is
     // a blank row rather than a margin, because a margin belongs to no element
     // and the pane's own ground -- a mid grey -- is what shows through it.
+    const plan = planLines(ui, data, columns)
     return Box({ flexDirection: 'column', children: headingLast
-      ? [Box({ flexGrow: 1, children: [body] }), Text({ children: ' ' }), heading]
-      : [heading, body] })
+      ? [Box({ flexGrow: 1, children: [body] }), ...plan, Text({ children: ' ' }), heading]
+      : [heading, body, ...plan] })
   }
   let previousBlock = false
   let hasContent = false

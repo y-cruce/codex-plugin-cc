@@ -43,8 +43,8 @@ test("an ACP edit that changes no file is reported as the tool it is", async () 
     rawOutput: "Task #1 created", sessionUpdate: "tool_call_update" } });
   assert.deepEqual(events.map((event) => event.type), ["tool.started", "tool.completed"]);
   // The pane drops the name a row is prefixed with, so the vendor's own name
-  // travels in the title or the row reads as the file edit it is not.
-  assert.equal(events[0].payload.tool.title, "TaskCreate · Edit file");
+  // travels in the title, in place of the file edit this never was.
+  assert.equal(events[0].payload.tool.title, "TaskCreate");
   assert.deepEqual(events[1].payload.tool.files, []);
 
   const real = [];
