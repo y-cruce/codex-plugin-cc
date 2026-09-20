@@ -78,10 +78,12 @@ function recordMonitors($: EngineInterface, state: State) {
 
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   for (const root of live) {
-    // Not `has`: a reload adopts what the last module armed, and the promise
-    // whose end would clear that entry belongs to the instance that is gone.
-    // Past the host's cap the monitor is over whoever armed it, so the entry
-    // ages out and the watch comes back by itself rather than dying quietly.
+    // Age is the only thing that retires an entry. The call cannot say when the
+    // watch is over: it answers as soon as the host has launched the monitor,
+    // so clearing the entry when it settles armed another every poll -- eleven
+    // monitors on one repository in an afternoon. A reload cannot say either,
+    // since the promise belongs to the instance that is gone. What is known is
+    // the host's cap: past it the monitor is over, whoever armed it.
     const monitor = state.monitors.get(root)
     if (monitor && now - monitor.armedAt < MONITOR_MS) continue
     state.monitors.set(root, { armedAt: now })
@@ -95,13 +97,6 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       timeout_ms: MONITOR_MS,
     }).catch((error: unknown) => {
       $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`)
-    }).finally(() => {
-      if (state.monitors.get(root)?.armedAt !== now) return
-      state.monitors.delete(root)
-      // Written here as well: a reload reads this back, and an entry left
-      // behind for a monitor that has ended is adopted as a live one, after
-      // which nothing arms another and no event wakes the director again.
-      void recordMonitors($, state)
     })
   }
 }
