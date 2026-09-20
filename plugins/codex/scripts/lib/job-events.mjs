@@ -39,7 +39,8 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       // A dead owner must be reported even when its pending notes cannot be acknowledged.
       if (job.status === "failed" && (job.errorMessage === "owner process exited" || job.errorMessage === "broker unreachable")) live = null;
       running = job.status === "queued" || job.status === "running";
-      if (job.status === "running") {
+      const pendingQuestions = live?.questions ?? [];
+      if (job.status === "running" && pendingQuestions.length === 0) {
         const progress = progressAt(job);
         const previous = stalls.get(job.id);
         const lastReported = previous?.progress === progress ? previous.reportedAt : progress;
@@ -50,7 +51,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         }
       }
       if (running && live?.unavailable) continue;
-      for (const question of live?.questions ?? []) {
+      for (const question of pendingQuestions) {
         const key = `${job.id}:${question.requestId}`;
         const previous = questions.get(key);
         if (previous) {

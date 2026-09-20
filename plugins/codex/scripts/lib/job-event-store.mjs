@@ -322,6 +322,15 @@ export class JobEventStore {
     return this.chain;
   }
 
+  retainedThrough(manifest) {
+    let retained = null;
+    for (const cursor of this.options.retainedCursors?.() ?? []) {
+      const seq = parseCursor(manifest, cursor);
+      if (retained === null || seq < retained) retained = seq;
+    }
+    return retained;
+  }
+
   async commitBatch(events) {
     const encoded = encodeBatch(events);
     const bytes = Buffer.byteLength(encoded);
@@ -346,7 +355,9 @@ export class JobEventStore {
     manifest.updatedAt = new Date().toISOString();
     const removed = [];
     let total = manifest.segments.reduce((sum, value) => sum + value.bytes, 0);
-    while (total > this.options.maxJobBytes && manifest.segments.length > 1) {
+    const retained = this.retainedThrough(manifest);
+    while (total > this.options.maxJobBytes && manifest.segments.length > 1 &&
+      (retained === null || BigInt(manifest.segments[0].lastSeq) <= retained)) {
       const first = manifest.segments.shift();
       removed.push(first);
       total -= first.bytes;
@@ -381,7 +392,9 @@ export class JobEventStore {
       const manifest = structuredClone(this.manifest);
       const removed = [];
       let total = manifest.segments.reduce((sum, segment) => sum + segment.bytes, 0);
-      while (total > maxBytes && manifest.segments.length > 1) {
+      const retained = this.retainedThrough(manifest);
+      while (total > maxBytes && manifest.segments.length > 1 &&
+        (retained === null || BigInt(manifest.segments[0].lastSeq) <= retained)) {
         const segment = manifest.segments.shift();
         removed.push(segment);
         total -= segment.bytes;

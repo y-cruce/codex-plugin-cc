@@ -113,6 +113,24 @@ test("follow reports a question when live pending state is unavailable", async (
   assert.doesNotMatch(output, /^DONE /m);
 });
 
+test("offline until-done follow skips a resolved historical question", async (t) => {
+  const h = fixture(t);
+  const store = await new JobEventStore(h.cwd, h.job.id).initialize({ job: h.job });
+  const source = (method, params) => ({ message: { method, params: { threadId: h.job.threadId, ...params } } });
+  store.append({ type: "question.opened", occurredAt: h.job.startedAt,
+    source: source("companion/question", { requestId: "request-1", questions: [{ question: "Choose?" }] }) });
+  store.append({ type: "question.resolved", occurredAt: h.job.startedAt,
+    source: source("companion/answer-delivered", { requestId: "request-1", answers: { source: { answers: ["latest"] } } }) });
+  store.append({ type: "job.completed", occurredAt: h.job.startedAt,
+    source: source("companion/job-completed", { job: h.job }) });
+  await store.close();
+
+  const result = await h.cli("observe", "follow", h.job.id, "--until", "done");
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /^QUESTION(?:_PENDING)? /m);
+  assert.match(result.stdout, /^DONE job=/m);
+});
+
 test("resumed follow of an hour-old active job waits for progress and reaches DONE", async (t) => {
   const output = await followWithClock(t, async ({ tick, emit, started }) => {
     // The first stall check runs before the next live event arrives.

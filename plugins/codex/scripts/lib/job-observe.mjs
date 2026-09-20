@@ -46,16 +46,33 @@ function prefix(job) {
   return `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;
 }
 
-async function eventExit(event, job, until, location) {
+async function questionResolvedLater(event, job, location, page) {
+  if (BigInt(event.seq) > BigInt(page.committedSeq)) return false;
+  const requestId = String(event.payload.requestId);
+  let after = cursorFor({ jobId: job.id, streamId: page.streamId }, event.seq);
+  while (true) {
+    const future = await history(location, job.id, { after, limit: 256 });
+    for (const candidate of future.events) {
+      if (["question.resolved", "question.closed"].includes(candidate.type) && String(candidate.payload.requestId) === requestId) return true;
+      if (["job.completed", "job.failed", "job.cancelled"].includes(candidate.type)) return true;
+    }
+    if (!future.events.length || future.events.at(-1).seq === future.committedSeq) return false;
+    after = future.nextCursor;
+  }
+}
+
+async function eventExit(event, job, until, location, page) {
   const p = event.payload;
   const threadId = event.identity.sessionId ?? job.executorSessionId ?? job.threadId ?? "unknown";
   if (event.type === "question.opened") {
+    if (terminal(job.status)) return null;
     const endpoint = location.fallback ? (await readObservationJson(path.join(location.stateDir, "broker.json")))?.endpoint : undefined;
     const live = job.executor || job.controlEndpoint || endpoint
       ? await liveStatus(location.cwd, { ...job, executorSessionId: event.identity.sessionId ?? job.executorSessionId,
           threadId: event.identity.sessionId ?? job.threadId }, { brokerEndpoint: endpoint })
       : null;
     if (Array.isArray(live?.questions) && !live.questions.some((question) => String(question.requestId) === String(p.requestId))) return null;
+    if (!Array.isArray(live?.questions) && await questionResolvedLater(event, job, location, page)) return null;
     const first = await claimQuestion(location.stateDir, job.id, p.requestId);
     const text = oneLine(p.message).slice(0, 200);
     return first ? `QUESTION ${prefix(job)} request=${p.requestId} ${text}`
@@ -141,7 +158,7 @@ async function follow(location, job, options) {
       lastProgress = Math.max(lastProgress, Date.parse(canonical.receivedAt) || 0);
       const text = renderJobEvent(canonical, { verbose: Boolean(options.verbose) });
       if (text != null && !options.quiet) await write(`${clock(canonical.occurredAt)} ${text}\n`);
-      const exit = await eventExit(canonical, job, until, location);
+      const exit = await eventExit(canonical, job, until, location, page);
       if (exit) { await finish(exit); return; }
     }
     if (!page.events.length) cursor = page.nextCursor;

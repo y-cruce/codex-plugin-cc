@@ -155,12 +155,20 @@ for (const terminal of ["completed", "failed"]) {
     assert.deepEqual(lines, [
       "QUESTION job=job-1 [answer validation] request=request-1 Choose?",
       "NOTIFIED job=job-1 [answer validation] thread=thread-1 pending_request=request-1 Ready",
-      "STALLED job=job-1 [answer validation] thread=thread-1 2m without progress",
       "QUESTION_PENDING job=job-1 [answer validation] request=request-1 2m unanswered: Choose?",
       terminal === "completed" ? "DONE job=job-1 [answer validation] thread=thread-1" : "FAILED job=job-1 [answer validation] thread=thread-1 Stopped"
     ]);
   });
 }
+
+test("events does not report a stall while the job is waiting for an answer", async () => {
+  const lines = await monitor([{ running: [job] }, { running: [job] }], {
+    now: () => 20 * 60000,
+    progressAt: () => 0,
+    status: async () => ({ questions: [{ requestId: "request-1", questions: [{ question: "Choose?" }] }] })
+  });
+  assert.deepEqual(lines, ["QUESTION job=job-1 request=request-1 Choose?"]);
+});
 
 test("events reports each request once and limits the first question to one line of 200 characters", async () => {
   const lines = await monitor([{ running: [job] }, { running: [job] }], {

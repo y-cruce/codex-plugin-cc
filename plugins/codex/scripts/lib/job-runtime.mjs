@@ -78,7 +78,10 @@ export class JobRuntime {
           if (entry.lastSegment && entry.lastSegment !== segment) setImmediate(() => this.cleanup().catch((error) => this.diagnostic(error)));
           entry.lastSegment = segment;
           for (const follower of this.followers.values()) if (follower.entry === entry) this.wake(follower);
-        }
+        },
+        retainedCursors: () => [...this.followers.values()]
+          .filter((follower) => follower.entry === entry && !follower.closed)
+          .map((follower) => follower.retentionCursor)
       });
       await entry.store.initialize({ job });
       entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);
@@ -209,7 +212,8 @@ export class JobRuntime {
     const entry = [...this.jobs.values()].find((item) => item.job.id === jobId && item.cwd === cwd);
     if (!entry) throw Object.assign(new Error("OBSERVATION_UNSUPPORTED: job is not owned by this broker"), { code: "OBSERVATION_UNSUPPORTED" });
     const page = await readHistory(cwd, jobId, { after, limit: 1 });
-    const follower = { socket, entry, after, pumping: false, dirty: false, closed: false };
+    const retentionCursor = after ?? cursorFor({ jobId, streamId: page.streamId }, BigInt(page.earliestSeq) - 1n);
+    const follower = { socket, entry, after, retentionCursor, pumping: false, dirty: false, closed: false };
     this.followers.set(socket, follower);
     return { jobId, streamId: page.streamId, committedSeq: page.committedSeq };
   }

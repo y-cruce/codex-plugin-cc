@@ -171,6 +171,30 @@ test("segment retention expires old cursors with an explicit recoverable boundar
   assert.ok(store.snapshot.segments.reduce((sum, segment) => sum + segment.bytes, 0) <= 1500);
 });
 
+test("segment retention preserves history still needed by an active follower", async (t) => {
+  const cwd = await fixture(t);
+  let retainedCursor = null;
+  const store = await new JobEventStore(cwd, "task-follow-retention", {
+    segmentBytes: 700,
+    maxJobBytes: 1500,
+    retainedCursors: () => retainedCursor ? [retainedCursor] : []
+  }).initialize();
+  t.historyStores.push(store);
+  store.append(event("first"));
+  await store.flush();
+  retainedCursor = (await readHistory(cwd, "task-follow-retention")).nextCursor;
+  for (let index = 0; index < 6; index += 1) {
+    store.append(event("x".repeat(150)));
+    await store.flush();
+  }
+  assert.deepEqual((await readHistory(cwd, "task-follow-retention", { after: retainedCursor })).events.map((value) => value.seq), ["2", "3", "4", "5", "6", "7"]);
+  assert.ok(store.snapshot.segments.reduce((sum, segment) => sum + segment.bytes, 0) > 1500);
+  const expiredCursor = retainedCursor;
+  retainedCursor = null;
+  await store.pruneToBytes(1500);
+  await assert.rejects(readHistory(cwd, "task-follow-retention", { after: expiredCursor }), { code: "CURSOR_EXPIRED" });
+});
+
 test("history validates cursor ownership and rejects unbounded pending queues without consuming a sequence", async (t) => {
   const cwd = await fixture(t);
   const store = await new JobEventStore(cwd, "task-limit", { maxPendingEvents: 1, flushMs: 10000 }).initialize();

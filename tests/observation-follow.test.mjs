@@ -152,8 +152,8 @@ test("QUESTION exits with cursor and successful answers appear before terminal o
   assert.equal(rows.at(-1).type, "end");
   const offline = await h.child("observe", "follow", jobId).done;
   assert.equal(offline.code, 0, offline.stderr);
-  assert.match(offline.stdout, /^QUESTION_PENDING job=.*request=question-1 still unanswered: Which source\?$/m);
-  assert.doesNotMatch(offline.stdout, /^QUESTION /m);
+  assert.doesNotMatch(offline.stdout, /^QUESTION(?:_PENDING)? /m);
+  assert.match(offline.stdout, /^DONE job=/m);
 });
 
 test("follow notification records the pending request at emission", async (t) => {
