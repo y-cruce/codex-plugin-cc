@@ -81,7 +81,8 @@ export class JobRuntime {
         },
         retainedCursors: () => [...this.followers.values()]
           .filter((follower) => follower.entry === entry && !follower.closed)
-          .map((follower) => follower.retentionCursor)
+          // The protocol has no client ack: consumed means written to the follower socket.
+          .map((follower) => follower.after ?? follower.retentionCursor)
       });
       await entry.store.initialize({ job });
       entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);

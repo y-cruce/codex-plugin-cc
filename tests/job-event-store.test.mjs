@@ -9,6 +9,8 @@ import test from "node:test";
 
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { JobEventStore, cleanupHistory, readHistory, resolveHistoryDir, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
+import { upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-event-store-"));
@@ -193,6 +195,45 @@ test("segment retention preserves history still needed by an active follower", a
   retainedCursor = null;
   await store.pruneToBytes(1500);
   await assert.rejects(readHistory(cwd, "task-follow-retention", { after: expiredCursor }), { code: "CURSOR_EXPIRED" });
+});
+
+test("segment retention advances with pages sent to an active follower", async (t) => {
+  const cwd = await fixture(t);
+  const job = { id: "task-follow-progress", kind: "task", jobClass: "task", workspaceRoot: cwd,
+    status: "running", startedAt: new Date().toISOString(), createdAt: new Date().toISOString(), pid: process.pid };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  const runtime = new JobRuntime();
+  try {
+    await runtime.register({}, cwd, job.id);
+    const entry = [...runtime.jobs.values()][0];
+    entry.store.options.segmentBytes = 700;
+    entry.store.options.maxJobBytes = 2500;
+    const socket = { destroyed: false, writableLength: 0, write: () => true,
+      end() { this.destroyed = true; }, destroy() { this.destroyed = true; } };
+    await runtime.follow(socket, cwd, job.id);
+    const follower = runtime.followers.get(socket);
+    follower.pumping = true;
+    for (let index = 0; index < 3; index += 1) {
+      entry.store.append(event(`consumed-${index}-${"x".repeat(150)}`));
+      await entry.store.flush();
+    }
+    follower.pumping = false;
+    await runtime.pump(follower);
+    const consumedCursor = follower.after;
+    assert.equal((await readHistory(cwd, job.id, { after: consumedCursor })).events.length, 0);
+
+    follower.pumping = true;
+    for (let index = 0; index < 2; index += 1) {
+      entry.store.append(event(`unread-${index}-${"x".repeat(150)}`));
+      await entry.store.flush();
+    }
+    assert.ok(BigInt(entry.store.snapshot.earliestSeq) > 1n);
+    assert.deepEqual((await readHistory(cwd, job.id, { after: consumedCursor })).events.map((value) => value.seq), ["5", "6"]);
+    assert.ok(entry.store.snapshot.segments.reduce((sum, segment) => sum + segment.bytes, 0) <= 2500);
+  } finally {
+    await runtime.close();
+  }
 });
 
 test("history validates cursor ownership and rejects unbounded pending queues without consuming a sequence", async (t) => {
