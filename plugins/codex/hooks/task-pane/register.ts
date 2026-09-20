@@ -38,7 +38,7 @@ type State = {
 
 const PANE = 'codex_tasks'
 const DONE = ['completed', 'failed', 'cancelled']
-// The events a director must act on: the same set `codex-worker.sh follow`
+// The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
 const ACTIONABLE = ['director.notified', 'question.opened', 'job.completed', 'job.failed', 'job.cancelled']
 
@@ -65,7 +65,7 @@ const GIVE_UP = 5
 // A plugin's own prompt runs once the session is idle, so a job that finishes
 // or asks a question during a long turn waits for the end of it. A background
 // task's notification is the one channel that reaches a running turn, and
-// `codex-worker.sh events` already prints one line per event the director must
+// `dispatch.sh events` already prints one line per event the director must
 // act on: armed as a Monitor, those lines arrive while the turn is still going.
 // A task that has ended stays in the pane long enough to be read, then goes.
 const KEEP_MS = 900_000
@@ -91,7 +91,7 @@ function recordMonitors($: EngineInterface, state: State) {
 // repository has been quiet -- went unnoticed until the cap, and a job that
 // finished in that half hour woke nobody.
 async function watching($: EngineInterface, state: State, root: string): Promise<boolean> {
-  const found = await $.process.run(['pgrep', '-f', `codex-worker.sh events --cwd ${root}`],
+  const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\.sh events --cwd ${root}`],
     { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
   return Boolean(found && found.exitCode === 0 && found.stdout.trim())
 }
@@ -350,11 +350,12 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     const home = await $.env.get('HOME')
     if (!home) return
     state.home = home
-    // The skill is `code-director` now and was `codex-director`; either name
-    // may be the one installed while the two are released apart, so the pane
-    // takes whichever answers rather than going blind between them.
-    for (const skill of ['code-director', 'codex-director']) {
-      const worker = `${home}/.claude/skills/${skill}/scripts/codex-worker.sh`
+    // The skill is `code-director/scripts/dispatch.sh` now and was
+    // `codex-director/scripts/codex-worker.sh`; either may be the one installed
+    // while the skill and the plugin are released apart, so the pane takes
+    // whichever answers rather than going blind between them.
+    for (const worker of ['code-director/scripts/dispatch.sh', 'code-director/scripts/codex-worker.sh',
+      'codex-director/scripts/codex-worker.sh'].map(path => `${home}/.claude/skills/${path}`)) {
       const found = await $.process.run(['bash', worker, 'companion'], { cwd: state.cwd, timeoutMs: 3000 }).catch(() => null)
       if (found?.exitCode !== 0 || !found.stdout.trim()) continue
       state.worker = worker
@@ -438,7 +439,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const line = String(e.command ?? '')
     const result = await next(e)
-    if (line.includes('codex-worker.sh') || line.includes('codex-companion.mjs')) {
+    if (/(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)) {
       state.ticks = 0
       void poll($, state)
     }

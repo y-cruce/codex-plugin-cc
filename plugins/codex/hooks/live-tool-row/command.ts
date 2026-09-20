@@ -8,7 +8,7 @@ export function followOf(command: unknown): Follow | null {
   const tokens = words.map(word => word.replace(/'([^']*)'|"((?:\\.|[^"\\])*)"|\\(.)/g, (_, a, b, c) => a ?? b?.replace(/\\(["\\$`])/g, '$1') ?? c))
   for (let i = 0; i < tokens.length; i++) {
     const script = tokens[i]!
-    const worker = /(?:^|\/)codex-worker\.sh$/.test(script)
+    const worker = /(?:^|\/)(?:codex-worker|dispatch)\.sh$/.test(script)
     const companion = /(?:^|\/)codex-companion\.mjs$/.test(script)
     const offset = worker ? 1 : 2
     if (!worker && !companion) continue

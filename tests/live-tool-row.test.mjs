@@ -44,6 +44,9 @@ describe('live ToolUse row', () => {
   test('recognizes worker/direct follow and literal quoted or escaped paths', async ($, on) => {
     const { state } = world($, on);
     assert.equal(followOf('bash ~/.claude/codex-worker.sh follow task-abc123-xyz789').worker, true);
+    // The worker script is `dispatch.sh` now and `codex-worker.sh` in an older
+    // installed skill; a row drawn from either is the same row.
+    assert.equal(followOf('bash ~/.claude/skills/code-director/scripts/dispatch.sh follow task-abc123-xyz789').worker, true);
     assert.equal(followOf('node "/a b/codex-companion.mjs" observe follow task-abc123-xyz789 --cwd="/work space"').cwd, '/work space');
     assert.equal(followOf('node /a\\ b/codex-companion.mjs observe follow task-abc123-xyz789').script, '/a b/codex-companion.mjs');
     assert.equal(followOf('node /a/codex-companion.mjs observe follow task-abc123-xyz789; echo --cwd /wrong').cwd, undefined);
