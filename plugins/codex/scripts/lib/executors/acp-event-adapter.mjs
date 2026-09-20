@@ -18,14 +18,29 @@ function fileChangeFromDiff(diff) {
   return { path: diff.path, kind, additions: null, deletions: null, oldText: diff.oldText ?? null, newText: diff.newText };
 }
 
+// A diff with neither old nor new text changes nothing, and a tool that sends
+// one is not editing a file: Qoder declares its task list as an "edit" whose
+// diff is empty and whose path is the word "file", which drew a phantom file
+// change for every task it created. Its locations are no better, so a tool
+// that sent diffs and none of them changed anything keeps nothing.
 function toolFiles(tool) {
-  const files = [];
-  for (const entry of tool.content ?? []) if (entry.type === "diff") files.push(fileChangeFromDiff(entry));
-  if (!files.length && ["edit", "delete", "move"].includes(tool.kind)) {
+  const diffs = (tool.content ?? []).filter((entry) => entry.type === "diff");
+  const files = diffs.filter((entry) => (entry.oldText ?? "") !== "" || (entry.newText ?? "") !== "").map(fileChangeFromDiff);
+  if (!files.length && !diffs.length && ["edit", "delete", "move"].includes(tool.kind)) {
     for (const location of tool.locations ?? []) files.push({ path: location.path, kind: tool.kind,
       additions: null, deletions: null });
   }
   return files;
+}
+
+// ACP carries a vendor's own tool name in `_meta`; the pane drops the name a
+// row is prefixed with, so the name joins the title or the reader is left with
+// the agent's generic wording ("Edit file" for a task it created).
+function vendorTool(tool) {
+  for (const value of Object.values(tool._meta ?? {})) {
+    if (value && typeof value === "object" && typeof value.toolName === "string") return value.toolName;
+  }
+  return null;
 }
 
 function toolContent(tool) {
@@ -40,8 +55,9 @@ function commandText(tool) {
 function toolSnapshot(tool) {
   return {
     toolCallId: String(tool.toolCallId),
-    name: tool.name ?? null,
-    title: tool.title ?? tool.name ?? String(tool.toolCallId),
+    name: tool.name ?? vendorTool(tool),
+    title: [vendorTool(tool), tool.title ?? tool.name ?? String(tool.toolCallId)]
+      .filter((part, index, parts) => part && parts.indexOf(part) === index).join(" · "),
     kind: tool.kind ?? "other",
     status: tool.status ?? "pending",
     content: toolContent(tool),
@@ -193,6 +209,29 @@ export class AcpEventAdapter {
     const tool = this.mergeTool(notification.update);
     const identity = { toolCallId: String(tool.toolCallId) };
     const terminal = TERMINAL_TOOL_STATUSES.has(tool.status);
+    // A sub-agent is not a tool row. Qoder sends one as a tool call named
+    // "Agent" whose input names the agent and what it was asked for, and the
+    // row drew the word "Agent" and nothing else; the pane already has a
+    // sub-agent of its own to draw, so this one is reported the same way.
+    const subagent = typeof tool.rawInput?.subagent_type === "string" ? tool.rawInput.subagent_type : null;
+    if (subagent) {
+      const status = terminal ? (tool.status === "failed" ? "interrupted" : "completed") : created ? "started" : "interacted";
+      // A Codex sub-agent's line says what it is doing now, because its own
+      // events arrive; here only this call speaks for it. What the update
+      // itself carries is that news -- the merged content is still the input
+      // it was created with -- and what it was asked for stands until then.
+      const report = created ? null : textFor((notification.update.content ?? [])
+        .flatMap((entry) => entry.type === "content" ? [contentBlock(entry.content)] : []));
+      // A sub-agent reports back in full -- the one that finished here sent
+      // three thousand characters of Markdown and a table -- and its line has
+      // room for the sentence that answers the ask, not for the whole report.
+      const said = report && (report.split("\n").map((line) => line.trim())
+        .find((line) => line && !/^#{1,6}\s/.test(line) && !/^[|>-]/.test(line)) ?? report);
+      await this.emit("agent.activity", { agentId: String(tool.toolCallId), parentAgentId: null, path: subagent, status,
+        detail: said ?? (created && typeof tool.rawInput?.description === "string" ? tool.rawInput.description : null) },
+      { agentId: String(tool.toolCallId) }, notification);
+      return;
+    }
     if (tool.kind === "execute") {
       if (created) await this.emit("command.started", { command: commandText(tool), commandKnown: typeof tool.rawInput?.command === "string",
         cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);
@@ -200,7 +239,12 @@ export class AcpEventAdapter {
       else if (!created) await this.emit("tool.progress", { message: tool.title, content: toolContent(tool) }, identity, notification);
       return;
     }
-    if (["edit", "delete", "move"].includes(tool.kind)) {
+    // Whether this tool changes files is settled when it is created and kept
+    // for its whole life: its completion replaces the diff with a result, and
+    // deciding again there would send a fileChange.completed for a tool whose
+    // start was never reported as one.
+    if (!Object.hasOwn(tool, "_files")) tool._files = toolFiles(tool).length > 0;
+    if (tool._files && ["edit", "delete", "move"].includes(tool.kind)) {
       const payload = { status: terminal ? (tool.status === "failed" ? "failed" : "completed") : "in_progress", files: toolFiles(tool) };
       if (created) await this.emit("fileChange.started", payload, identity, notification);
       if (terminal) await this.emit("fileChange.completed", payload, identity, notification);
