@@ -165,9 +165,9 @@ function updateTail(view, event, text, key = null) {
   }
   const prior = key && view._items[key]?.tailSeq;
   const index = prior ? view.tail.findIndex((entry) => entry.seq === prior) : -1;
-  const resumedStream = index >= 0 && index < view.tail.length - 1
-    && (event.type === "message.delta" || event.type === "reasoning.summary.delta");
-  const moveToEnd = index >= 0 && (resumedStream || event.type === "message.completed" || event.type === "reasoning.completed");
+  // Reasoning arrives as one block at the end of a turn, so it is the one kind
+  // still worth moving: its row was opened when the thinking began.
+  const moveToEnd = index >= 0 && index < view.tail.length - 1 && event.type === "reasoning.completed";
   row.positionSeq = index >= 0 && !moveToEnd ? view.tail[index].positionSeq ?? view.tail[index].seq : row.seq;
   if (moveToEnd) view.tail.splice(index, 1);
   if (index >= 0 && !moveToEnd) view.tail[index] = row;
@@ -252,7 +252,16 @@ export function applyJobEvent(view, event) {
       const delta = blockText(p.block);
       state.text = (state.text ?? "") + delta;
       if (!child) view.lastMessage = { kind: "assistant", text: state.text, at: event.occurredAt };
-      text = preview(`assistant: ${state.text}`, 300);
+      // An agent that writes, runs a tool, then writes again is not revising
+      // what it already said. Carrying one row to the end would drag the
+      // earlier half down past the tool it preceded, and do it again on every
+      // resumption; so writing that resumes opens a row of its own and the
+      // rows already drawn stay where they were.
+      if (state.tailSeq && view.tail.at(-1)?.seq !== state.tailSeq) {
+        state.shown = state.text.length - delta.length;
+        state.tailSeq = null;
+      }
+      text = preview(`assistant: ${state.text.slice(state.shown ?? 0)}`, 300);
       tailKey = key;
       break;
     }
@@ -266,6 +275,18 @@ export function applyJobEvent(view, event) {
     case "message.completed": case "reasoning.completed": {
       const body = p.message.text ?? p.message.content.map(blockText).join("");
       if (!child) view.lastMessage = { kind: event.type === "message.completed" ? "assistant" : "reasoning", text: body, at: event.occurredAt };
+      if (state && event.type === "message.completed") {
+        if (state.tailSeq && view.tail.at(-1)?.seq !== state.tailSeq) {
+          state.shown = (state.text ?? "").length;
+          state.tailSeq = null;
+        }
+        // Only a body that continues what was streamed can be cut at the
+        // offset already drawn; a final text that rewrites the stream is shown
+        // whole, since none of it has appeared yet.
+        const streamed = state.text ?? "";
+        const segment = body.startsWith(streamed) ? body.slice(Math.min(state.shown ?? 0, body.length)) : body;
+        text = segment.trim() ? preview(`assistant: ${segment}`, 300) : null;
+      }
       tailKey = key;
       break;
     }

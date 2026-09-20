@@ -46,7 +46,7 @@ test("message deltas fold into one row, survive snapshot restoration and retain 
   assert.equal(restored.history.committedSeq, "2");
 });
 
-test("streaming messages follow resumed activity and still finish after intervening tools", () => {
+test("writing that resumes opens its own row and leaves the rows already drawn alone", () => {
   const job = { id: "job-acp", executor: "acp", threadId: "session-1" };
   const view = createLiveView(job);
   let seq = 0;
@@ -74,16 +74,23 @@ test("streaming messages follow resumed activity and still finish after interven
   accept("tool.completed", { toolCallId: "tool-1" }, { tool: { ...startedTool, status: "completed" } });
   assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed"]);
 
+  // The text written before the tool ran stays above it, and what the agent
+  // writes afterwards arrives as a row of its own carrying only the new part.
   accept("message.delta", { messageId: "message-1" }, { role: "assistant", block: { type: "text", text: " done" } });
-  assert.deepEqual(view.tail.map((row) => row.type), ["tool.started", "tool.completed", "message.delta"]);
-  assert.equal(view.tail.at(-1).text, "assistant: working... done");
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed", "message.delta"]);
+  assert.equal(view.tail[0].text, "assistant: working...");
+  assert.equal(view.tail.at(-1).text, "assistant:  done");
   assert.equal(view.tail.at(-1).positionSeq, "5");
+  // The whole message is still what the result and the header report.
+  assert.equal(view.lastMessage.text, "working... done");
 
   accept("message.completed", { messageId: "message-1" }, { message: {
     messageId: "message-1", role: "assistant", content: [{ type: "text", text: "working... done" }], text: "working... done"
   } });
-  assert.deepEqual(view.tail.map((row) => row.type), ["tool.started", "tool.completed", "message.completed"]);
-  assert.deepEqual(view.tail.map((row) => row.seq), ["3", "4", "6"]);
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed", "message.completed"]);
+  assert.deepEqual(view.tail.map((row) => row.seq), ["2", "3", "4", "6"]);
+  assert.equal(view.tail.at(-1).text, "assistant:  done");
+  assert.equal(view.lastMessage.text, "working... done");
   assert.ok(view.tail.every((row, index) => index === 0 || BigInt(row.seq) > BigInt(view.tail[index - 1].seq)));
 });
 
@@ -99,7 +106,8 @@ test("short Codex messages and command lifecycle keep their compact rows", () =>
   accept("item/started", { item: { type: "commandExecution", id: "command", command: "pwd", cwd: "/repo" } });
   accept("item/completed", { item: { type: "commandExecution", id: "command", command: "pwd", exitCode: 0 } });
   assert.deepEqual(view.tail.map((row) => row.type), ["message.completed", "command.completed"]);
-  assert.deepEqual(view.tail.map((row) => row.positionSeq), ["3", "4"]);
+  // A message that never had to make room keeps the place it was first drawn in.
+  assert.deepEqual(view.tail.map((row) => row.positionSeq), ["1", "4"]);
 });
 
 test("command output updates one item while completion removes active command", () => {
