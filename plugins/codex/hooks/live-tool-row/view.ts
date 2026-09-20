@@ -27,6 +27,9 @@ export type LiveView = {
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
+// A task that is thinking sends nothing, and a pane that draws nothing new
+// reads as a pane that has stopped. The mark on a live heading turns.
+const SPIN = ['◐', '◓', '◑', '◒']
 
 // `endedAt` is the authority on whether a job is over, not `status`: a view can
 // be written again after its job ended -- a later turn on the same thread sets
@@ -121,8 +124,12 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // An ACP agent never reports usage, so its counts stay at zero for the whole
   // run: the header says nothing rather than saying the same nothing forever.
   const counted = data.usage.inputTokens > 0 || data.usage.outputTokens > 0 || data.usage.cachedInputTokens > 0
+  // Only the pane turns it: it repaints itself while a task is live, while a
+  // row in the transcript is drawn when the engine asks and would sit on
+  // whichever frame it happened to catch.
+  const live = headingLast && !result && !isOver(data)
   const header = [
-    { text: `● ${executor} · ` },
+    { text: `${live ? SPIN[Math.floor(now / 500) % SPIN.length] : '●'} ${executor} · ` },
     { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(data.startedAt)) : elapsed(data.startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens` : ''}` },

@@ -37,6 +37,10 @@ type State = {
 }
 
 const PANE = 'codex_tasks'
+// How often the pane repaints while a task is live, which is what turns the
+// spinner. Fast enough to read as alive, slow enough not to rebuild the trace
+// for nothing.
+const SPIN_MS = 500
 const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
@@ -380,18 +384,17 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     }
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state) })
-    // The heading's clock moves on its own, and nothing else asks for the redraw
-    // that shows it: a job that is thinking writes no view file, so the pane
-    // would sit at the second of the last event and then jump over the silence.
-    // Asking only when the figure it draws has actually changed keeps a task
-    // that has been running for an hour from rebuilding the trace every second.
-    $.clock.every(1000, async () => {
+    // Nothing else asks for the redraw that moves the heading's clock and its
+    // spinner: a job that is thinking writes no view file, and past a minute
+    // the clock itself only changes once a minute, so the pane sat still for
+    // whole minutes while the task was working and looked stopped. While a
+    // task is live the pane redraws on its own; when none is, it does not.
+    $.clock.every(SPIN_MS, async () => {
       if (!state.opened) return
+      const live = [...state.views.values()].filter(view => !isOver(view))
+      if (!live.length) return
       const now = await $.clock.now()
-      const clock = [...state.views.values()].filter(view => !isOver(view))
-        .map(view => elapsed(view.startedAt, now)).join(' ')
-      if (!clock || clock === state.clock) return
-      state.clock = clock
+      state.clock = live.map(view => elapsed(view.startedAt, now)).join(' ')
       $.ui.invalidate('ui.render')
     })
     void poll($, state)
