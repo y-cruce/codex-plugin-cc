@@ -3,8 +3,24 @@
 // dependencies, so a top-level import failed every companion call on an
 // installed copy -- `observe list` included, which has nothing to do with ACP.
 
+import { renderJobEvent } from "./job-event-model.mjs";
+
 function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (onProgress) onProgress({ message, phase, ...extra });
+}
+
+// A job's last sign of life is its log file's mtime: `status` reports it as
+// `lastProgressAt`, and the pane's monitor calls a job stalled fifteen minutes
+// after it. A Codex turn writes a line per item; an ACP turn wrote three lines
+// at startup and nothing after, so a working ACP task was reported stalled and
+// `status` showed it frozen at "starting" with no progress for its whole run.
+const PHASES = [["command.", "running"], ["fileChange.", "editing"], ["tool.", "investigating"],
+  ["agent.", "investigating"], ["plan.", "investigating"], ["turn.completed", "finalizing"]];
+
+function progressForEvent(event) {
+  const message = renderJobEvent(event);
+  if (!message) return null;
+  return { message, phase: PHASES.find(([prefix]) => event.type.startsWith(prefix))?.[1] ?? null };
 }
 
 function lastAssistantMessage(terminal) {
@@ -17,7 +33,13 @@ export async function runAcpTurn(cwd, options = {}) {
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
     args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
-  const eventPump = (async () => { for await (const event of port.events()) options.onExecutorEvent?.(event); })();
+  const eventPump = (async () => {
+    for await (const event of port.events()) {
+      options.onExecutorEvent?.(event);
+      const progress = progressForEvent(event);
+      if (progress) emitProgress(options.onProgress, progress.message, progress.phase);
+    }
+  })();
   try {
     emitProgress(options.onProgress, options.resumeSessionId ? `Resuming ACP session ${options.resumeSessionId}.` : "Starting ACP session.", "starting",
       { executor: "acp", controlEndpoint: port.controlEndpoint });
