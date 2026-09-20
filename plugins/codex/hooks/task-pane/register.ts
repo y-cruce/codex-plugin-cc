@@ -37,6 +37,24 @@ const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `codex-worker.sh follow`
 // stops at. Everything else is progress the pane already shows.
 const ACTIONABLE = ['director.notified', 'question.opened', 'job.completed', 'job.failed', 'job.cancelled']
+
+// What wakes the director is the event, not its body: a question and an ending
+// both arrive with no text of their own, and what they are about lives in the
+// view the companion keeps. Dropping the ones that came in empty cost a whole
+// class of push -- every structured question went unreported.
+export function pushLine(
+  label: string,
+  event: { type: string; text?: string },
+  view?: Pick<LiveView, 'pendingQuestion' | 'lastMessage'>,
+): string | null {
+  // A question replayed from before this session's cursor floor may have been
+  // answered long ago; the view says whether one is still open.
+  if (event.type === 'question.opened' && !view?.pendingQuestion) return null
+  const detail = (event.text ?? '').trim()
+    || (event.type === 'question.opened' ? view?.pendingQuestion?.text ?? '' : '')
+    || (event.type.startsWith('job.') ? view?.lastMessage?.text ?? '' : '')
+  return `${label} · ${event.type}${detail ? `: ${clip(detail, 300)}` : ''}`
+}
 const RESCAN_TICKS = 15
 // Polls a job may fail in a row before the pane stops asking for it.
 const GIVE_UP = 5
@@ -147,8 +165,9 @@ async function poll($: EngineInterface, state: State) {
           // its events are consumed so the cursor moves past them, and none of
           // them wakes the director.
           const announce = !(first && DONE.includes(job.status))
-          for (const event of events.filter(row => ACTIONABLE.includes(row.type) && (row.text ?? '').trim())) {
-            if (announce) lines.push({ jobId: job.id, text: `${job.label ?? job.id} · ${event.type}: ${clip(event.text ?? '', 300)}` })
+          for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
+            const line = pushLine(job.label ?? job.id, event, view)
+            if (announce && line) lines.push({ jobId: job.id, text: line })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
