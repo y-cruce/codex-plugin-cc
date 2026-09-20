@@ -70,8 +70,11 @@ export function paneBody(
         key: `codex_tab_${data.jobId}`,
         label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
         // The ring starts on the task in view, so the arrows that move it start
-        // from where the reader is rather than from the top of the list.
-        plain: true, autoFocus: isFocused, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
+        // from where the reader is rather than from the top of the list. The prop
+        // takes `true` and nothing else: passing `false` fails the tree, and a
+        // pane whose tree fails is drawn by the engine in its own grey.
+        ...(isFocused ? { autoFocus: true as const } : {}),
+        plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
       }),
       Text({ dimColor: true, children: ` · ${state}` }),
     ] })
