@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-import { writeExecutable } from "./helpers.mjs";
+import { makeTempDir, writeExecutable } from "./helpers.mjs";
 
 export function installFakeCodex(binDir, behavior = "review-ok") {
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -649,10 +649,16 @@ rl.on("line", (line) => {
   }
 }
 
-export function buildEnv(binDir) {
+// Without a config dir of its own, every companion a test starts sweeps the
+// real ~/.claude/plugins/data: observationRoots and the history cleanup both
+// read CLAUDE_CONFIG_DIR, which CLAUDE_PLUGIN_DATA does not cover. On a machine
+// that has run Codex for a while that is thousands of files per invocation, so
+// the suite's speed tracked how much the developer had used the plugin.
+export function buildEnv(binDir, configDir = makeTempDir("codex-plugin-config-")) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
+    CLAUDE_CONFIG_DIR: configDir,
     PATH: `${binDir}${sep}${process.env.PATH}`
   };
 }
