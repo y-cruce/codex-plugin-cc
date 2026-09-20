@@ -200,9 +200,8 @@ describe('live ToolUse row', () => {
     const message = rows.find(r => r.text.startsWith('›'));
     assert.equal(message.wrap, 'wrap');
     assert.equal(message.text, '› first line\nsecond line that is quite a bit longer than forty columns end');
-    const thought = rows.find(r => r.text.startsWith('…'));
-    assert.equal(thought.wrap, 'wrap');
-    assert.equal(thought.text, '… older thought');
+    // Thinking is not part of the trace; only the answer and the work are.
+    assert.equal(rows.find(r => r.text.includes('older thought')), undefined);
     assert.equal(clip('中文😀', 5), '中文');
   });
 });
@@ -563,10 +562,12 @@ describe('live row polish', () => {
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
     assert.deepEqual(commands.map(node => node.children[0].props.color), ['green', 'red', 'gray']);
     assert.ok(commands.every(node => textOf(node) === '● $ echo hello · 1.2s'));
-    for (const [prefix, color, dim] of [['›', undefined, false], ['…', undefined, true], ['?', 'magenta', false], ['→', 'cyan', false]]) {
+    for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['→', 'cyan', false]]) {
       const node = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
       assert.equal(node.props.color, color); assert.equal(node.props.dimColor, dim);
     }
+    // reasoning.completed is in the tail above and must not reach the tree.
+    assert.equal(rowsOf(tree).find(node => textOf(node).startsWith('…')), undefined);
     assert.equal(rowsOf(tree).find(node => textOf(node) === 'body').props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '✎ body'));
   });
@@ -713,7 +714,7 @@ describe('Markdown and prompt footer', () => {
       }
     }
   });
-  test('renders older and full newest assistant text and result Markdown but keeps reasoning plain and dim', ($, on) => {
+  test('renders older and full newest assistant text and result Markdown while thinking stays out', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = [];
     data.lastMessage.text = '# Full answer\n```ts\nconst full = true\n```';
@@ -724,17 +725,17 @@ describe('Markdown and prompt footer', () => {
     ];
     const ui = $.ui.resolve(row());
     let tree = liveTree(ui, data, 120, 0);
-    assert.match(textOf(tree), /› older\n \n› Full answer\nconst full = true\n \n… \*\*plain\*\* `raw`/);
-    assert.equal(rowsOf(tree).at(-1).props.dimColor, true);
+    assert.match(textOf(tree), /› older\n \n› Full answer\nconst full = true/);
+    // The trace shows the answer and the work; the thinking behind it stays out.
+    assert.doesNotMatch(textOf(tree), /plain|raw/);
     tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
     assert.equal(rowsOf(tree)[1].props.bold, true);
     assert.equal(rowsOf(tree)[2].type, 'Code');
+    // A job whose final output is a thought still reports it on the result card,
+    // which draws lastMessage rather than the trace.
     data.lastMessage = { ...data.lastMessage, kind: 'reasoning', text: '**raw thought**' };
-    for (const result of [undefined, { kind: 'DONE' }]) {
-      tree = liveTree(ui, data, 120, 0, undefined, result);
-      const thought = rowsOf(tree).find(node => textOf(node).includes('**raw thought**'));
-      assert.ok(thought.props.dimColor);
-    }
+    tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
+    assert.ok(rowsOf(tree).find(node => textOf(node).includes('**raw thought**')).props.dimColor);
   });
   test('PromptHint draws cyan Codex and dim status, appends only hints that fit, and uses the shared tick', async ($, on) => {
     const { state, clock } = world($, on);
@@ -903,7 +904,7 @@ describe('transcript block spacing', () => {
       ' ', 'Warning: timeout clamped', '● $ git status',
       ' ', '› I will check the contract.',
       ' ', '● $ rg requestId · 0.4s', '⇢ review · running · $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
-      ' ', '… Check the result.',
+      // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',
     ]);
@@ -916,7 +917,7 @@ describe('transcript block spacing', () => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
     const render = () => rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt))).map(textOf).slice(1);
-    for (const type of ['message.completed', 'reasoning.completed', 'question.opened', 'director.notified', 'control.message.updated']) {
+    for (const type of ['message.completed', 'question.opened', 'director.notified', 'control.message.updated']) {
       data.tail = [{ type: 'command.started', text: '$ before' }, { type, text: 'body' }, { type: 'command.started', text: '$ after' }];
       const lines = render();
       assert.deepEqual(lines.slice(0, 3), [' ', '$ before', ' ']);

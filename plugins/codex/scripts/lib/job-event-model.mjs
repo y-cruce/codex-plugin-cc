@@ -151,7 +151,14 @@ export function createLiveView(job) {
 
 function updateTail(view, event, text, key = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
-  const row = { seq: String(event.seq), at: event.occurredAt, type: event.type, text: oneLine(text) };
+  // A row is one line, except a message: its paragraphs are what makes an answer
+  // readable, and flattening them here leaves the renderer nothing to restore.
+  const row = { seq: String(event.seq), at: event.occurredAt, type: event.type,
+    text: /^message\./.test(event.type) ? String(text ?? "") : oneLine(text) };
+  // A row holds a preview; lastMessage holds the whole answer. Writing that
+  // resumed after a tool has a row per stretch, so a row says where its own
+  // stretch begins and the reader takes the rest from lastMessage.
+  if (/^message\./.test(event.type) && key) row.from = String(view._items[key]?.shown ?? 0);
   const agent = event.type === "agent.activity" ? { id: event.payload.agentId, path: event.payload.path } : eventAgent(event, view);
   if (agent?.id) row.agentThreadId = agent.id;
   if (event.agent) {

@@ -13,11 +13,15 @@ const DOT: Record<string, string> = {
 
 const DONE = ['completed', 'failed', 'cancelled']
 
-// Cutting to a length is not clip's job here: clip flattens every newline into
-// a space, and a message that loses its line breaks loses its Markdown with
-// them -- headings and tables arrive as one run of pipes.
+// The engine refuses a text child longer than 10000 characters and draws its own
+// body instead, so what reaches it is bounded -- per line, since Markdown lands
+// a line per child and a whole answer is worth reading. Cutting is not clip's
+// job here either: clip folds every newline into a space, and a message that
+// loses its line breaks loses its Markdown with them.
+const LINE = 8000
 function shorten(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit)}\u2026`
+  const bounded = text.length <= limit ? text : `${text.slice(0, limit)}\u2026`
+  return bounded.split('\n').map(line => line.length <= LINE ? line : `${line.slice(0, LINE)}\u2026`).join('\n')
 }
 
 // A tab only has to be recognizable, so it may lose its end -- but a cut made
@@ -43,8 +47,9 @@ export function paneBody(
   const { Box, Text, Button } = ui
   const width = Math.max(24, columns)
   if (!jobs.length) {
-    return Box({ backgroundColor: background, width: columns, minHeight: rows, children: [
+    return Box({ flexDirection: 'column', backgroundColor: background, width: columns, height: rows, children: [
       Text({ dimColor: true, children: 'No tasks dispatched from this session yet.' }),
+      Box({ flexGrow: 1 }),
     ] })
   }
   // One task is always in view: the height belongs to its trace, not to a list
@@ -78,8 +83,8 @@ export function paneBody(
     // trace, where every one of them is already a row of its own, in the order
     // it was issued: drawn twice, the pair reads as events out of order.
     activeCommands: [],
-    lastMessage: focused.lastMessage ? { ...focused.lastMessage, text: shorten(focused.lastMessage.text, 2000) } : null,
-    tail: focused.tail.map(event => ({ ...event, text: shorten(event.text, 1000) })),
+    lastMessage: focused.lastMessage ? { ...focused.lastMessage, text: shorten(focused.lastMessage.text, 40000) } : null,
+    tail: focused.tail.map(event => ({ ...event, text: shorten(event.text, 40000) })),
   }
 
   // The body is the same card the follow row draws: it already groups commands,
@@ -92,9 +97,12 @@ export function paneBody(
   // The pane's own ground is a mid grey the engine paints, which reads as a slab
   // in the middle of a dark session. There is no value meaning "the terminal's
   // own", so the colour is a plugin option; empty keeps the engine's.
+  // The trace takes the height that is going: a shorter one leaves the ground
+  // showing to the foot of the pane rather than the mid grey the engine paints
+  // under an element that stops early.
   return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
     Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: tabs }),
-    Box({ marginTop: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL)] }),
+    Box({ flexGrow: 1, marginTop: 1, marginBottom: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true)] }),
     ...(jobs.length > 1 ? [Text({ dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
   ] })
 }

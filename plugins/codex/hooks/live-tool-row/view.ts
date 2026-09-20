@@ -21,7 +21,7 @@ export type LiveView = {
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; startedSeq?: string }[]
-  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
+  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
@@ -80,7 +80,10 @@ function toolTitle(text: string, columns: number): string {
 // `maxTail` lets a caller that scrolls (the tasks pane) draw the whole trace and
 // let its surface window it; a tool row inline in the transcript must not grow
 // that far, so it keeps the row-derived limit.
-export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number) {
+// `headingLast` puts the status line under the trace: a row in the transcript
+// is read top down and announces itself first, while a pane already names the
+// task in its tabs and wants its foot to say how the task is doing.
+export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number, headingLast = false) {
   const { Box, Text } = ui
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
@@ -105,7 +108,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   }) })]
   const heading = lines.pop()!
   columns = Math.max(1, columns - 2)
-  const tree = () => Box({ flexDirection: 'column', children: [heading, Box({ flexDirection: 'column', paddingLeft: 2, children: Box({ flexDirection: 'column', width: columns, children: lines }) })] })
+  const tree = () => {
+    const body = Box({ flexDirection: 'column', paddingLeft: 2, children: Box({ flexDirection: 'column', width: columns, children: lines }) })
+    // A heading under the trace is a footer: it needs the gap above it that a
+    // heading above one gets for free from the row that precedes it.
+    return Box({ flexDirection: 'column', children: headingLast
+      ? [Box({ flexGrow: 1, children: [body] }), Box({ marginTop: 1, children: [heading] })]
+      : [heading, body] })
+  }
   let previousBlock = false
   let hasContent = false
   const separate = (block: boolean) => {
@@ -154,6 +164,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (event.text.startsWith('⇢ sub-agent ')) return false
     if (event.type === 'job.started') return false
     if (event.type === 'question.closed') return false
+    // An agent's thinking is not what the reader is watching for, and one that
+    // streams raw thought rather than a summary buries the trace under it: the
+    // last job put seventy-five thousand characters of it in one row.
+    if (String(event.type ?? '').startsWith('reasoning')) return false
     if ((event.type === 'tool.started' || event.type === 'tool.completed') && event.text.startsWith('dynamicToolCall')) return false
     if (event.type === 'tool.started') {
       const title = toolTitle(event.text, columns)
@@ -175,7 +189,13 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   if (grouped.length && !hasContent) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
-  const newest = kind ? grouped.findLastIndex(event => !event.agent && typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')) : -1
+  const isKind = (event: LiveView['tail'][number]) => !event.agent && typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')
+  const newest = kind ? grouped.findLastIndex(isKind) : -1
+  // lastMessage holds the whole message, and a row holds a 300-character
+  // preview, so the last row is swapped for the full text -- from where its own
+  // stretch begins, since writing that resumed after a tool has a row per
+  // stretch and the whole text there would draw every earlier one again.
+  const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
   grouped.forEach((event, index) => {
     const type = typeOf(event)
     if (type === 'agent.summary') return add(event.text, { dimColor: true })
@@ -200,11 +220,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     }
     const prefix = type.startsWith('message') ? '›' : type.startsWith('reasoning') ? '…' : type.startsWith('question') ? '?' : (type.startsWith('director') || type.startsWith('control.message')) ? '→' : type.startsWith('file') ? '✎' : ''
     const color = /error|failed/.test(type) ? 'red' : type.startsWith('question') ? 'magenta' : (type.startsWith('director') || type.startsWith('control.message')) ? 'cyan' : undefined
-    const text = index === newest ? data.lastMessage!.text : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
+    const text = index === newest ? data.lastMessage!.text.slice(Math.min(from, data.lastMessage!.text.length)) : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
     const props = { color, dimColor: type === 'source.warning' || type.startsWith('reasoning') || (!prefix && !color) }
     if (type.startsWith('message')) {
       separate(true)
-      lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && type.endsWith('.delta')))
+      // The "still writing" marker only belongs on a row nothing has followed:
+      // below a tool the message has visibly paused, and the ellipsis there
+      // reads as the end of the trace rather than the end of that row.
+      lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && index === grouped.length - 1 && type.endsWith('.delta')))
     } else if (type.startsWith('tool.')) add(`● ${toolTitle(text, columns)}`, props)
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
