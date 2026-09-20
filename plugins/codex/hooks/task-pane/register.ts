@@ -29,6 +29,7 @@ type State = {
   followed: Set<string>
   unreadable: Map<string, number>
   pending: { jobId: string; cwd: string; text: string }[]
+  worker: string
   toEnd: boolean
   pinned: boolean
   clock: string
@@ -112,7 +113,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
     await recordMonitors($, state)
     void $.tool.call({
       tool: 'Monitor',
-      command: `bash ${state.home}/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd ${root}`,
+      command: `bash ${state.worker} events --cwd ${root}`,
       description: `Codex job events in ${root.split('/').at(-1) ?? root}`,
       timeout_ms: MONITOR_MS,
     }).catch((error: unknown) => {
@@ -349,10 +350,18 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     const home = await $.env.get('HOME')
     if (!home) return
     state.home = home
-    const found = await $.process.run(['bash', `${home}/.claude/skills/codex-director/scripts/codex-worker.sh`, 'companion'],
-      { cwd: state.cwd, timeoutMs: 3000 })
-    if (found.exitCode !== 0) return
-    state.script = found.stdout.trim()
+    // The skill is `code-director` now and was `codex-director`; either name
+    // may be the one installed while the two are released apart, so the pane
+    // takes whichever answers rather than going blind between them.
+    for (const skill of ['code-director', 'codex-director']) {
+      const worker = `${home}/.claude/skills/${skill}/scripts/codex-worker.sh`
+      const found = await $.process.run(['bash', worker, 'companion'], { cwd: state.cwd, timeoutMs: 3000 }).catch(() => null)
+      if (found?.exitCode !== 0 || !found.stdout.trim()) continue
+      state.worker = worker
+      state.script = found.stdout.trim()
+      break
+    }
+    if (!state.script) return
     // A module reload re-runs this, so the scan floor must be when the session
     // began, not when the module last loaded: otherwise every job dispatched
     // before the reload drops out of the pane.
@@ -400,7 +409,7 @@ function visibleJobs(state: State): LiveView[] {
 export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
-    roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
+    roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
