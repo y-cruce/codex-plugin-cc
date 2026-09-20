@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.7
+
+- Never report a question that has already been answered: a request is surfaced once, while it is still open.
+
 ## 1.2.6
 
 - Measure `observe follow` stalls from the current follow session and subsequent event progress, preventing immediate false STALLED results when resuming long-running jobs.

@@ -142,8 +142,12 @@ async function poll($: EngineInterface, state: State) {
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
             .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string }] } catch { return [] } })
           const events = rows.filter(row => row.seq)
-          for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
-            lines.push({ jobId: job.id, text: `${job.label ?? job.id} · ${event.type}: ${clip(event.text ?? '', 300)}` })
+          // A job already over the first time it is seen is history, not news:
+          // its events are consumed so the cursor moves past them, and none of
+          // them wakes the director.
+          const announce = !(first && DONE.includes(job.status))
+          for (const event of events.filter(row => ACTIONABLE.includes(row.type) && (row.text ?? '').trim())) {
+            if (announce) lines.push({ jobId: job.id, text: `${job.label ?? job.id} · ${event.type}: ${clip(event.text ?? '', 300)}` })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
