@@ -30,6 +30,7 @@ type State = {
   unreadable: Map<string, number>
   pending: { jobId: string; cwd: string; text: string }[]
   toEnd: boolean
+  pinned: boolean
   clock: string
   monitors: Map<string, { armedAt: number; checkedAt?: number }>
 }
@@ -242,7 +243,7 @@ async function poll($: EngineInterface, state: State) {
         // killed an hour ago in its tabs and counted it among the live ones.
         // The store knows better, and it is what the listing reports.
         if (view && DONE.includes(job.status) && !isOver(view)) {
-          state.views.set(job.id, { ...view, status: job.status, endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
+          state.views.set(job.id, { ...view, status: job.status as LiveView['status'], endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
         }
         {
           // Read during a director turn as well. A turn can run for half an
@@ -402,7 +403,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
-    followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, clock: '',
+    followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
   }
 
@@ -490,6 +491,14 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     return next(e)
   })
+  // Where the window sits is a render prop; how tall the tree is is not, so
+  // whether the window is at the end can only be answered here, where the move
+  // carries both. The pane rides the end until the reader scrolls off it, and
+  // takes it up again where they scroll back down to it.
+  on('ui.scroll', { requestId: PANE }, ($, e, next) => {
+    if (e.origin.kind === 'person') state.pinned = e.offset >= e.contentRows - e.bodyRows
+    return next(e)
+  })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     // A reload builds a fresh state while the pane it left behind is still on
@@ -510,12 +519,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
     // The status line is the tree's last row and the engine scrolls the whole
     // tree, so a trace that grows carries the status off the bottom of the
-    // window. The window follows the end while it is already there, and stops
-    // following the moment the reader scrolls up to look at something.
-    const scroll = e.props.scroll
-    const following = !scroll || scroll.contentRows <= scroll.bodyRows
-      || scroll.offset >= scroll.contentRows - scroll.bodyRows - 1
-    if (state.toEnd || following) {
+    // window. `end` keeps up with a tree that grows until something else moves
+    // the window, and the reader moving it is what clears the pin.
+    if (state.toEnd || state.pinned) {
       state.toEnd = false
       // Sent from here, not from the press: invalidate only asks for a redraw,
       // so a move made there would land on the trace being replaced.
