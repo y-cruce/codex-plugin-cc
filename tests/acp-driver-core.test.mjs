@@ -137,7 +137,7 @@ test("ACP cancel waits for late updates and closes pending input requests", asyn
   assert.equal(terminal.status, "interrupted");
   assert.equal(terminal.reason.backendCode, "cancelled");
   assert.equal(h.port.takeReplacementPrompt()[0].text, "replacement");
-  const late = h.events.findIndex((event) => event.type === "message.delta" && event.payload.block.text === "late update");
+  const late = h.events.findIndex((event) => event.type === "message.delta" && event.payload.block.text === "late update 1");
   const completed = h.events.findIndex((event) => event.type === "turn.completed");
   assert.ok(late >= 0 && completed > late);
 
@@ -156,6 +156,20 @@ test("ACP cancel waits for late updates and closes pending input requests", asyn
       ["permission.resolved", "cancelled"],
       ["question.closed", "cancelled"]
     ]);
+
+  let stderr = "";
+  const stderrWrite = t.mock.method(process.stderr, "write", (chunk) => { stderr += chunk; return true; });
+  try { await h.port.close(); } finally { stderrWrite.mock.restore(); }
+  const history = await readHistory(h.cwd, h.job.id);
+  assert.deepEqual({
+    finalToolPersisted: history.events.some((event) => event.type === "tool.completed" && event.identity.toolCallId === "late-tool-3"),
+    finalMessagePersisted: history.events.some((event) => event.type === "message.delta" && event.payload.block.text === "late update 3"),
+    closedStoreDiagnostic: stderr.includes("History store is not open")
+  }, {
+    finalToolPersisted: true,
+    finalMessagePersisted: true,
+    closedStoreDiagnostic: false
+  });
 });
 
 test("ACP redirect prompt is discarded when cancellation loses to natural completion", async (t) => {

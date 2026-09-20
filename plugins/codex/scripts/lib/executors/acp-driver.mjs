@@ -484,16 +484,26 @@ export class AcpExecutorJobPort {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    await this.cancelPending();
-    this.queue.close();
     await this.control?.close();
-    await this.runtime?.close();
+    await this.cancelPending();
     if (this.proc && this.proc.exitCode === null) {
       this.proc.stdin.end();
       this.proc.kill("SIGTERM");
-      await Promise.race([this.exitPromise, new Promise((resolve) => setTimeout(resolve, 1000))]);
-      if (this.proc.exitCode === null) this.proc.kill("SIGKILL");
+      let timer;
+      await Promise.race([this.exitPromise, new Promise((resolve) => {
+        timer = setTimeout(resolve, 1000);
+        timer.unref?.();
+      })]);
+      clearTimeout(timer);
+      if (this.proc.exitCode === null) {
+        this.proc.kill("SIGKILL");
+        await this.exitPromise;
+      }
     }
+    await this.connection?.closed;
+    await this.updateTail;
+    this.queue.close();
+    await this.runtime?.close();
   }
 }
 

@@ -64,7 +64,7 @@ class FakeAgent {
     record({ method: "session/new", params });
     const sessionId = `fake-${crypto.randomUUID()}`;
     this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: "dfmodel",
-      effort: reasoningEffortValues()?.[0] ?? null, cancelled: null });
+      effort: reasoningEffortValues()?.[0] ?? null, cancelled: null, cancelCount: 0 });
     return { sessionId, modes, configOptions: configOptions() };
   }
 
@@ -169,9 +169,13 @@ class FakeAgent {
     }
     if (text === "cancel-late") {
       return new Promise((resolve) => {
-        this.sessions.get(params.sessionId).cancelled = async () => {
-          await this.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: "late-tool", title: "Late tool", kind: "other", status: "completed" });
-          await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "late update" } });
+        const session = this.sessions.get(params.sessionId);
+        session.cancelled = async () => {
+          const cancelCount = ++session.cancelCount;
+          await this.update(params.sessionId, { sessionUpdate: "tool_call_update", toolCallId: `late-tool-${cancelCount}`,
+            title: `Late tool ${cancelCount}`, kind: "other", status: "completed" });
+          await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `late update ${cancelCount}` } });
           resolve({ stopReason: "cancelled" });
         };
       });
