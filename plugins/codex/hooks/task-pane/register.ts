@@ -201,6 +201,13 @@ async function poll($: EngineInterface, state: State) {
           state.paths.set(job.id, (await companion($, state, cwd, ['view-path', job.id])).trim())
         }
         const view = state.views.get(job.id)
+        // The owner process writes the ending, so a job whose owner died never
+        // wrote one and its view says running for ever -- the pane kept a task
+        // killed an hour ago in its tabs and counted it among the live ones.
+        // The store knows better, and it is what the listing reports.
+        if (view && DONE.includes(job.status) && !isOver(view)) {
+          state.views.set(job.id, { ...view, status: job.status, endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
+        }
         {
           // Read during a director turn as well. A turn can run for half an
           // hour, and a pane that stops reading for it shows a task frozen at
