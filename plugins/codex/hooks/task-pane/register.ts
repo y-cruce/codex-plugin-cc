@@ -71,11 +71,16 @@ const MONITOR_MS = 1_800_000
 // poll for the length of the watch. When it does end -- the host's thirty
 // minute cap, or `events` exiting once the repository has been quiet -- the
 // entry goes and the next poll with a live job there arms a fresh one.
+function recordMonitors($: EngineInterface, state: State) {
+  return $.store.set(`${state.key}:monitors`,
+    Object.fromEntries([...state.monitors].map(([root, monitor]) => [root, monitor.armedAt]))).catch(() => {})
+}
+
 function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   for (const root of live) {
     if (state.monitors.has(root)) continue
     state.monitors.set(root, { armedAt: now })
-    void $.store.set(`${state.key}:monitors`, Object.fromEntries([...state.monitors].map(([at, m]) => [at, m.armedAt])))
+    void recordMonitors($, state)
     void $.tool.call({
       tool: 'Monitor',
       command: `bash ${state.home}/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd ${root}`,
@@ -84,7 +89,12 @@ function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now
     }).catch((error: unknown) => {
       $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
-      if (state.monitors.get(root)?.armedAt === now) state.monitors.delete(root)
+      if (state.monitors.get(root)?.armedAt !== now) return
+      state.monitors.delete(root)
+      // Written here as well: a reload reads this back, and an entry left
+      // behind for a monitor that has ended is adopted as a live one, after
+      // which nothing arms another and no event wakes the director again.
+      void recordMonitors($, state)
     })
   }
 }
