@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from 'claude-code'
-import { clip } from '../live-tool-row/format.ts'
+import { clip, elapsed } from '../live-tool-row/format.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
@@ -29,6 +29,7 @@ type State = {
   unreadable: Map<string, number>
   pending: { jobId: string; text: string }[]
   toEnd: boolean
+  clock: string
 }
 
 const PANE = 'codex_tasks'
@@ -239,6 +240,20 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state) })
+    // The heading's clock moves on its own, and nothing else asks for the redraw
+    // that shows it: a job that is thinking writes no view file, so the pane
+    // would sit at the second of the last event and then jump over the silence.
+    // Asking only when the figure it draws has actually changed keeps a task
+    // that has been running for an hour from rebuilding the trace every second.
+    $.clock.every(1000, async () => {
+      if (!state.opened) return
+      const now = await $.clock.now()
+      const clock = [...state.views.values()].filter(view => !DONE.includes(view.status))
+        .map(view => elapsed(view.startedAt, now)).join(' ')
+      if (!clock || clock === state.clock) return
+      state.clock = clock
+      $.ui.invalidate('ui.render')
+    })
     void poll($, state)
   } finally {
     state.booting = false
@@ -258,7 +273,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
-    followed, unreadable: new Map<string, number>(), pending: [], toEnd: false,
+    followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, clock: '',
   }
 
   on('session.start', async ($, e, next) => {

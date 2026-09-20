@@ -338,7 +338,11 @@ describe('live row polish', () => {
     assert.equal(tokens(1000), '1k');
     assert.equal(duration(1234), '1.2s');
     assert.equal(duration(61000), '1m1s');
+    // Past a minute the live clock drops to minutes, so a redraw that could not
+    // happen does not read as the task jumping forward.
     assert.equal(elapsed('2026-09-15T00:00:00Z', Date.parse('2026-09-15T00:00:03Z')), '3s');
+    assert.equal(elapsed('2026-09-15T00:00:00Z', Date.parse('2026-09-15T00:02:13Z')), '2m');
+    assert.equal(elapsed('2026-09-15T00:00:00Z', Date.parse('2026-09-15T01:05:40Z')), '1h5m');
     assert.equal(shortPath('a/long/path/main.ts', 10), '…h/main.ts');
     assert.equal(shortPath('main.ts', 10), 'main.ts');
     const now = Date.parse('2026-09-15T00:03:00Z');

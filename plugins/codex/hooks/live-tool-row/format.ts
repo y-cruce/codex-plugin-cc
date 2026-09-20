@@ -35,8 +35,16 @@ export function duration(ms: number): string {
   return seconds < 60 ? `${Number(seconds.toFixed(1))}s` : `${Math.floor(seconds / 60)}m${Math.floor(seconds % 60)}s`
 }
 
+// A live clock only moves when something asks for a redraw, and nothing can
+// repaint while the main thread is inside a turn. At second resolution every
+// repaint that did not happen shows up as a jump, so past a minute the figure
+// drops to minutes: by then it answers "how long has this been going", which
+// the seconds were never part of.
 export function elapsed(start: string, now: number): string {
-  return duration(Math.floor((now - Date.parse(start)) / 1000) * 1000)
+  const seconds = Math.max(0, Math.floor((now - Date.parse(start)) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`
 }
 
 export function tokens(count: number): string {
