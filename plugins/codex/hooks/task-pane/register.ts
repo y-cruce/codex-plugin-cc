@@ -258,9 +258,10 @@ async function poll($: EngineInterface, state: State) {
       } catch (error) {
         const failures = (state.unreadable.get(job.id) ?? 0) + 1
         state.unreadable.set(job.id, failures)
-        // Said once: the poll runs every two seconds and would otherwise repeat
-        // the same line for as long as the job is listed.
-        if (failures === 1) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
+        // Said when the round gives up, not when it first fails: a job is listed
+        // before its first event is written, so an early failure means "not yet"
+        // and saying so is noise about something that fixes itself seconds later.
+        if (failures === GIVE_UP) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     await refreshViews($, state)
