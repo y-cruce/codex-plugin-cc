@@ -211,6 +211,26 @@ test("tail is bounded and terminal snapshot settles fields", () => {
   assert.equal(view.endedAt, "2026-01-01T00:00:00.000Z");
 });
 
+test("a terminal view ignores a later root turn and reports the routing diagnostic", () => {
+  const job = { id: "job-1", threadId: "thread-1", turnId: "turn-1" };
+  const view = createLiveView(job);
+  const completed = normalizeJobEvent({ method: "companion/job-completed", params: { threadId: "thread-1",
+    job: { ...job, status: "completed", completedAt: "2026-01-01T00:00:00.000Z" } } }, job);
+  completed.seq = "1";
+  applyJobEvent(view, completed);
+  const started = normalizeJobEvent({ method: "turn/started", params: { threadId: "thread-1",
+    turn: { id: "turn-2" } } }, job);
+  started.seq = "2";
+  const diagnostics = [];
+  applyJobEvent(view, started, { onDiagnostic: (message) => diagnostics.push(message) });
+  assert.equal(view.status, "completed");
+  assert.equal(view.turnId, "turn-1");
+  assert.equal(view.endedAt, "2026-01-01T00:00:00.000Z");
+  assert.deepEqual(diagnostics, [
+    "Ignored turn.started for terminal job job-1 (completed): event job=job-1, session=thread-1, turn=turn-2, terminal turn=turn-1"
+  ]);
+});
+
 test("moving a completed message within a full tail does not trim another row", () => {
   const { view, accept } = harness();
   accept("item/agentMessage/delta", { itemId: "message", delta: "working" });

@@ -29,10 +29,11 @@ function jobEvent(job, type) {
 }
 
 export class JobRuntime {
-  constructor() {
+  constructor(options = {}) {
     this.jobs = new Map();
     this.owners = new Map();
     this.followers = new Map();
+    this.onTerminal = options.onTerminal ?? null;
     this.reconciling = false;
     this.timer = setInterval(() => this.reconcile().catch((error) => this.diagnostic(error)), 1000);
     this.timer.unref();
@@ -70,7 +71,9 @@ export class JobRuntime {
           this.diagnostic(error);
         },
         onCommit: async (events, snapshot) => {
-          for (const event of events) applyJobEvent(entry.view, event);
+          for (const event of events) applyJobEvent(entry.view, event, {
+            onDiagnostic: (message) => this.diagnostic(new Error(message))
+          });
           entry.view.history.committedSeq = snapshot.committedSeq;
           if (snapshot.continuity === "partial") entry.view.history.continuity = "partial";
           if (!events.some((event) => event.type.startsWith("job.") && terminal(entry.view.status))) this.scheduleView(entry);
@@ -185,6 +188,7 @@ export class JobRuntime {
     clearTimeout(entry.viewTimer);
     entry.viewTimer = null;
     await this.writeView(entry);
+    this.onTerminal?.(entry.job);
     this.cleanup().catch((error) => this.diagnostic(error));
     return { recorded: true };
   }
@@ -204,6 +208,7 @@ export class JobRuntime {
           await entry.store.flush();
           await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
           await this.writeView(entry);
+          this.onTerminal?.(entry.job);
         }
       }
     } finally { this.reconciling = false; }

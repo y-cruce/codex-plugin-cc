@@ -55,6 +55,26 @@ test("subAgentActivity of every kind binds buffered and future child events to o
   }
 });
 
+test("a new root job replaces the thread binding and retires the old job's child sessions", async () => {
+  const recorded = [];
+  const adapter = new CodexEventAdapter((event) => recorded.push(event));
+  const first = { id: "task-first", threadId: "parent" };
+  const second = { id: "task-second", threadId: "parent" };
+  await adapter.bindSession("parent", first);
+  await adapter.accept(activity("started"));
+  assert.equal(adapter.sessions.get("child").job.id, first.id);
+
+  await adapter.bindSession("parent", second);
+  assert.equal(adapter.sessions.get("parent").job.id, second.id);
+  assert.equal(adapter.sessions.has("child"), false);
+  assert.equal(adapter.inactive.has("child"), true);
+  assert.equal(await adapter.accept(childMessage("late from first")), false);
+  assert.equal(adapter.pending.has("child"), false);
+
+  await adapter.accept({ method: "turn/started", params: { threadId: "parent", turn: { id: "turn-second" } } });
+  assert.equal(recorded.at(-1).jobId, second.id);
+});
+
 test("child messages and questions do not replace the parent's current state", () => {
   const job = { id: "task", threadId: "parent" };
   const view = createLiveView(job);

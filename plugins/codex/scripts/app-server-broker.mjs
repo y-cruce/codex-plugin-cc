@@ -103,8 +103,9 @@ async function main() {
   writePidFile(pidFile);
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, requestUserInput: true });
   const controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs);
-  const jobs = new JobRuntime();
-  const codexEvents = new CodexEventAdapter((event) => jobs.record(event));
+  let codexEvents;
+  const jobs = new JobRuntime({ onTerminal: (job) => codexEvents?.releaseJob(job.id) });
+  codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   let activeRequestSocket = null;
   const streamOwners = new Map();
   const pendingThreadStarts = new Map();

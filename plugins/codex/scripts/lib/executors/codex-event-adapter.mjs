@@ -259,16 +259,28 @@ export class CodexEventAdapter {
     this.record = record;
     this.sessions = new Map();
     this.pending = new Map();
+    this.inactive = new Set();
   }
 
   async bindSession(sessionId, job, agent = null) {
     if (!sessionId) return;
     const existing = this.sessions.get(sessionId);
-    if (existing && existing.job.id !== job.id) return;
+    if (!agent && existing && existing.job.id !== job.id) this.releaseJob(existing.job.id);
+    this.inactive.delete(sessionId);
     this.sessions.set(sessionId, { job, agent });
     const buffered = this.pending.get(sessionId) ?? [];
     this.pending.delete(sessionId);
     for (const message of buffered) await this.accept(message);
+  }
+
+  releaseJob(jobId) {
+    for (const [sessionId, binding] of this.sessions) {
+      if (binding.job.id === jobId) {
+        this.sessions.delete(sessionId);
+        this.pending.delete(sessionId);
+        this.inactive.add(sessionId);
+      }
+    }
   }
 
   async accept(message) {
@@ -281,6 +293,7 @@ export class CodexEventAdapter {
     }
     const binding = this.sessions.get(sessionId);
     if (!binding) {
+      if (this.inactive.has(sessionId)) return false;
       if (sessionId && this.pending.size < 64) {
         const buffered = this.pending.get(sessionId) ?? [];
         if (buffered.length < 256) buffered.push(structuredClone(message));
@@ -294,7 +307,9 @@ export class CodexEventAdapter {
         path: String(p.item.agentPath ?? p.item.agentThreadId).split("/").filter(Boolean).at(-1), parentId: sessionId });
     } else if (p.item?.type === "collabAgentToolCall") {
       for (const childId of p.item.receiverThreadIds ?? []) {
-        await this.bindSession(childId, binding.job, this.sessions.get(childId)?.agent ?? { id: childId, path: childId, parentId: sessionId });
+        const child = this.sessions.get(childId);
+        await this.bindSession(childId, binding.job, child?.job.id === binding.job.id
+          ? child.agent : { id: childId, path: childId, parentId: sessionId });
       }
     }
     return true;

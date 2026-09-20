@@ -13,6 +13,7 @@ function preview(text, limit, keepLines = false) {
 // in step with PROSE in hooks/live-tool-row/view.ts.
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
+const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 
 function unwrapCommand(command) {
   const match = String(command ?? "").match(/^(?:\/(?:[^\s/]+\/)*)?(?:zsh|bash|sh)\s+-(?:lc|cl|c)\s+([\s\S]+)$/);
@@ -203,14 +204,15 @@ function updateTail(view, event, text, key = null) {
   view.tail = view.tail.slice(-200);
 }
 
-export function applyJobEvent(view, event) {
+export function applyJobEvent(view, event, options = {}) {
   const p = event.payload;
   const identity = event.identity;
   view._items ??= {};
   view._usage ??= {};
   view.history.committedSeq = String(event.seq);
   const child = Boolean(event.agent);
-  if (!child && identity.sessionId && (!view.threadId || identity.sessionId === view.threadId)) {
+  const turnAfterTerminal = !child && event.type === "turn.started" && terminal(view.status);
+  if (!turnAfterTerminal && !child && identity.sessionId && (!view.threadId || identity.sessionId === view.threadId)) {
     view.threadId = identity.sessionId;
     if (identity.turnId) view.turnId = identity.turnId;
   }
@@ -249,7 +251,14 @@ export function applyJobEvent(view, event) {
       view.activeCommands = [];
       view.pendingQuestion = null;
       break;
-    case "turn.started": if (!child) { view.status = "running"; view.pendingQuestion = null; } break;
+    case "turn.started":
+      if (!child && turnAfterTerminal) {
+        options.onDiagnostic?.(`Ignored turn.started for terminal job ${view.jobId} (${view.status}): event job=${event.jobId}, session=${identity.sessionId ?? "unknown"}, turn=${identity.turnId ?? "unknown"}, terminal turn=${view.turnId ?? "unknown"}`);
+      } else if (!child) {
+        view.status = "running";
+        view.pendingQuestion = null;
+      }
+      break;
     case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== identity.turnId); break;
     case "command.started":
       Object.assign(state, { command: unwrapCommand(p.command), cwd: p.cwd, turnId: identity.turnId });

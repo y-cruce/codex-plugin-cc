@@ -10,6 +10,8 @@ import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoi
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
 import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -42,6 +44,11 @@ async function setup(t) {
   initGitRepo(repo);
   const endpoint = createBrokerEndpoint(socketDir);
   const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: path.join(repo, ".plugin-data"), CODEX_COMPANION_APP_SERVER_ENDPOINT: endpoint };
+  const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = env.CLAUDE_PLUGIN_DATA;
+  const stateDir = resolveStateDir(repo);
+  if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+  else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   const broker = spawn(process.execPath, [BROKER, "serve", "--endpoint", endpoint, "--cwd", repo,
     "--pid-file", path.join(socketDir, "broker.pid"), "--idle-timeout-ms", "600000"], { env });
   let brokerErrors = "";
@@ -79,8 +86,8 @@ async function setup(t) {
     try { return await client.request(method, params); }
     finally { await client.close(); }
   };
-  const start = async (prompt, label = prompt) => {
-    const result = cli("task", "--background", "--label", label, "--json", prompt);
+  const start = async (prompt, label = prompt, options = []) => {
+    const result = cli("task", "--background", ...options, "--label", label, "--json", prompt);
     assert.equal(result.status, 0, result.stderr);
     const launched = JSON.parse(result.stdout);
     const jobId = launched.jobId;
@@ -94,7 +101,7 @@ async function setup(t) {
     }, "running registered job", 30000);
     return jobId;
   };
-  return { repo, env, endpoint, broker, closed, cli, child, rpc, start };
+  return { repo, env, stateDir, endpoint, broker, closed, cli, child, rpc, start };
 }
 
 test("observe discovery, committed replay, live projection and follow resume", async (t) => {
@@ -149,4 +156,62 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const tail = h.cli("observe", "replay", jobId, "--after", end.nextCursor, "--jsonl");
   assert.equal(tail.status, 0, tail.stderr);
   assert.equal(JSON.parse(tail.stdout.trim()).type, "end");
+});
+
+test("resuming one thread routes the next job to its own history, view, follow and result", async (t) => {
+  const h = await setup(t);
+  const history = (jobId) => readHistory(h.repo, jobId, { stateDir: h.stateDir });
+  const firstId = await h.start("hold observation", "first observation");
+  const firstFollow = h.child("observe", "follow", firstId, "--max-seconds", "10");
+  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "first follow");
+  const firstRunning = JSON.parse(h.cli("status", firstId, "--json").stdout).job;
+  await h.rpc("turn/steer", { threadId: firstRunning.threadId, expectedTurnId: firstRunning.turnId,
+    input: [{ type: "text", text: "finish" }] });
+  const firstFollowed = await firstFollow.done;
+  assert.equal(firstFollowed.code, 0, firstFollowed.stderr);
+  assert.match(firstFollowed.stdout, new RegExp(`DONE job=${firstId}`));
+  await waitFor(() => JSON.parse(h.cli("status", firstId, "--json").stdout).job.status === "completed", "first completion");
+  const firstTerminalHistory = await history(firstId);
+  assert.equal(firstTerminalHistory.events.at(-1).type, "job.completed");
+
+  const secondId = await h.start("hold observation-burst", "resumed observation", ["--resume-last"]);
+  const secondRunning = JSON.parse(h.cli("status", secondId, "--json").stdout).job;
+  assert.equal(secondRunning.threadId, firstRunning.threadId);
+  const secondFollow = h.child("observe", "follow", secondId, "--max-seconds", "10");
+  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "second follow");
+  await waitFor(async () => (await history(secondId)).events.some((event) => event.type === "command.completed"),
+    "second job history");
+  await h.rpc("turn/steer", { threadId: secondRunning.threadId, expectedTurnId: secondRunning.turnId,
+    input: [{ type: "text", text: "finish" }] });
+  const secondFollowed = await secondFollow.done;
+  assert.equal(secondFollowed.code, 0, secondFollowed.stderr);
+  assert.match(secondFollowed.stdout, new RegExp(`DONE job=${secondId}`));
+  await waitFor(() => JSON.parse(h.cli("status", secondId, "--json").stdout).job.status === "completed", "second completion");
+
+  const firstHistory = await history(firstId);
+  const secondHistory = await history(secondId);
+  assert.equal(firstHistory.committedSeq, firstTerminalHistory.committedSeq, "job A history grew after its terminal event");
+  assert.ok(secondHistory.events.some((event) => event.type === "turn.started"));
+  assert.ok(secondHistory.events.some((event) => event.type === "command.completed"));
+  assert.ok(secondHistory.events.some((event) => event.type === "message.delta"));
+  assert.equal(secondHistory.events.at(-1).type, "job.completed");
+  assert.ok(firstHistory.events.every((event) => event.jobId === firstId));
+  assert.ok(secondHistory.events.every((event) => event.jobId === secondId));
+
+  const firstView = JSON.parse(fs.readFileSync(path.join(h.stateDir, "job-history", firstId, "live-view.json"), "utf8"));
+  const secondView = JSON.parse(fs.readFileSync(path.join(h.stateDir, "job-history", secondId, "live-view.json"), "utf8"));
+  assert.equal(firstView.status, "completed");
+  assert.equal(secondView.status, "completed");
+  assert.equal(firstView.turnId, firstRunning.turnId);
+  assert.equal(secondView.turnId, secondRunning.turnId);
+  assert.match(firstFollowed.stdout, /observation conclusion/);
+  assert.match(secondFollowed.stdout, /observation conclusion/);
+
+  const firstResult = h.cli("result", firstId);
+  const secondResult = h.cli("result", secondId);
+  assert.equal(firstResult.status, 0, firstResult.stderr);
+  assert.equal(secondResult.status, 0, secondResult.stderr);
+  assert.match(firstResult.stdout, /hold observation\|finish/);
+  assert.doesNotMatch(firstResult.stdout, /hold observation-burst/);
+  assert.match(secondResult.stdout, /hold observation-burst\|finish/);
 });

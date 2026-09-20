@@ -236,6 +236,27 @@ test("segment retention advances with pages sent to an active follower", async (
   }
 });
 
+test("runtime reports a terminal job after its final history and view are committed", async (t) => {
+  const cwd = await fixture(t);
+  const startedAt = new Date().toISOString();
+  const job = { id: "task-terminal-binding", kind: "task", jobClass: "task", workspaceRoot: cwd,
+    status: "running", startedAt, createdAt: startedAt, pid: process.pid, threadId: "thread-terminal" };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  const terminal = [];
+  const runtime = new JobRuntime({ onTerminal: (finished) => terminal.push(finished.id) });
+  try {
+    await runtime.register({}, cwd, job.id);
+    writeJobFile(cwd, job.id, { ...job, status: "completed", completedAt: new Date().toISOString(), pid: null });
+    assert.deepEqual(await runtime.finish(cwd, job.id), { recorded: true });
+    assert.deepEqual(terminal, [job.id]);
+    assert.equal((await readHistory(cwd, job.id)).events.at(-1).type, "job.completed");
+    assert.equal(JSON.parse(await fs.readFile(resolveLiveViewPath(cwd, job.id), "utf8")).status, "completed");
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("history validates cursor ownership and rejects unbounded pending queues without consuming a sequence", async (t) => {
   const cwd = await fixture(t);
   const store = await new JobEventStore(cwd, "task-limit", { maxPendingEvents: 1, flushMs: 10000 }).initialize();
