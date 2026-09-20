@@ -1,10 +1,17 @@
 import { DEFAULT_INPUT_TIMEOUT_MS } from "./live-turn-control.mjs";
 
 const oneLine = (text) => String(text ?? "").replace(/\r?\n/g, " ⏎ ");
-function preview(text, limit) {
-  const characters = [...oneLine(String(text ?? "").slice(0, limit * 2 + 2))];
+// A row is one line, so a preview is flattened -- except a message's, whose
+// paragraphs are what the pane draws as Markdown. Flattening here is what the
+// per-type check in updateTail cannot undo: by then the breaks are gone.
+function preview(text, limit, keepLines = false) {
+  const source = String(text ?? "").slice(0, limit * 2 + 2);
+  const characters = [...(keepLines ? source : oneLine(source))];
   return characters.length > limit ? `${characters.slice(0, limit - 1).join("")}…` : characters.join("");
 }
+// The kinds the live renderer wraps rather than clipping to a single row; kept
+// in step with PROSE in hooks/live-tool-row/view.ts.
+const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 
 function unwrapCommand(command) {
@@ -82,7 +89,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "turn.started": text = verbose ? `Turn started ${event.identity.turnId ?? ""}` : "Turn started"; break;
     case "turn.completed": text = `Turn ${p.status}${verbose ? ` ${event.identity.turnId ?? ""}` : ""}`; break;
     case "command.started": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}`; break;
-    case "command.completed": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}${tail ? "" : ` (exit ${p.exitCode ?? "?"})`}${p.outputText ? `\n${verbose ? p.outputText : preview(p.outputText, 120)}` : ""}`; break;
+    case "command.completed": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}${tail ? "" : ` (exit ${p.exitCode ?? "?"})`}${!tail && p.outputText ? `\n${verbose ? p.outputText : preview(p.outputText, 120)}` : ""}`; break;
     case "command.interaction":
       if (tail && !String(p.stdin ?? "")) return null;
       text = `stdin ${p.processId ?? ""}: ${p.stdin ?? ""}`;
@@ -121,7 +128,10 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "source.warning": text = `Warning: ${p.message ?? ""}`; break;
     default: return null;
   }
-  return oneLine(text);
+  // A line-oriented stream gets one line per event. A tail row is drawn, and
+  // the renderer wraps the kinds that are prose, so what it does with the
+  // breaks is updateTail's call to make.
+  return tail ? text : oneLine(text);
 }
 
 export function createLiveView(job) {
@@ -151,10 +161,12 @@ export function createLiveView(job) {
 
 function updateTail(view, event, text, key = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
-  // A row is one line, except a message: its paragraphs are what makes an answer
-  // readable, and flattening them here leaves the renderer nothing to restore.
+  // A row is one line, except the kinds the renderer wraps as prose: their
+  // paragraphs are what makes them readable, and flattening here leaves the
+  // renderer nothing to restore. A command keeps the fold, which the renderer
+  // splits on to draw its failing output.
   const row = { seq: String(event.seq), at: event.occurredAt, type: event.type,
-    text: /^message\./.test(event.type) ? String(text ?? "") : oneLine(text) };
+    text: PROSE.test(event.type) ? String(text ?? "") : oneLine(text) };
   // A row holds a preview; lastMessage holds the whole answer. Writing that
   // resumed after a tool has a row per stretch, so a row says where its own
   // stretch begins and the reader takes the rest from lastMessage.
@@ -164,8 +176,13 @@ function updateTail(view, event, text, key = null) {
   if (event.agent) {
     row.agent = event.agent.path;
     row.text = `[${oneLine(row.agent)}] ${row.text}`;
-    if (/^(message|reasoning)\./.test(event.type)) row.text = preview(row.text, 300);
+    if (/^(message|reasoning)\./.test(event.type)) row.text = preview(row.text, 300, /^message\./.test(event.type));
   }
+  // A command may be a heredoc and carry newlines of its own, so its output
+  // travels beside it rather than joined to it: in one string the renderer
+  // cannot tell where the command ends and the output begins.
+  const output = key ? view._items[key]?.outputPreview : null;
+  if (output && event.type.startsWith("command.")) row.output = output;
   if (event.type === "command.completed") {
     row.exitCode = typeof event.payload.exitCode === "number" ? event.payload.exitCode : null;
     row.durationMs = typeof event.payload.durationMs === "number" ? event.payload.durationMs : null;
@@ -243,16 +260,23 @@ export function applyJobEvent(view, event) {
     case "command.output.delta":
       if (!state.outputPreviewTruncated) {
         state.output = `${String(state.output ?? "").slice(0, 242)}${String(p.delta ?? "").slice(0, 242)}`.slice(0, 242);
-        const characters = [...oneLine(state.output)];
+        // The breaks stay so the renderer can give each output line a row, but a
+        // carriage return does not: left in, it pulls the cursor back to the
+        // start of the row it is drawn on.
+        const characters = [...state.output.replace(/\r\n?/g, "\n")];
         state.outputPreviewTruncated = characters.length > 120;
         state.outputPreview = state.outputPreviewTruncated ? `${characters.slice(0, 119).join("")}…` : characters.join("");
       }
-      text = `$ ${state.command ?? ""}\n${state.outputPreview}`;
+      text = `$ ${state.command ?? ""}`;
       tailKey = key;
       break;
     case "command.completed":
       view.activeCommands = view.activeCommands.filter((command) => command._key !== key);
-      if (state?.outputPreview) text = `$ ${state.command ?? unwrapCommand(p.command)}\n${state.outputPreview}`;
+      text = `$ ${state?.command ?? unwrapCommand(p.command)}`;
+      // Output that never streamed as deltas arrives whole at completion.
+      if (state && !state.outputPreview && p.outputText) {
+        state.outputPreview = preview(String(p.outputText).replace(/\r\n?/g, "\n"), 120, true);
+      }
       tailKey = key;
       break;
     case "message.delta": {
@@ -268,7 +292,7 @@ export function applyJobEvent(view, event) {
         state.shown = state.text.length - delta.length;
         state.tailSeq = null;
       }
-      text = preview(`assistant: ${state.text.slice(state.shown ?? 0)}`, 300);
+      text = preview(`assistant: ${state.text.slice(state.shown ?? 0)}`, 300, true);
       tailKey = key;
       break;
     }
@@ -292,7 +316,7 @@ export function applyJobEvent(view, event) {
         // whole, since none of it has appeared yet.
         const streamed = state.text ?? "";
         const segment = body.startsWith(streamed) ? body.slice(Math.min(state.shown ?? 0, body.length)) : body;
-        text = segment.trim() ? preview(`assistant: ${segment}`, 300) : null;
+        text = segment.trim() ? preview(`assistant: ${segment}`, 300, true) : null;
       }
       tailKey = key;
       break;
@@ -350,7 +374,12 @@ export function applyJobEvent(view, event) {
       agent = { threadId: event.agent.id, path: event.agent.path, status: "started", startedAt: event.occurredAt, endedAt: null, startedSeq: String(event.seq) };
       view.subAgents.push(agent);
     }
-    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) agent.lastActivity = preview(text, 300);
+    // A sub-agent's summary is one line, so the output a command row now carries
+    // beside it is folded back in here: it is the part that says how it went.
+    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) {
+      const trailing = event.type.startsWith("command.") && key ? view._items[key]?.outputPreview : null;
+      agent.lastActivity = preview(trailing ? `${text}\n${trailing}` : text, 300);
+    }
     if (!agent.endedAt && event.type === "turn.completed" && p.status === "failed") {
       agent.status = "failed";
       agent.endedAt = event.occurredAt;

@@ -778,15 +778,19 @@ describe('Markdown and prompt footer', () => {
   test('splits command output onto a dim row only for a failed completion', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
-    data.tail = [0, 2, null].map(exitCode => ({ type: 'command.completed', text: '$ echo hello ⏎ first\nsecond ⏎ third', exitCode, durationMs: 1200 }));
-    data.tail.push({ type: 'command.started', text: '$ started ⏎ hidden', exitCode: 2 });
+    data.tail = [0, 2, null].map(exitCode => ({ type: 'command.completed', text: '$ echo hello', output: 'first\nsecond\nthird', exitCode, durationMs: 1200 }));
+    data.tail.push({ type: 'command.started', text: '$ started', output: 'hidden', exitCode: 2 });
+    // A heredoc's body is not worth a row of glyphs: the row says it was cut.
+    data.tail.push({ type: 'command.completed', text: "$ apply_patch <<'PATCH' ⏎ *** Begin Patch ⏎ PATCH", exitCode: 0, durationMs: 1200 });
     const tree = liveTree($.ui.resolve(row()), data, 40, 0);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '$ started']);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '$ started', "● $ apply_patch <<'PATCH' … · 1.2s"]);
     assert.deepEqual(commands.slice(0, 3).map(node => node.children[0].props.color), ['green', 'red', 'gray']);
+    // Every break in the output gets its own row, whether it arrived as the
+    // folding glyph or as a newline: joined back together the failure reads as
+    // one run of noise, and the cut leaves the separator dangling.
     const outputs = rowsOf(tree).filter(node => textOf(node).startsWith('  '));
-    assert.equal(outputs.length, 1);
-    assert.equal(textOf(outputs[0]), '  first second ⏎ third');
+    assert.deepEqual(outputs.map(textOf), ['  first', '  second', '  third']);
     assert.equal(outputs[0].props.dimColor, true);
     assert.equal(outputs[0].props.wrap, 'truncate-end');
     assert.equal(rowsOf(tree)[rowsOf(tree).indexOf(commands[1]) + 1], outputs[0]);
@@ -896,7 +900,7 @@ describe('transcript block spacing', () => {
       { type: 'message.completed', text: 'assistant: I will check the contract.' },
       { type: 'command.completed', text: '$ rg requestId', exitCode: 1, durationMs: 400 },
       { type: 'agent.activity', agentThreadId: 'child', text: '⇢ sub-agent review started' },
-      { type: 'command.completed', text: '$ validate ⏎ validation failed', exitCode: 1 },
+      { type: 'command.completed', text: '$ validate', output: 'validation failed', exitCode: 1 },
       { type: 'question.resolved', text: 'delivered' },
       { type: 'reasoning.completed', text: 'reasoning: Check the result.' },
       { type: 'message.completed', text: 'assistant: Finished.' },

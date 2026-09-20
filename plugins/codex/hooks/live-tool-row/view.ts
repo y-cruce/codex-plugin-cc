@@ -21,7 +21,7 @@ export type LiveView = {
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; startedSeq?: string }[]
-  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
+  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
@@ -91,9 +91,11 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // An ACP agent never reports usage, so its counts stay at zero for the whole
   // run: the header says nothing rather than saying the same nothing forever.
   const counted = data.usage.inputTokens > 0 || data.usage.outputTokens > 0 || data.usage.cachedInputTokens > 0
+  // The pane names the task in its tabs, with the one in view marked; repeating
+  // the name in the footer under it spends a third of the row saying it twice.
   const header = [
-    { text: `● ${executor} · ` },
-    { text: data.label, bold: true },
+    { text: `● ${executor}${headingLast ? '' : ' · '}` },
+    { text: headingLast ? '' : data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(data.startedAt)) : elapsed(data.startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
@@ -208,13 +210,22 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       const completed = type === 'command.completed'
       const color = completed ? event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
       const suffix = completed && event.durationMs != null ? ` · ${duration(event.durationMs)}` : ''
-      const [command, ...output] = clean(event.text).split(' ⏎ ')
+      // A heredoc command carries its own newlines, so the command is one row
+      // whatever it contains and the output comes from its own field. What
+      // follows the first line is a patch body or a script: spelling its breaks
+      // out fills the row with glyphs, so the row says it was cut and stops.
+      const [first, ...rest] = clean(event.text).replace(/^\$\s*/, '').split(/\n| ⏎ /)
+      const command = rest.some(part => part.trim()) ? `${first!.trimEnd()} …` : first!
       lines.push(Text({ wrap: 'truncate-middle', children: [
         Text({ color, children: completed ? '● $ ' : '$ ' }),
-        Text({ children: command!.replace(/^\$\s*/, '').replaceAll('\n', ' ') + suffix }),
+        Text({ children: command + suffix }),
       ] }))
-      if (completed && event.exitCode != null && event.exitCode !== 0 && output.length) {
-        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `  ${output.join(' ⏎ ').replaceAll('\n', ' ')}` }))
+      // Failing output is worth a row per line: run together it reads as one
+      // stretch of noise, and the cut leaves a separator dangling at the end.
+      if (completed && event.exitCode != null && event.exitCode !== 0) {
+        for (const line of clean(event.output ?? '').split('\n').map(part => part.trim()).filter(Boolean).slice(0, 3)) {
+          lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `  ${line}` }))
+        }
       }
       return
     }

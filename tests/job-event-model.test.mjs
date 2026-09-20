@@ -41,7 +41,9 @@ test("message deltas fold into one row, survive snapshot restoration and retain 
   second.seq = "2";
   applyJobEvent(restored, second);
   assert.equal(restored.tail.length, 1);
-  assert.equal(restored.tail[0].text, "assistant: hello ⏎ world");
+  // A message row keeps its paragraphs: the pane draws them as Markdown, and a
+  // fold applied here is one the renderer cannot undo.
+  assert.equal(restored.tail[0].text, "assistant: hello\nworld");
   assert.equal(restored.lastMessage.text, "hello\nworld");
   assert.equal(restored.history.committedSeq, "2");
 });
@@ -131,7 +133,10 @@ test("command output updates one item while completion removes active command", 
   accept("item/commandExecution/outputDelta", { itemId: "c", delta: "two" });
   assert.equal(view.activeCommands.length, 1);
   assert.equal(view.tail.length, 1);
-  assert.equal(view.tail[0].text, "$ npm test ⏎ one ⏎ two");
+  // The command is the row; its output travels beside it, because a heredoc
+  // command carries newlines of its own and joined they cannot be told apart.
+  assert.equal(view.tail[0].text, "$ npm test");
+  assert.equal(view.tail[0].output, "one\ntwo");
   const event = accept("item/completed", { item: { type: "commandExecution", id: "c", command: "npm test", exitCode: 0, aggregatedOutput: "one\ntwo" } });
   assert.equal(view.activeCommands.length, 0);
   assert.equal(view.tail.length, 1);
@@ -246,7 +251,7 @@ test("display previews are bounded by Unicode characters while raw content and l
   const output = `first\n${"🙂".repeat(150)}`;
   accept("item/started", { item: { type: "commandExecution", id: "cmd", command, cwd: "/repo" } });
   accept("item/commandExecution/outputDelta", { itemId: "cmd", delta: output });
-  let body = view.tail.at(-1).text.slice(`$ ${command} ⏎ `.length);
+  let body = view.tail.at(-1).output;
   assert.equal([...body].length, 120);
   assert.ok(body.endsWith("…"));
   const completed = accept("item/completed", { item: { type: "commandExecution", id: "cmd", command, exitCode: 0, aggregatedOutput: output } });
@@ -264,7 +269,9 @@ test("display previews are bounded by Unicode characters while raw content and l
   assert.equal(view.lastMessage.text, message);
   assert.equal(assistant.source.raw.params.item.text, message);
   assert.equal(renderJobEvent(assistant, { verbose: true }), `assistant: ${message.replace(/\n/g, " ⏎ ")}`);
-  assert.ok(view.tail.every((row) => !row.text.includes("\n")));
+  // Prose rows keep their breaks; every other kind is still one row, one line.
+  assert.ok(view.tail.every((row) => /^(message|reasoning|question|director|control|source|plan|tool\.progress)/.test(row.type) || !row.text.includes("\n")));
+  assert.ok(view.tail.some((row) => row.type.startsWith("message") && row.text.includes("\n")));
 });
 
 test("turn lifecycle stays in follow stdout but not in tail", () => {
@@ -300,9 +307,10 @@ test("command projection unwraps shell arguments without altering inner text or 
     assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")}`, command);
     assert.equal(start.source.raw.params.item.command, command);
     accept("item/commandExecution/outputDelta", { itemId: "c", delta: "output" });
-    assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")} ⏎ output`, command);
+    assert.equal(view.tail[0].output, "output", command);
     const done = accept("item/completed", { item: { type: "commandExecution", id: "c", command, exitCode: 0, durationMs: 123, aggregatedOutput: "output" } });
-    assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")} ⏎ output`, command);
+    assert.equal(view.tail[0].text, `$ ${expected.replace(/\r?\n/g, " ⏎ ")}`, command);
+    assert.equal(view.tail[0].output, "output", command);
     assert.equal(done.source.raw.params.item.command, command);
     assert.ok(renderJobEvent(done).includes("(exit 0)"));
   }
@@ -317,7 +325,8 @@ test("only completed command tail rows carry exit and duration metadata", () => 
   accept("item/completed", { item: { type: "commandExecution", id: "c", command: "sh -c 'echo ok'", exitCode: 0, durationMs: 42, aggregatedOutput: "ok" } });
   assert.equal(view.tail[0].exitCode, 0);
   assert.equal(view.tail[0].durationMs, 42);
-  assert.equal(view.tail[0].text, "$ echo ok ⏎ ok");
+  assert.equal(view.tail[0].text, "$ echo ok");
+  assert.equal(view.tail[0].output, "ok");
   accept("item/completed", { item: { type: "commandExecution", id: "missing", command: "false" } });
   assert.equal(view.tail.at(-1).exitCode, null);
   assert.equal(view.tail.at(-1).durationMs, null);
@@ -348,7 +357,8 @@ test("large command delta streams keep a bounded preview without rescanning accu
   assert.ok(elapsed < 200, `500 × 8KiB deltas took ${elapsed.toFixed(1)}ms`);
   t.diagnostic(`500 × 8KiB deltas: ${elapsed.toFixed(1)}ms`);
   assert.equal(view.tail.length, 1);
-  assert.equal(view.tail[0].text, `$ cat large.txt ⏎ ${"x".repeat(119)}…`);
+  assert.equal(view.tail[0].text, "$ cat large.txt");
+  assert.equal(view.tail[0].output, `${"x".repeat(119)}…`);
   const state = view._items[JSON.stringify(["thread-1", "turn-1", "large"])];
   assert.equal(state.outputPreviewTruncated, true);
   assert.ok(state.output.length <= 242);
@@ -359,7 +369,9 @@ test("bounded output preview handles CRLF and surrogate pairs split between delt
   const { view, accept } = harness();
   accept("item/started", { item: { type: "commandExecution", id: "c", command: "cat file" } });
   for (const delta of ["first\r", "\n", "\ud83d", "\ude42", "x".repeat(200)]) accept("item/commandExecution/outputDelta", { itemId: "c", delta });
-  assert.equal(view.tail[0].text, `$ cat file ⏎ first ⏎ 🙂${"x".repeat(110)}…`);
+  // The preview keeps its breaks so the renderer can give each line a row.
+  assert.equal(view.tail[0].text, "$ cat file");
+  assert.equal(view.tail[0].output, `first\n🙂${"x".repeat(112)}…`);
 });
 
 test("empty terminal input is hidden only from tail, nonempty input remains visible", () => {
