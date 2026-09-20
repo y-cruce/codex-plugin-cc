@@ -157,7 +157,17 @@ async function refreshViews($: EngineInterface, state: State) {
       state.mtimes.set(id, stat.mtimeMs)
       state.views.set(id, view)
       changed = true
-    } catch { /* the view goes away when a job is pruned */ }
+    } catch {
+      // A view whose file is gone is a job that was pruned, and the comment
+      // here used to say so while nothing acted on it: the task stayed in the
+      // tabs for the rest of the session. A path that fails only this once is
+      // found again by the next poll, which asks the companion for it.
+      if (!state.views.has(id) && !state.paths.has(id)) continue
+      state.views.delete(id)
+      state.paths.delete(id)
+      state.mtimes.delete(id)
+      changed = true
+    }
   }
   if (changed) $.ui.invalidate('ui.render')
 }
