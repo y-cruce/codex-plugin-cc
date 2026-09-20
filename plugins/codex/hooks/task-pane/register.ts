@@ -196,7 +196,6 @@ async function poll($: EngineInterface, state: State) {
         const first = !state.ledger[job.id]
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
-        state.unreadable.delete(job.id)
         if (!state.paths.has(job.id)) {
           state.paths.set(job.id, (await companion($, state, cwd, ['view-path', job.id])).trim())
         }
@@ -236,6 +235,10 @@ async function poll($: EngineInterface, state: State) {
         // A job that ends while the director is mid-turn still has to be
         // reported once, so the terminal state is reconciled on its own.
         const status = DONE.includes(view?.status ?? '') ? view!.status : DONE.includes(job.status) ? job.status : ''
+        // Cleared only once a round has read the job: clearing it on the way in
+        // reset the count every poll, so the failure was never the fifth and the
+        // "said once" line was said every two seconds for as long as it failed.
+        state.unreadable.delete(job.id)
         if (status && receipt.terminal !== status) {
           if (!first && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
