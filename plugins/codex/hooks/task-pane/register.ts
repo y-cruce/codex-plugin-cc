@@ -113,6 +113,10 @@ async function poll($: EngineInterface, state: State) {
         $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // Before the loop, not after: the reconciliation below reads these views for
+    // the text it reports, and a round that refreshed them afterwards had none
+    // to read on its first pass and sent an empty line.
+    await refreshViews($, state)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; text: string }[] = []
     for (const { job, cwd } of found) {
@@ -121,6 +125,10 @@ async function poll($: EngineInterface, state: State) {
       // give up only once it has failed a few polls in a row.
       if ((state.unreadable.get(job.id) ?? 0) >= GIVE_UP) continue
       try {
+        // A job already over the first time it is seen ended before this pane
+        // existed, or before a reload rebuilt it: there is nothing to wake the
+        // director for, so its terminal state is recorded without a line.
+        const first = !state.ledger[job.id]
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
         state.unreadable.delete(job.id)
@@ -136,6 +144,9 @@ async function poll($: EngineInterface, state: State) {
           const events = rows.filter(row => row.seq)
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
             lines.push({ jobId: job.id, text: `${job.label ?? job.id} · ${event.type}: ${clip(event.text ?? '', 300)}` })
+            // Claimed here as well, or the reconciliation below reports the same
+            // ending a second time once this cursor has moved past it.
+            if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
           }
           if (events.length) receipt.cursor = rows.at(-1)?.nextCursor ?? receipt.cursor
         }
@@ -143,7 +154,7 @@ async function poll($: EngineInterface, state: State) {
         // reported once, so the terminal state is reconciled on its own.
         const status = DONE.includes(view?.status ?? '') ? view!.status : DONE.includes(job.status) ? job.status : ''
         if (status && receipt.terminal !== status) {
-          if (!lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
+          if (!first && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             lines.push({ jobId: job.id, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
           }
           receipt.terminal = status
@@ -163,7 +174,10 @@ async function poll($: EngineInterface, state: State) {
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
     }
     if (!lines.length && !state.pending.length) {
+      // Written even with nothing to say: this round still moved cursors and
+      // claimed endings, and losing them makes the next round report twice.
       state.ledger = ledger
+      await $.store.set(state.key, ledger)
       return
     }
     for (const line of lines) $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
@@ -280,9 +294,10 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       await poll($, state)
       jobs = visibleJobs(state)
     }
-    if (!jobs.length) return { text: 'No Codex tasks in this session yet.' }
+    // The pane opens whether or not anything is running: it is where tasks are
+    // watched, and asking for it before dispatching one is a fair thing to do.
     const wanted = e.args.trim()
-    if (wanted) {
+    if (wanted && jobs.length) {
       const index = Number(wanted)
       const match = Number.isInteger(index) && index >= 1 && index <= jobs.length
         ? jobs[index - 1]
@@ -294,6 +309,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     state.opened = true
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
+    if (!jobs.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
     const shown = jobs.find(view => view.jobId === state.selected) ?? jobs[0]!
     return { text: `Codex tasks · ${shown.label}` }
   })
