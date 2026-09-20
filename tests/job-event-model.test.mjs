@@ -149,6 +149,19 @@ test("a web search says what it searched for and its empty start draws no row", 
   assert.deepEqual(view.tail.map((row) => row.text), searches.map(([, expected]) => `webSearch completed: ${expected}`));
 });
 
+test("a plan is one checklist that updates in place", () => {
+  const { view, accept } = harness();
+  // Every step that moves redraws the whole plan. Appended, a seven-step plan
+  // filled the pane with eight copies of itself and pushed the trace away.
+  const plan = (statuses) => ({ plan: statuses.map((status, index) => ({ step: `#${index + 1} step`, status })) });
+  accept("turn/plan/updated", plan(["pending", "pending"]));
+  accept("turn/plan/updated", plan(["completed", "in_progress"]));
+  assert.deepEqual(view.tail.map((row) => row.type), ["plan.updated"]);
+  assert.equal(view.tail[0].text, "Plan · 1/2\n  ☑ #1 step\n  ▸ #2 step");
+  // The row keeps the place it was first drawn in.
+  assert.equal(view.tail[0].positionSeq, "1");
+});
+
 test("command output updates one item while completion removes active command", () => {
   const { view, accept } = harness();
   accept("item/started", { item: { type: "commandExecution", id: "c", command: "npm test", cwd: "/repo" } });

@@ -127,7 +127,17 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       break;
     }
     case "tool.progress": text = p.message ?? ""; break;
-    case "plan.updated": text = `Plan: ${p.markdown ?? ""} ${(p.entries ?? []).map((step) => `${step.status}: ${step.content}`).join("; ")}`; break;
+    case "plan.updated": {
+      const entries = p.entries ?? [];
+      // A plan is a checklist the reader scans, not a sentence: one line per
+      // step, marked with where it stands, and a count of what is done.
+      if (!tail) { text = `Plan: ${p.markdown ?? ""} ${entries.map((step) => `${step.status}: ${step.content}`).join("; ")}`; break; }
+      const mark = { completed: "☑", in_progress: "▸" };
+      const done = entries.filter((step) => step.status === "completed").length;
+      const head = `Plan${entries.length ? ` · ${done}/${entries.length}` : ""}${p.markdown ? `: ${p.markdown}` : ""}`;
+      text = [head, ...entries.map((step) => `  ${mark[step.status] ?? "☐"} ${step.content}`)].join("\n");
+      break;
+    }
     case "source.error": text = `Error: ${p.message ?? "Unknown error"}`; break;
     case "source.warning": text = `Warning: ${p.message ?? ""}`; break;
     default: return null;
@@ -241,6 +251,9 @@ export function applyJobEvent(view, event, options = {}) {
         view.subAgents.push(agent);
       }
       agent.path = p.path;
+      // An executor that runs its sub-agents opaquely reports no events of
+      // theirs, so what the agent was asked for is the only activity there is.
+      if (p.detail) agent.lastActivity = preview(String(p.detail), 300);
       if (p.status !== "interacted" && (p.status !== "completed" || agent.status !== "failed")) agent.status = p.status;
       if (p.status === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
       if (["interrupted", "completed"].includes(p.status)) agent.endedAt = event.occurredAt;
@@ -341,6 +354,12 @@ export function applyJobEvent(view, event, options = {}) {
         else view.files[index] = value;
       }
       tailKey = key;
+      break;
+    case "plan.updated":
+      // One plan per turn, redrawn every time a step moves: without a key of
+      // its own each update appended another copy of the whole checklist, and
+      // a seven-step plan filled the trace with itself eight times over.
+      tailKey = `plan:${identity.turnId ?? "turn"}`;
       break;
     case "usage.updated": {
       const total = p.usage;
