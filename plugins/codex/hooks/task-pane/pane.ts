@@ -102,7 +102,11 @@ export function paneBody(
   // under an element that stops early.
   return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
     Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: tabs }),
-    Box({ flexGrow: 1, marginTop: 1, marginBottom: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true)] }),
-    ...(jobs.length > 1 ? [Text({ dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
+    // Blank rows, not margins: a margin belongs to no element, so the mid grey
+    // the engine paints under the pane is what shows through it -- a bar across
+    // the foot of an otherwise dark panel.
+    Text({ children: ' ' }),
+    Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true)] }),
+    ...(jobs.length > 1 ? [Text({ children: ' ' }), Text({ dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
   ] })
 }

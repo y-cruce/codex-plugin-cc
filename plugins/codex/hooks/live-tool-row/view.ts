@@ -121,9 +121,11 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const tree = () => {
     const body = Box({ flexDirection: 'column', paddingLeft: 2, children: Box({ flexDirection: 'column', width: columns, children: lines }) })
     // A heading under the trace is a footer: it needs the gap above it that a
-    // heading above one gets for free from the row that precedes it.
+    // heading above one gets for free from the row that precedes it. The gap is
+    // a blank row rather than a margin, because a margin belongs to no element
+    // and the pane's own ground -- a mid grey -- is what shows through it.
     return Box({ flexDirection: 'column', children: headingLast
-      ? [Box({ flexGrow: 1, children: [body] }), Box({ marginTop: 1, children: [heading] })]
+      ? [Box({ flexGrow: 1, children: [body] }), Text({ children: ' ' }), heading]
       : [heading, body] })
   }
   let previousBlock = false
