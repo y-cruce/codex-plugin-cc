@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- Load the ACP driver only when a turn runs. The companion imported it at module load and it needs `@agentclientprotocol/sdk`, which an installed plugin does not carry, so every companion call failed there -- `observe list` included, which has nothing to do with ACP. Running an ACP turn from an installed copy still needs the dependency present.
+- Report a repository the pane cannot read once, then leave it alone, instead of writing the same line into the transcript every two seconds.
+- Stop offering to open a pane that is already open, and leave a row under the task list so it does not sit against the pane's edge.
+
 ## 1.3.0
 
 - Add a session-wide Codex tasks pane with `/codex:tasks`, live traces, a task list at its foot that Tab walks, automatic tail following, and fifteen-minute retention for finished tasks.
