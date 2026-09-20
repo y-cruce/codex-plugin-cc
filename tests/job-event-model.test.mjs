@@ -126,6 +126,23 @@ test("a command or patch the sandbox declined is not recorded as a success", () 
   assert.ok(view.tail.length > 0);
 });
 
+test("a web search says what it searched for and its empty start draws no row", () => {
+  const { view, accept } = harness();
+  // A webSearch item carries its target in `action` and names no tool, so a
+  // row built from the title alone read as a bare string; the started event
+  // has no query at all and drew a bullet with nothing after it.
+  accept("item/started", { item: { type: "webSearch", id: "w1" } });
+  assert.deepEqual(view.tail, []);
+  accept("item/completed", { item: { type: "webSearch", id: "w1", query: "node esm resolution", action: { type: "search", query: "node esm resolution", queries: null } } });
+  accept("item/completed", { item: { type: "webSearch", id: "w2", query: "https://example.com/docs", action: { type: "openPage", url: "https://example.com/docs" } } });
+  accept("item/completed", { item: { type: "webSearch", id: "w3", query: "'dependencies'", action: { type: "findInPage", url: "https://example.com/docs", pattern: "dependencies" } } });
+  assert.deepEqual(view.tail.map((row) => row.text), [
+    "webSearch completed: web search: node esm resolution",
+    "webSearch completed: web open: https://example.com/docs",
+    "webSearch completed: web find: dependencies in https://example.com/docs"
+  ]);
+});
+
 test("command output updates one item while completion removes active command", () => {
   const { view, accept } = harness();
   accept("item/started", { item: { type: "commandExecution", id: "c", command: "npm test", cwd: "/repo" } });

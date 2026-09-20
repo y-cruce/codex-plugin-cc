@@ -119,6 +119,9 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "tool.started": case "tool.updated": case "tool.completed": {
       const tool = p.tool;
       if (!verbose && tool.name === "userMessage") return null;
+      // A tool that has not said what it is working on yet draws a bullet with
+      // nothing after it; the completed event carries the whole row.
+      if (!verbose && event.type === "tool.started" && !String(tool.title ?? "").trim()) return null;
       const lifecycle = event.type === "tool.started" ? "started" : event.type === "tool.completed" ? tool.status : "updated";
       text = `${tool.name ?? "Tool"} ${lifecycle}: ${tool.title ?? ""}`;
       break;

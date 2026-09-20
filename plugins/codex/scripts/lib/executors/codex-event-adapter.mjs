@@ -68,8 +68,25 @@ function canonicalMessage(item, role) {
   return { messageId: String(item.id), role, content: content(text), text };
 }
 
+// A web search names no tool and carries its target in `action`: the query on
+// a search, the page on an open, the pattern on a find in page. Its started
+// event has none of them yet -- the query arrives with the result -- so it says
+// nothing and the row for it is dropped.
+function webSearchTitle(item) {
+  const action = item.action ?? {};
+  const kind = String(action.type ?? "").replaceAll("_", "").toLowerCase();
+  const target = kind === "openpage" ? action.url
+    : kind === "findinpage" ? [action.pattern, action.url].filter(Boolean).join(" in ")
+    : (action.queries ?? []).join(" | ") || action.query;
+  const detail = target || item.query || "";
+  if (!detail) return "";
+  return `web ${kind === "openpage" ? "open" : kind === "findinpage" ? "find" : "search"}: ${detail}`;
+}
+
 function toolSnapshot(item, status) {
-  const detail = item.tool ?? item.query ?? item.path ?? item.text ?? item.id ?? "";
+  const detail = item.type === "webSearch"
+    ? webSearchTitle(item)
+    : item.tool ?? item.query ?? item.path ?? item.text ?? item.id ?? "";
   return {
     toolCallId: String(item.id),
     name: item.type ?? null,
