@@ -443,7 +443,14 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     const tree = paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
       Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
-    if (state.toEnd) {
+    // The status line is the tree's last row and the engine scrolls the whole
+    // tree, so a trace that grows carries the status off the bottom of the
+    // window. The window follows the end while it is already there, and stops
+    // following the moment the reader scrolls up to look at something.
+    const scroll = e.props.scroll
+    const following = !scroll || scroll.contentRows <= scroll.bodyRows
+      || scroll.offset >= scroll.contentRows - scroll.bodyRows - 1
+    if (state.toEnd || following) {
       state.toEnd = false
       // Sent from here, not from the press: invalidate only asks for a redraw,
       // so a move made there would land on the trace being replaced.
