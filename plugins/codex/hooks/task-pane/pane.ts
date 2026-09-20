@@ -1,6 +1,6 @@
 import type { Elements } from 'claude-code'
 import { clip } from '../live-tool-row/format.ts'
-import { liveTree } from '../live-tool-row/view.ts'
+import { isOver, liveTree } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 
 const DOT: Record<string, string> = {
@@ -55,7 +55,7 @@ export function paneBody(
   // One task is always in view: the height belongs to its trace, not to a list
   // of tasks each spending two rows on itself.
   const focused = jobs.find(data => data.jobId === selected) ?? jobs[0]!
-  const running = jobs.filter(data => !DONE.includes(data.status)).length
+  const running = jobs.filter(data => !isOver(data)).length
   // Tabs share the width by how many there are, and the one in view gets more
   // of it: the others only have to be recognizable, it has to be readable.
   const share = Math.min(30, Math.max(8, Math.floor((width - jobs.length * 3) / jobs.length)))

@@ -1,5 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 import { clip, elapsed } from '../live-tool-row/format.ts'
+import { isOver } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
@@ -64,6 +65,8 @@ const GIVE_UP = 5
 // task's notification is the one channel that reaches a running turn, and
 // `codex-worker.sh events` already prints one line per event the director must
 // act on: armed as a Monitor, those lines arrive while the turn is still going.
+// A task that has ended stays in the pane long enough to be read, then goes.
+const KEEP_MS = 900_000
 const MONITOR_MS = 1_800_000
 
 // Armed once per repository and never awaited: the call resolves when the
@@ -326,7 +329,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     $.clock.every(1000, async () => {
       if (!state.opened) return
       const now = await $.clock.now()
-      const clock = [...state.views.values()].filter(view => !DONE.includes(view.status))
+      const clock = [...state.views.values()].filter(view => !isOver(view))
         .map(view => elapsed(view.startedAt, now)).join(' ')
       if (!clock || clock === state.clock) return
       state.clock = clock
@@ -341,7 +344,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
 // Everything this session started, newest first, dropping what ended long ago.
 function visibleJobs(state: State): LiveView[] {
   return [...state.views.values()]
-    .filter(view => !DONE.includes(view.status) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - 15 * 60_000)
+    .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
 }
 
@@ -419,7 +422,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     if (e.props.hasSurvey || state.opened || !state.views.size) return next(e)
     const { Box, Button } = $.ui.resolve(e)
-    const running = [...state.views.values()].filter(view => !DONE.includes(view.status)).length
+    const running = [...state.views.values()].filter(view => !isOver(view)).length
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
       label: `Codex tasks${running ? ` · ${running} running` : ''}`,

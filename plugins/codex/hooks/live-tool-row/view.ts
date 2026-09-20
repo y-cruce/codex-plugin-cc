@@ -25,6 +25,14 @@ export type LiveView = {
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
+
+// `endedAt` is the authority on whether a job is over, not `status`: a view can
+// be written again after its job ended -- a later turn on the same thread sets
+// the status back to running -- and a task that says it is running never leaves
+// the pane and is counted among the live ones for good.
+export function isOver(view: Pick<LiveView, 'status' | 'endedAt'>): boolean {
+  return Boolean(view.endedAt) || ['completed', 'failed', 'cancelled'].includes(view.status)
+}
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
 
 // Group before applying the display limit; persisted positions survive tail
