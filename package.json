@@ -14,7 +14,7 @@
     "prebuild": "mkdir -p plugins/codex/.generated/app-server-types && codex app-server generate-ts --experimental --out plugins/codex/.generated/app-server-types",
     "build": "tsc -p tsconfig.app-server.json && npm run --silent build:hooks",
     "test": "node --test tests/*.test.mjs",
-    "build:hooks": "test -f .claude/types/claude-code.d.ts || { echo 'hook types skipped: .claude/types/claude-code.d.ts absent'; exit 0; }; tsc -p tsconfig.hooks.json"
+    "build:hooks": "test -f .claude/types/claude-code.d.ts || { echo 'WARNING: hooks NOT type-checked -- .claude/types/claude-code.d.ts is absent (Claude Code writes it; CI has no copy)'; exit 0; }; tsc -p tsconfig.hooks.json"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
