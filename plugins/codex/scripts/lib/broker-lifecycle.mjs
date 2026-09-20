@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { resolveStateDir } from "./state.mjs";
 
+// How long a lock file may stay empty before it counts as a dead writer's.
+const EMPTY_LOCK_STALE_MS = 2000;
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
 const BROKER_STATE_FILE = "broker.json";
@@ -126,13 +128,20 @@ export async function ensureBrokerSession(cwd, options = {}) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       try {
-        const pid = Number(fs.readFileSync(lockFile, "utf8"));
+        const raw = fs.readFileSync(lockFile, "utf8");
+        const pid = Number(raw);
         if (Number.isSafeInteger(pid) && pid > 0) {
           try {
             process.kill(pid, 0);
           } catch (error) {
             if (error.code === "ESRCH" && Number(fs.readFileSync(lockFile, "utf8")) === pid) fs.unlinkSync(lockFile);
           }
+        } else if (!raw.trim() && Date.now() - fs.statSync(lockFile).mtimeMs > EMPTY_LOCK_STALE_MS) {
+          // The file is created before its pid is written, so a live holder owns
+          // an empty one for an instant: only one that stayed empty is the
+          // writer that died in between. Left alone it names no one to check,
+          // and every later startup waits out the timeout instead.
+          if (!fs.readFileSync(lockFile, "utf8").trim()) fs.unlinkSync(lockFile);
         }
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
