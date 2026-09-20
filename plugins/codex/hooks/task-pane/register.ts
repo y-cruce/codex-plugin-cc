@@ -481,6 +481,10 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
+    // A reload builds a fresh state while the pane it left behind is still on
+    // screen, and the band would offer to open one that is already open. The
+    // pane asking to be drawn is the proof that it is.
+    state.opened = true
     const jobs = visibleJobs(state)
     // A task that leaves the pane takes the focus with it.
     if (state.selected && !jobs.some(view => view.jobId === state.selected)) state.selected = null
