@@ -149,6 +149,17 @@ test("a web search says what it searched for and its empty start draws no row", 
   assert.deepEqual(view.tail.map((row) => row.text), searches.map(([, expected]) => `webSearch completed: ${expected}`));
 });
 
+test("a view opens with the brief the job was given, without the note around it", () => {
+  // The brief travels in a file and the trace starts at what the agent did, so
+  // the pane never showed what it was asked. The worker prepends a fixed note
+  // to every brief and marks where the brief begins.
+  const brief = "## Goal\nFind the root cause.";
+  const noted = `## Who you are working with\nYou were started by a director.\n\n---- Brief ----\n${brief}\n`;
+  assert.equal(createLiveView({ id: "job-1", request: { prompt: noted } }).prompt, brief);
+  assert.equal(createLiveView({ id: "job-1", request: { prompt: brief } }).prompt, brief);
+  assert.equal(createLiveView({ id: "job-1" }).prompt, null);
+});
+
 test("a plan is one checklist that updates in place", () => {
   const { view, accept } = harness();
   // Every step that moves redraws the whole plan. Appended, a seven-step plan

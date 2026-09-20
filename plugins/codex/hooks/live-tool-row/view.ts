@@ -20,6 +20,7 @@ export type LiveView = {
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null } | null
+  prompt?: string | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; startedSeq?: string }[]
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
@@ -176,6 +177,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     files()
     for (const agent of agentSummaries(data)) add(agent.text, { dimColor: true })
     return tree()
+  }
+  // The trace starts with what the agent was asked, so a reader who scrolls to
+  // the top finds the brief rather than the first thing the agent did. It is
+  // Markdown, like the answer that comes back, and long enough to need a cut.
+  if (data.prompt) {
+    separate(true)
+    lines.push(...markdown(ui, data.prompt.length > 1200 ? `${data.prompt.slice(0, 1199)}…` : data.prompt,
+      { dimColor: true }, '› ', columns))
   }
   if (data.pendingQuestion) {
     prose(`? ${data.pendingQuestion.text}`, { color: 'magenta', bold: true })

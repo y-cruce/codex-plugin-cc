@@ -142,6 +142,17 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
   return tail ? text : oneLine(text);
 }
 
+// What the agent was asked is the one thing the pane never showed: the brief
+// travels in a file and the trace starts at what the agent did. The worker
+// prepends a fixed note to every brief and marks where the brief begins, so
+// the note stays out of the row.
+function briefOf(job) {
+  const prompt = job.request?.prompt;
+  if (typeof prompt !== "string" || !prompt.trim()) return null;
+  const marker = prompt.lastIndexOf("---- Brief ----");
+  return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
+}
+
 export function createLiveView(job) {
   const executor = job.executor ?? "codex";
   return {
@@ -159,6 +170,7 @@ export function createLiveView(job) {
     files: [],
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: !job.request?.resumeThreadId },
     pendingQuestion: null,
+    prompt: briefOf(job),
     plan: null,
     history: { committedSeq: "0", continuity: "complete" },
     tail: [],
