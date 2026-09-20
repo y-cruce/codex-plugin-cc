@@ -50,6 +50,28 @@ function readRecording(file) {
   return fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 }
 
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+test("ACP initialization failure closes the spawned agent", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const pidFile = path.join(makeTempDir(), "agent.pid");
+  const job = { id: "acp-init-failure", executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
+    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  let childPid = null;
+  t.after(() => { if (childPid && processAlive(childPid)) process.kill(childPid, "SIGKILL"); });
+
+  await assert.rejects(openAcpExecutorJob({ cwd, job, command: process.execPath, args: [AGENT],
+    env: { ...process.env, ACP_FAKE_INITIALIZE_ERROR: "1", ACP_FAKE_PID_FILE: pidFile } }));
+  childPid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  assert.equal(processAlive(childPid), false, "ACP child remained alive after initialize failed");
+});
+
 test("ACP basic turn normalizes all session update variants and preserves tool patches", async (t) => {
   const h = await setupPort(t, "acp-basic");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "basic" }] });
@@ -107,7 +129,7 @@ test("ACP resume emits no replay and stop reasons retain failure semantics", asy
   }
 });
 
-test("ACP cancel waits for late updates and cancels pending permissions", async (t) => {
+test("ACP cancel waits for late updates and closes pending input requests", async (t) => {
   const h = await setupPort(t, "acp-cancel");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-late" }] });
   const terminal = await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
@@ -124,6 +146,40 @@ test("ACP cancel waits for late updates and cancels pending permissions", async 
   const cancelled = await h.port.cancelJob({ sessionId: h.session.sessionId, turnId: permissionTurn.turnId, timeoutMs: 5000 });
   assert.equal(cancelled.status, "cancelled");
   assert.equal(h.port.permissions.size, 0);
+
+  const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
+  await waitFor(() => h.port.questions.size === 1);
+  const questionCancelled = await h.port.cancelJob({ sessionId: h.session.sessionId, turnId: questionTurn.turnId, timeoutMs: 5000 });
+  assert.equal(questionCancelled.status, "cancelled");
+  assert.deepEqual(h.events.filter((event) => event.type === "permission.resolved" || event.type === "question.closed")
+    .map((event) => [event.type, event.payload.outcome ?? event.payload.reason]), [
+      ["permission.resolved", "cancelled"],
+      ["question.closed", "cancelled"]
+    ]);
+});
+
+test("ACP redirect prompt is discarded when cancellation loses to natural completion", async (t) => {
+  const h = await setupPort(t, "acp-cancel-natural");
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-natural" }] });
+  const terminal = await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
+    replacementPrompt: [{ type: "text", text: "must not run" }] });
+  assert.equal(terminal.status, "completed");
+  assert.equal(h.port.takeReplacementPrompt(), null);
+});
+
+test("ACP terminal tool calls emit both lifecycle endpoints from their first update", async (t) => {
+  const h = await setupPort(t, "acp-terminal-tools");
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "terminal-tool-calls" }] });
+  assert.equal((await turn.done).status, "completed");
+  assert.deepEqual(h.events.filter((event) => event.identity.toolCallId?.startsWith("terminal-"))
+    .map((event) => [event.identity.toolCallId, event.type, event.payload.status ?? event.payload.tool?.status]), [
+      ["terminal-generic", "tool.started", "completed"],
+      ["terminal-generic", "tool.completed", "completed"],
+      ["terminal-command", "command.started", undefined],
+      ["terminal-command", "command.completed", "failed"],
+      ["terminal-edit", "fileChange.started", "completed"],
+      ["terminal-edit", "fileChange.completed", "completed"]
+    ]);
 });
 
 test("ACP transport failure rejects the active turn", async (t) => {
@@ -131,4 +187,3 @@ test("ACP transport failure rejects the active turn", async (t) => {
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "transport-failure" }] });
   await assert.rejects(turn.done, (error) => error.code === "TRANSPORT_CLOSED");
 });
-

@@ -5,6 +5,8 @@ import crypto from "node:crypto";
 import { ReadableStream, WritableStream } from "node:stream/web";
 import { AgentSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclientprotocol/sdk";
 
+if (process.env.ACP_FAKE_PID_FILE) fs.writeFileSync(process.env.ACP_FAKE_PID_FILE, `${process.pid}\n`);
+
 function nodeWritable(node) {
   return new WritableStream({
     write(chunk) { return new Promise((resolve, reject) => node.write(Buffer.from(chunk), (error) => error ? reject(error) : resolve())); },
@@ -53,6 +55,7 @@ class FakeAgent {
 
   initialize(params) {
     record({ method: "initialize", params });
+    if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
     return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true,
       sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true } }, authMethods: [] };
   }
@@ -148,7 +151,21 @@ class FakeAgent {
           tags: { type: "array", items: { type: "string", enum: ["x", "y"] }, title: "Tags" }, enabled: { type: "boolean", title: "Enabled" }
         } } });
       await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(response) } });
+      return { stopReason: response.action === "cancel" ? "cancelled" : "end_turn" };
+    }
+    if (text === "terminal-tool-calls") {
+      await this.update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: "terminal-generic", title: "Finished read",
+        kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "done" } }] });
+      await this.update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: "terminal-command", title: "Failed command",
+        kind: "execute", status: "failed", rawInput: { command: "false" }, rawOutput: { exitCode: 1 } });
+      await this.update(params.sessionId, { sessionUpdate: "tool_call", toolCallId: "terminal-edit", title: "Finished edit",
+        kind: "edit", status: "completed", content: [{ type: "diff", path: "fixture.txt", oldText: "old", newText: "new" }] });
       return { stopReason: "end_turn" };
+    }
+    if (text === "cancel-natural") {
+      return new Promise((resolve) => {
+        this.sessions.get(params.sessionId).cancelled = () => resolve({ stopReason: "end_turn" });
+      });
     }
     if (text === "cancel-late") {
       return new Promise((resolve) => {

@@ -199,8 +199,13 @@ export class AcpExecutorJobPort {
   static async open(options) {
     if (!options.command) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
     const port = new AcpExecutorJobPort(options);
-    await port.initialize();
-    return port;
+    try {
+      await port.initialize();
+      return port;
+    } catch (error) {
+      await port.close().catch(() => {});
+      throw error;
+    }
   }
 
   async initialize() {
@@ -422,11 +427,25 @@ export class AcpExecutorJobPort {
       optionId: request.optionId ?? null }, { requestId: pending.requestId }, outcome, "session/request_permission");
   }
 
-  cancelPending() {
-    for (const pending of this.permissions.values()) pending.resolve({ outcome: { outcome: "cancelled" } });
+  async cancelPending() {
+    const permissions = [...this.permissions.values()];
     this.permissions.clear();
-    for (const pending of this.questions.values()) pending.resolve({ action: "cancel" });
+    for (const pending of permissions) {
+      const response = { outcome: { outcome: "cancelled" } };
+      pending.resolve(response);
+      await this.adapter.emit("permission.resolved", { requestId: pending.requestId, outcome: "cancelled", optionId: null },
+        { requestId: pending.requestId }, response, "session/request_permission");
+    }
+    const questions = [...this.questions.values()];
     this.questions.clear();
+    for (const pending of questions) {
+      const response = { action: "cancel" };
+      pending.resolve(response);
+      await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: "cancel", values: null },
+        { requestId: pending.requestId }, response, "elicitation/create");
+      await this.adapter.emit("question.closed", { requestId: pending.requestId, reason: "cancelled" },
+        { requestId: pending.requestId }, response, "elicitation/create");
+    }
   }
 
   async stopTurn(request, cancelling) {
@@ -434,15 +453,18 @@ export class AcpExecutorJobPort {
     if (!active || active.turnId !== request.turnId) throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
     active.interrupting = !cancelling;
     active.cancelling = cancelling;
-    if (request.replacementPrompt) this.replacementPrompt = request.replacementPrompt;
-    this.cancelPending();
+    await this.cancelPending();
     await this.connection.cancel({ sessionId: request.sessionId });
     let timer;
     try {
-      return await Promise.race([active.done, new Promise((_, reject) => {
+      const terminal = await Promise.race([active.done, new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error("Timed out waiting for ACP cancellation."), { code: "CANCEL_TIMEOUT" })), request.timeoutMs);
         timer.unref?.();
       })]);
+      if (!cancelling && terminal.status === "interrupted" && request.replacementPrompt) {
+        this.replacementPrompt = request.replacementPrompt;
+      }
+      return terminal;
     } finally { clearTimeout(timer); }
   }
 
@@ -462,9 +484,7 @@ export class AcpExecutorJobPort {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    this.cancelPending();
-    for (const pending of this.questions.values()) pending.resolve({ action: "cancel" });
-    this.questions.clear();
+    await this.cancelPending();
     this.queue.close();
     await this.control?.close();
     await this.runtime?.close();

@@ -196,18 +196,21 @@ export class AcpEventAdapter {
     if (tool.kind === "execute") {
       if (created) await this.emit("command.started", { command: commandText(tool), commandKnown: typeof tool.rawInput?.command === "string",
         cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);
-      else if (terminal) await this.emit("command.completed", commandPayload(tool), identity, notification);
-      else await this.emit("tool.progress", { message: tool.title, content: toolContent(tool) }, identity, notification);
+      if (terminal) await this.emit("command.completed", commandPayload(tool), identity, notification);
+      else if (!created) await this.emit("tool.progress", { message: tool.title, content: toolContent(tool) }, identity, notification);
       return;
     }
     if (["edit", "delete", "move"].includes(tool.kind)) {
-      const type = created ? "fileChange.started" : terminal ? "fileChange.completed" : "fileChange.patch.updated";
-      await this.emit(type, { status: terminal ? (tool.status === "failed" ? "failed" : "completed") : "in_progress",
-        files: toolFiles(tool) }, identity, notification);
+      const payload = { status: terminal ? (tool.status === "failed" ? "failed" : "completed") : "in_progress", files: toolFiles(tool) };
+      if (created) await this.emit("fileChange.started", payload, identity, notification);
+      if (terminal) await this.emit("fileChange.completed", payload, identity, notification);
+      else if (!created) await this.emit("fileChange.patch.updated", payload, identity, notification);
       return;
     }
-    await this.emit(created ? "tool.started" : terminal ? "tool.completed" : "tool.updated",
-      { tool: toolSnapshot(tool) }, identity, notification);
+    const payload = { tool: toolSnapshot(tool) };
+    if (created) await this.emit("tool.started", payload, identity, notification);
+    if (terminal) await this.emit("tool.completed", payload, identity, notification);
+    else if (!created) await this.emit("tool.updated", payload, identity, notification);
   }
 
   async accept(notification) {
