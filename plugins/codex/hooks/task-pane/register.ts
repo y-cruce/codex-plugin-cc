@@ -31,7 +31,7 @@ type State = {
   pending: { jobId: string; cwd: string; text: string }[]
   toEnd: boolean
   clock: string
-  monitors: Map<string, { armedAt: number }>
+  monitors: Map<string, { armedAt: number; checkedAt?: number }>
 }
 
 const PANE = 'codex_tasks'
@@ -68,6 +68,8 @@ const GIVE_UP = 5
 // A task that has ended stays in the pane long enough to be read, then goes.
 const KEEP_MS = 900_000
 const MONITOR_MS = 1_800_000
+const SETTLE_MS = 15_000
+const CHECK_MS = 15_000
 
 // Armed once per repository and never awaited: the call resolves when the
 // monitor ends, which is the whole point of it, so awaiting here would hold the
@@ -79,16 +81,30 @@ function recordMonitors($: EngineInterface, state: State) {
     Object.fromEntries([...state.monitors].map(([root, monitor]) => [root, monitor.armedAt]))).catch(() => {})
 }
 
+// The watch is a process with a command line of its own, so whether it is still
+// there is a question the system can answer. Neither of the other two sources
+// can: the call settles as soon as the host has launched the monitor, and a
+// reload leaves the promise with the instance that is gone. Trusting age alone
+// meant a watch that ended early -- the `events` command exits once a
+// repository has been quiet -- went unnoticed until the cap, and a job that
+// finished in that half hour woke nobody.
+async function watching($: EngineInterface, state: State, root: string): Promise<boolean> {
+  const found = await $.process.run(['pgrep', '-f', `codex-worker.sh events --cwd ${root}`],
+    { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
+  return Boolean(found && found.exitCode === 0 && found.stdout.trim())
+}
+
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   for (const root of live) {
-    // Age is the only thing that retires an entry. The call cannot say when the
-    // watch is over: it answers as soon as the host has launched the monitor,
-    // so clearing the entry when it settles armed another every poll -- eleven
-    // monitors on one repository in an afternoon. A reload cannot say either,
-    // since the promise belongs to the instance that is gone. What is known is
-    // the host's cap: past it the monitor is over, whoever armed it.
     const monitor = state.monitors.get(root)
-    if (monitor && now - monitor.armedAt < MONITOR_MS) continue
+    // Just armed: the process has not necessarily appeared yet, and asking now
+    // would arm a second one for the same repository.
+    if (monitor && now - monitor.armedAt < SETTLE_MS) continue
+    if (monitor && now - monitor.armedAt < MONITOR_MS) {
+      if (now - (monitor.checkedAt ?? 0) < CHECK_MS) continue
+      monitor.checkedAt = now
+      if (await watching($, state, root)) continue
+    }
     state.monitors.set(root, { armedAt: now })
     // Awaited, or a reload between the arm and the write reads the old set and
     // arms a second monitor for the same repository.
@@ -376,7 +392,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, clock: '',
-    monitors: new Map<string, { armedAt: number }>(),
+    monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
   }
 
   on('session.start', async ($, e, next) => {
