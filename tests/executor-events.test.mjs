@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { CANONICAL_EVENT_TYPES, assertCanonicalEventDraft, createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
+import { renderJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 
 test("canonical event validation accepts complete events and rejects malformed envelopes and payloads", () => {
   const event = createCanonicalEvent({
@@ -42,9 +43,16 @@ test("an ACP edit that changes no file is reported as the tool it is", async () 
   await adapter.accept({ sessionId: "session-1", update: { toolCallId: "fc_1", status: "completed",
     rawOutput: "Task #1 created", sessionUpdate: "tool_call_update" } });
   assert.deepEqual(events.map((event) => event.type), ["tool.started", "tool.completed"]);
+  // The events are kept -- history records what the agent called -- and the
+  // row is not: the plan says what the task list changed.
+  assert.equal(renderJobEvent(events[1]), null);
+  assert.match(renderJobEvent(events[1], { verbose: true }), /TaskCreate/);
   // The pane drops the name a row is prefixed with, so the vendor's own name
   // travels in the title, in place of the file edit this never was.
   assert.equal(events[0].payload.tool.title, "TaskCreate");
+  // Its completion replaces the diff with a result: without the decision made
+  // at creation, the locations fallback finds the phantom path again and the
+  // way out reports a file change the way in refused.
   assert.deepEqual(events[1].payload.tool.files, []);
 
   const real = [];

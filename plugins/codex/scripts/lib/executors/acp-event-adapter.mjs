@@ -24,6 +24,11 @@ function fileChangeFromDiff(diff) {
 // change for every task it created. Its locations are no better, so a tool
 // that sent diffs and none of them changed anything keeps nothing.
 function toolFiles(tool) {
+  // Whether this tool touches files was settled when it was created. Its
+  // completion replaces the diffs with a result, and without the decision the
+  // locations fallback below would find the phantom path again and report a
+  // file change on the way out that was refused on the way in.
+  if (tool._files === false) return [];
   const diffs = (tool.content ?? []).filter((entry) => entry.type === "diff");
   const files = diffs.filter((entry) => (entry.oldText ?? "") !== "" || (entry.newText ?? "") !== "").map(fileChangeFromDiff);
   if (!files.length && !diffs.length && ["edit", "delete", "move"].includes(tool.kind)) {

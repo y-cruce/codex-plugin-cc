@@ -119,6 +119,10 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "tool.started": case "tool.updated": case "tool.completed": {
       const tool = p.tool;
       if (!verbose && tool.name === "userMessage") return null;
+      // A tool that calls itself an edit and touches no file is not doing the
+      // work the reader is watching: Qoder maintains its task list this way,
+      // and the plan at the pane's foot already says what it changed.
+      if (!verbose && !(tool.files ?? []).length && ["edit", "delete", "move"].includes(tool.kind)) return null;
       // A tool that has not said what it is working on yet draws a bullet with
       // nothing after it; the completed event carries the whole row.
       if (!verbose && event.type === "tool.started" && !String(tool.title ?? "").trim()) return null;
