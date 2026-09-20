@@ -506,8 +506,13 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // pane asking to be drawn is the proof that it is.
     state.opened = true
     const jobs = visibleJobs(state)
-    // A task that leaves the pane takes the focus with it.
-    if (state.selected && !jobs.some(view => view.jobId === state.selected)) state.selected = null
+    // A task that leaves the pane takes the focus with it, and the trace drawn
+    // in its place starts at its end: the window is where the departed task's
+    // reader left it, and a shrinking tree raises no scroll event to say so.
+    if (state.selected && !jobs.some(view => view.jobId === state.selected)) {
+      state.selected = null
+      state.toEnd = true
+    }
     const select = (jobId: string) => {
       state.selected = state.selected === jobId ? null : jobId
       // A job is switched to in order to see what it is doing now, and its
