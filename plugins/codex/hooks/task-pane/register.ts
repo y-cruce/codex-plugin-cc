@@ -27,9 +27,10 @@ type State = {
   selected: string | null
   followed: Set<string>
   unreadable: Map<string, number>
-  pending: { jobId: string; text: string }[]
+  pending: { jobId: string; cwd: string; text: string }[]
   toEnd: boolean
   clock: string
+  monitors: Map<string, { armedAt: number }>
 }
 
 const PANE = 'codex_tasks'
@@ -58,6 +59,35 @@ export function pushLine(
 const RESCAN_TICKS = 15
 // Polls a job may fail in a row before the pane stops asking for it.
 const GIVE_UP = 5
+// A plugin's own prompt runs once the session is idle, so a job that finishes
+// or asks a question during a long turn waits for the end of it. A background
+// task's notification is the one channel that reaches a running turn, and
+// `codex-worker.sh events` already prints one line per event the director must
+// act on: armed as a Monitor, those lines arrive while the turn is still going.
+const MONITOR_MS = 1_800_000
+
+// Armed once per repository and never awaited: the call resolves when the
+// monitor ends, which is the whole point of it, so awaiting here would hold the
+// poll for the length of the watch. When it does end -- the host's thirty
+// minute cap, or `events` exiting once the repository has been quiet -- the
+// entry goes and the next poll with a live job there arms a fresh one.
+function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
+  for (const root of live) {
+    if (state.monitors.has(root)) continue
+    state.monitors.set(root, { armedAt: now })
+    void $.store.set(`${state.key}:monitors`, Object.fromEntries([...state.monitors].map(([at, m]) => [at, m.armedAt])))
+    void $.tool.call({
+      tool: 'Monitor',
+      command: `bash ${state.home}/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd ${root}`,
+      description: `Codex job events in ${root.split('/').at(-1) ?? root}`,
+      timeout_ms: MONITOR_MS,
+    }).catch((error: unknown) => {
+      $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`)
+    }).finally(() => {
+      if (state.monitors.get(root)?.armedAt === now) state.monitors.delete(root)
+    })
+  }
+}
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
   const result = await $.process.run(['node', state.script, 'observe', ...args, '--cwd', cwd], {
@@ -137,7 +167,8 @@ async function poll($: EngineInterface, state: State) {
     // to read on its first pass and sent an empty line.
     await refreshViews($, state)
     const ledger: Ledger = { ...state.ledger }
-    const lines: { jobId: string; text: string }[] = []
+    const lines: { jobId: string; cwd: string; text: string }[] = []
+    ensureMonitors($, state, new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd)), await $.clock.now())
     for (const { job, cwd } of found) {
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
@@ -170,7 +201,7 @@ async function poll($: EngineInterface, state: State) {
           const announce = !(first && DONE.includes(job.status))
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
             const line = pushLine(job.label ?? job.id, event, view)
-            if (announce && line) lines.push({ jobId: job.id, text: line })
+            if (announce && line) lines.push({ jobId: job.id, cwd, text: line })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -182,7 +213,7 @@ async function poll($: EngineInterface, state: State) {
         const status = DONE.includes(view?.status ?? '') ? view!.status : DONE.includes(job.status) ? job.status : ''
         if (status && receipt.terminal !== status) {
           if (!first && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
-            lines.push({ jobId: job.id, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
           }
           receipt.terminal = status
         }
@@ -210,7 +241,8 @@ async function poll($: EngineInterface, state: State) {
     for (const line of lines) $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
     // A job whose follow row is on screen is reported by its own agent; pushing
     // it again would wake the director twice for one event.
-    const mine = [...state.pending, ...lines.filter(line => !state.followed.has(line.jobId))]
+    const mine = [...state.pending, ...lines.filter(line =>
+      !state.followed.has(line.jobId) && !state.monitors.has(line.cwd))]
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.
     state.pending = mine.slice(-12)
@@ -262,6 +294,13 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     const stored = await $.store.get(sinceKey)
     state.since = typeof stored === 'number' ? stored : now - 60_000
     if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
+    // A reload builds a fresh state while the monitors the last one armed are
+    // still running: without this the module arms a second set and every event
+    // wakes the director twice. An entry older than the host's cap is gone.
+    const armed = await $.store.get(`${state.key}:monitors`)
+    for (const [root, at] of Object.entries((armed ?? {}) as Record<string, number>)) {
+      if (now - at < MONITOR_MS) state.monitors.set(root, { armedAt: at })
+    }
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state) })
     // The heading's clock moves on its own, and nothing else asks for the redraw
@@ -298,6 +337,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, clock: '',
+    monitors: new Map<string, { armedAt: number }>(),
   }
 
   on('session.start', async ($, e, next) => {
