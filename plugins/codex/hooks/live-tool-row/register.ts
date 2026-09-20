@@ -190,7 +190,7 @@ export function register(on: On, followed?: Set<string>) {
     const columns = Math.max(1, e.viewport?.columns ?? 120)
     if (terminal && terminal.kind !== 'DONE' && terminal.kind !== 'FAILED') {
       // Snapshot the label and agent summaries once; intermediate results never read the live-view.
-      if (!state.terminalLabels.has(e.props.tool_use_id)) state.terminalLabels.set(e.props.tool_use_id, { label: job?.data?.label ?? terminal.label ?? follow.jobId, agents: job?.data ? agentSummaries(job.data).map(agent => agent.text) : [] })
+      if (!state.terminalLabels.has(e.props.tool_use_id)) state.terminalLabels.set(e.props.tool_use_id, { label: job?.data?.label ?? terminal.label ?? follow.jobId, agents: job?.data ? agentSummaries(job.data).flatMap(agent => agent.detail ? [agent.text, `    ${agent.detail}`] : [agent.text]) : [] })
       const snapshot = state.terminalLabels.get(e.props.tool_use_id)!
       return terminalTree(ui, terminal, snapshot.label, columns, snapshot.agents)
     }

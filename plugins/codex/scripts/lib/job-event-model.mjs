@@ -258,9 +258,12 @@ export function applyJobEvent(view, event, options = {}) {
         view.subAgents.push(agent);
       }
       agent.path = p.path;
-      // An executor that runs its sub-agents opaquely reports no events of
-      // theirs, so what the agent was asked for is the only activity there is.
-      if (p.detail) agent.lastActivity = preview(String(p.detail), 300);
+      // What the agent was asked for is settled when it starts and belongs on
+      // its own line; what it is doing now moves, and the report it ends with
+      // is the last of it. One field for both meant the first tool call it
+      // made erased the ask.
+      if (p.detail && p.status === "started") agent.task ??= preview(String(p.detail), 200);
+      else if (p.detail) agent.lastActivity = preview(String(p.detail), 300);
       if (p.status !== "interacted" && (p.status !== "completed" || agent.status !== "failed")) agent.status = p.status;
       if (p.status === "started") { agent.startedAt ??= event.occurredAt; agent.endedAt = null; }
       if (["interrupted", "completed"].includes(p.status)) agent.endedAt = event.occurredAt;

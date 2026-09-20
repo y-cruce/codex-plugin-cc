@@ -483,12 +483,12 @@ describe('live row polish', () => {
     accept({ type: "subAgentActivity", id: "spawn", agentThreadId: "child", agentPath: "/root/baseline", kind: "started" }, false, "item/started");
     accept({ type: "commandExecution", id: "cmd", command: "pwd", cwd: "/work" }, true, "item/started");
     accept({ type: "agentMessage", id: "after", text: "**parent** after" });
-    assert.deepEqual(texts().slice(2), ["› parent before", " ", "⇢ baseline · running · $ pwd", " ", "› parent after"]);
+    assert.deepEqual(texts().slice(2), ["› parent before", " ", "⇢ baseline · running", "    $ pwd", " ", "› parent after"]);
     const anchor = texts().findIndex(text => text.startsWith("⇢"));
     accept({ type: "agentMessage", id: "child-message", text: "old child message" }, true);
     accept({ type: "commandExecution", id: "cmd", command: "pwd", exitCode: 1, aggregatedOutput: "old child warning" }, true);
     assert.equal(texts().findIndex(text => text.startsWith("⇢")), anchor, "completion replaces the earlier command in place");
-    assert.match(texts()[anchor], /pwd.*old child warning/);
+    assert.match(texts()[anchor + 1], /pwd.*old child warning/, "the agent's line names it, the line under it says what it is doing");
     accept({ type: "agentMessage", id: "child-final", text: "**child** conclusion" }, true);
     accept({ type: "subAgentActivity", id: "done", agentThreadId: "child", agentPath: "/root/baseline", kind: "completed" });
     accept({ type: "agentMessage", id: "late", text: "late child message" }, true);
@@ -496,7 +496,8 @@ describe('live row polish', () => {
       const nodes = render(result);
       const summaries = nodes.filter(node => textOf(node).startsWith("⇢"));
       assert.equal(summaries.length, 1);
-      assert.equal(textOf(summaries[0]), "⇢ baseline · done · **child** conclusion");
+      assert.equal(textOf(summaries[0]), "⇢ baseline · done");
+      assert.equal(textOf(nodes[nodes.indexOf(summaries[0]) + 1]), "    **child** conclusion");
       assert.equal(summaries[0].props.wrap, "truncate-end");
       assert.equal(summaries[0].props.dimColor, true);
       assert.ok(summaries[0].children.every(child => typeof child === "string"));
@@ -505,7 +506,7 @@ describe('live row polish', () => {
     }
     assert.equal(texts().findIndex(text => text.startsWith("⇢")), anchor);
     data.tail = data.tail.filter(event => event.type === "message.completed" && !event.agent && event.positionSeq !== "1");
-    assert.equal(texts()[2], "⇢ baseline · done · **child** conclusion", "expired startup stays before newer parent activity");
+    assert.deepEqual(texts().slice(2, 4), ["⇢ baseline · done", "    **child** conclusion"], "expired startup stays before newer parent activity");
   });
   test("agent summaries survive tail trimming and distinguish same-name threads", ($, on) => {
     world($, on);
@@ -516,22 +517,22 @@ describe('live row polish', () => {
     ];
     data.tail = [{ seq: "1", at: data.startedAt, type: "message.completed", agent: "review", agentThreadId: "b", text: "[review] hidden detail" }];
     const original = JSON.stringify(data);
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · done · first result", "⇢ review · failed · second result"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · done", "    first result", "⇢ review · failed", "    second result"]);
     assert.equal(JSON.stringify(data), original);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null, startedSeq: "2", lastActivity: "working" }];
     data.tail = [
       { seq: "99", positionSeq: "1", at: data.startedAt, type: "command.completed", text: "$ parent before" },
       { seq: "3", positionSeq: "3", at: data.startedAt, type: "message.completed", text: "parent after" },
     ];
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working", " ", "› parent after"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running", "    working", " ", "› parent after"]);
     data.tail.pop();
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running · working"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running", "    working"]);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null }];
     data.tail = [
       { seq: "9", at: data.startedAt, type: "command.completed", agent: "review", text: "[review] $ latest completion" },
       { seq: "2", at: data.startedAt, type: "message.completed", agent: "review", text: "[review] stale message" },
     ];
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · running · $ latest completion"], "old projections use sequence, not tail position");
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · running", "    $ latest completion"], "old projections use sequence, not tail position");
   });
   test("intermediate cards freeze each agent summary without reading newer state", async ($, on) => {
     const { state, clock } = world($, on);
@@ -543,13 +544,13 @@ describe('live row polish', () => {
       const event = row(undefined, { tool_use_id: kind, isRunning: false, output: terminalOutput(kind, "parent note") });
       const card = textOf(await $.ui.render(event));
       assert.equal(card.match(/⇢ baseline/g)?.length, 1);
-      assert.match(card, /⇢ baseline · running · \$ pwd/);
+      assert.match(card, /⇢ baseline · running\n\s+\$ pwd/);
     }
     data.subAgents[0].status = "completed"; data.subAgents[0].lastActivity = "final";
     state.text = JSON.stringify(data); state.mtime++;
     await clock.advance(500);
     const reads = state.reads;
-    assert.match(textOf(await $.ui.render(row(undefined, { tool_use_id: "TIMEOUT", isRunning: false, output: terminalOutput("TIMEOUT") }))), /⇢ baseline · running · \$ pwd/);
+    assert.match(textOf(await $.ui.render(row(undefined, { tool_use_id: "TIMEOUT", isRunning: false, output: terminalOutput("TIMEOUT") }))), /⇢ baseline · running\n\s+\$ pwd/);
     assert.equal(state.reads, reads);
   });
   test('a job first seen already finished draws its card without a completion toast', async ($, on) => {
@@ -931,7 +932,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', '● $ git status',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0.4s', '⇢ review · running · $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
+      ' ', '● $ rg requestId · 0.4s', '⇢ review · running', '    $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',
@@ -970,12 +971,12 @@ describe('transcript block spacing', () => {
     for (const kind of ['assistant', 'reasoning']) {
       data.lastMessage = { kind, text: 'Final answer', at: data.startedAt };
       data.files = fixture().files;
-      assert.deepEqual(render(), ['Final answer', ' ', '✎ main.ts (+3 −1)', '⇢ review · done · done']);
+      assert.deepEqual(render(), ['Final answer', ' ', '✎ main.ts (+3 −1)', '⇢ review · done', '    done']);
       data.files = [];
-      assert.deepEqual(render(), ['Final answer', ' ', '⇢ review · done · done']);
+      assert.deepEqual(render(), ['Final answer', ' ', '⇢ review · done', '    done']);
     }
     data.lastMessage = null;
-    assert.deepEqual(render(), ['⇢ review · done · done']);
+    assert.deepEqual(render(), ['⇢ review · done', '    done']);
     data.lastMessage = fixture().lastMessage;
     data.subAgents = [];
     assert.deepEqual(render(), ['Checking the change']);

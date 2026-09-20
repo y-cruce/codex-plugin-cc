@@ -22,7 +22,7 @@ export type LiveView = {
   plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null } | null
   prompt?: string | null
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
-  subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; startedSeq?: string }[]
+  subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
 }
 
@@ -50,7 +50,10 @@ export function agentSummaries(data: LiveView) {
     const activity = (agent.lastActivity ?? latest?.text.replace(`[${agent.path}] `, '') ?? '').replace(/^(assistant|reasoning):\s*/, '')
     const status = agent.status === 'completed' ? 'done' : ['failed', 'interrupted'].includes(agent.status) ? 'failed' : 'running'
     const index = agent.startedSeq ? data.tail.findLastIndex(event => BigInt(event.positionSeq ?? event.seq) < BigInt(agent.startedSeq!)) + 1 : data.tail.findIndex(belongs)
-    return { index, text: `⇢ ${agent.path} · ${status}${activity ? ` · ${activity}` : ''}` }
+    // The first line is the agent: who it is, how it is doing, what it was
+    // sent to do. What it is doing now goes under it, indented, where a long
+    // command cannot crowd the name off the row.
+    return { index, text: `⇢ ${agent.path} · ${status}${agent.task ? ` · ${agent.task}` : ''}`, detail: activity || null }
   })
 }
 
@@ -175,7 +178,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       lines.push(...markdown(ui, data.lastMessage.text, {}, '', columns))
     }
     files()
-    for (const agent of agentSummaries(data)) add(agent.text, { dimColor: true })
+    for (const agent of agentSummaries(data)) {
+      add(agent.text, { dimColor: true })
+      if (agent.detail) add(`    ${agent.detail}`, { dimColor: true })
+    }
     return tree()
   }
   // The trace starts with what the agent was asked, so a reader who scrolls to
@@ -218,12 +224,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     return true
   }).slice(-(maxTail ?? tailLimit(rows)))
   const grouped: LiveView['tail'] = []
-  for (const agent of agents.filter(agent => agent.index < 0)) grouped.push({ seq: '', at: '', type: 'agent.summary', text: agent.text })
+  const summary = (agent: { text: string; detail: string | null }) =>
+    ({ seq: '', at: '', type: 'agent.summary', text: agent.text, ...(agent.detail ? { output: agent.detail } : {}) })
+  for (const agent of agents.filter(agent => agent.index < 0)) grouped.push(summary(agent))
   data.tail.forEach((event, index) => {
-    for (const agent of agents.filter(agent => agent.index === index)) grouped.push({ seq: '', at: '', type: 'agent.summary', text: agent.text })
+    for (const agent of agents.filter(agent => agent.index === index)) grouped.push(summary(agent))
     if (tail.includes(event)) grouped.push(event)
   })
-  for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push({ seq: '', at: '', type: 'agent.summary', text: agent.text })
+  for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push(summary(agent))
   if (grouped.length && !hasContent) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
@@ -236,7 +244,11 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
   grouped.forEach((event, index) => {
     const type = typeOf(event)
-    if (type === 'agent.summary') return add(event.text, { dimColor: true })
+    if (type === 'agent.summary') {
+      add(event.text, { dimColor: true })
+      if (event.output) add(`    ${event.output}`, { dimColor: true })
+      return
+    }
     if (type === 'question.resolved') {
       add('→ answer delivered', { color: 'cyan' })
       return
