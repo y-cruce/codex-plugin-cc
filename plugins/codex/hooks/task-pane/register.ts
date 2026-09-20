@@ -212,10 +212,13 @@ async function poll($: EngineInterface, state: State) {
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
             .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string }] } catch { return [] } })
           const events = rows.filter(row => row.seq)
-          // A job already over the first time it is seen is history, not news:
-          // its events are consumed so the cursor moves past them, and none of
-          // them wakes the director.
-          const announce = !(first && DONE.includes(job.status))
+          // A job that is over has nothing left to wake the director for: its
+          // ending is reported by the reconciliation below and the rest is read
+          // with `result`. Its events are still consumed so the cursor moves
+          // past them -- which is the whole point, since a cursor catching up
+          // on a job that finished hours ago would otherwise replay every note
+          // and question it ever wrote as though they had just arrived.
+          const announce = !DONE.includes(job.status)
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
             const line = pushLine(job.label ?? job.id, event, view)
             if (announce && line) lines.push({ jobId: job.id, cwd, text: line })
