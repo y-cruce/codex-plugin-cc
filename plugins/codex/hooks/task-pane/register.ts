@@ -466,8 +466,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 }) },
     })] })
   })
-  // The arrows move the site's focus ring, so a task is chosen by moving onto
-  // its row rather than by moving and then pressing: the trace follows the ring.
+  // Tab walks the list at the pane's foot and a task is chosen by landing on
+  // its row, with no press to follow. The arrows are the engine's scroll keys
+  // while the pane has rows to scroll, so they move the trace, not the ring.
   on('ui.focus', ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const jobId = /^codex_tab_(.+)$/.exec(String(e.element ?? ''))?.[1]

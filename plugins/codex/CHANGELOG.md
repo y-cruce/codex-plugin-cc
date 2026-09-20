@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0
+
+- Add a session-wide Codex tasks pane with `/codex:tasks`, live traces, a task list at its foot that Tab walks, automatic tail following, and fifteen-minute retention for finished tasks.
+- Arm one `events` Monitor per active repository so completions, questions, notifications, failures, and stalls can wake the director during a running turn; re-arm monitors after the host's thirty-minute limit and suppress duplicate prompt submissions.
+- Add the executor-port architecture and ACP executors, including session resume, mode, model and reasoning-effort selection, structured questions, cancellation, and canonical event histories.
+- Preserve prose paragraphs and line breaks in the pane, keep command output in dedicated fields, and keep status information at the bottom of the viewport.
+- Fix ACP startup and shutdown cleanup, cancellation events, terminal tool-call completion, and producer/store close ordering.
+- End a job whose owner died while no broker was watching: the broker sweeps its histories at startup and every minute, and ends one that has no terminal event and no live owner, taking the history's writer lock first so another session's job is never touched.
+- Route resumed-thread events to the currently running job instead of the previous job.
+- Reject unknown `events` and `observe` options, and retain history still needed by active followers.
+- Avoid duplicate terminal notifications, stale backlog wakeups, and already-finished-job announcements; remove expired and pruned jobs from the pane and report persistently unreadable jobs only once.
+
 ## 1.2.7
 
 - Never report a question that has already been answered: a request is surfaced once, while it is still open.

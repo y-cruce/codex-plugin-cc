@@ -69,11 +69,9 @@ export function paneBody(
       Button({
         key: `codex_tab_${data.jobId}`,
         label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
-        // The ring starts on the task in view, so the arrows that move it start
-        // from where the reader is rather than from the top of the list. The prop
-        // takes `true` and nothing else: passing `false` fails the tree, and a
-        // pane whose tree fails is drawn by the engine in its own grey.
-        ...(isFocused ? { autoFocus: true as const } : {}),
+        // No `autoFocus`: the ring is drawn inverse, so starting it on the task
+        // in view leaves a highlighted row sitting there when nobody is walking
+        // the list. The marker already says which task the trace belongs to.
         plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
       }),
       Text({ dimColor: true, children: ` · ${state}` }),
