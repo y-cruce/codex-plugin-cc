@@ -235,7 +235,9 @@ export async function handleObserve(argv) {
     optionContext: "observe follow"
   } : {
     valueOptions: ["cwd", "after", "limit", "until", "max-seconds"],
-    booleanOptions: ["json", "jsonl", "verbose", "quiet"]
+    booleanOptions: ["json", "jsonl", "verbose", "quiet"],
+    rejectUnknownOptions: true,
+    optionContext: `observe ${command}`
   });
   const cwd = resolveWorkspaceRoot(path.resolve(options.cwd ?? process.cwd()));
   try {
