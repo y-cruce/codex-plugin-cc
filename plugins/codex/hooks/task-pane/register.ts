@@ -28,6 +28,7 @@ type State = {
   followed: Set<string>
   unreadable: Map<string, number>
   pending: { jobId: string; text: string }[]
+  toEnd: boolean
 }
 
 const PANE = 'codex_tasks'
@@ -239,7 +240,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
-    followed, unreadable: new Map<string, number>(), pending: [],
+    followed, unreadable: new Map<string, number>(), pending: [], toEnd: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -288,6 +289,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
         : jobs.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
       if (!match) return { text: `No task matches "${wanted}". Open tasks: ${jobs.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
       state.selected = match.jobId
+      state.toEnd = true
     }
     state.opened = true
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
@@ -317,9 +319,19 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (state.selected && !jobs.some(view => view.jobId === state.selected)) state.selected = null
     const select = (jobId: string) => {
       state.selected = state.selected === jobId ? null : jobId
+      // A job is switched to in order to see what it is doing now, and its
+      // trace is drawn whole, so the window starts at the end of it.
+      state.toEnd = true
       $.ui.invalidate('ui.render')
     }
-    return paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
+    const tree = paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
       Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
+    if (state.toEnd) {
+      state.toEnd = false
+      // Sent from here, not from the press: invalidate only asks for a redraw,
+      // so a move made there would land on the trace being replaced.
+      void $.ui.scroll({ in: PANE, to: 'end' }).catch(() => {})
+    }
+    return tree
   })
 }
