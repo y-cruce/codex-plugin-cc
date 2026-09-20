@@ -196,11 +196,22 @@ async function poll($: EngineInterface, state: State) {
     state.ticks += 1
     const found: { job: Job; cwd: string }[] = []
     for (const root of state.roots) {
+      if ((state.unreadable.get(root) ?? 0) >= GIVE_UP) continue
       try {
         const listed = JSON.parse(await companion($, state, root, ['list', '--json'])) as { jobs: Job[] }
+        state.unreadable.delete(root)
         for (const job of listed.jobs) found.push({ job, cwd: root })
       } catch (error) {
-        $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`)
+        // Said once, then the root is left alone. This runs every two seconds,
+        // and a repository whose companion cannot start -- a missing dependency
+        // in an installed copy, say -- otherwise writes the same line into the
+        // transcript for the rest of the session. `$.ui.log` is the only channel
+        // there is, and it always lands in the transcript as well as the log.
+        const failures = (state.unreadable.get(root) ?? 0) + 1
+        state.unreadable.set(root, failures)
+        if (failures === GIVE_UP) {
+          $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
     }
     // Before the loop, not after: the reconciliation below reads these views for

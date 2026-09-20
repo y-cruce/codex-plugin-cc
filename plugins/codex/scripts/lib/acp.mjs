@@ -1,4 +1,7 @@
-import { openAcpExecutorJob } from "./executors/acp-driver.mjs";
+// Imported when a turn actually runs, not when the module loads: the driver
+// needs `@agentclientprotocol/sdk`, and a plugin is distributed without its
+// dependencies, so a top-level import failed every companion call on an
+// installed copy -- `observe list` included, which has nothing to do with ACP.
 
 function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (onProgress) onProgress({ message, phase, ...extra });
@@ -9,6 +12,7 @@ function lastAssistantMessage(terminal) {
 }
 
 export async function runAcpTurn(cwd, options = {}) {
+  const { openAcpExecutorJob } = await import("./executors/acp-driver.mjs");
   const job = { id: options.onProgress?.jobId ?? options.jobId, executor: "acp", workspaceRoot: cwd,
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
