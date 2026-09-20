@@ -15,7 +15,9 @@ import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 async function waitFor(predicate) {
-  for (let i = 0; i < 200; i += 1) {
+  // The whole suite runs in parallel and every file here starts a broker, so a
+  // wait measured in seconds is a wait against a machine with nothing to spare.
+  for (let i = 0; i < 1200; i += 1) {
     const value = await predicate();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
