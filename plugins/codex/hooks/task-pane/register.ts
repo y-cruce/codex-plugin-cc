@@ -155,7 +155,10 @@ async function poll($: EngineInterface, state: State) {
           state.paths.set(job.id, (await companion($, state, cwd, ['view-path', job.id])).trim())
         }
         const view = state.views.get(job.id)
-        if (!state.busy) {
+        {
+          // Read during a director turn as well. A turn can run for half an
+          // hour, and a pane that stops reading for it shows a task frozen at
+          // whatever it was doing when the turn began, then jumps.
           const args = ['replay', job.id, '--limit', '8']
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
@@ -208,7 +211,9 @@ async function poll($: EngineInterface, state: State) {
     // A job whose follow row is on screen is reported by its own agent; pushing
     // it again would wake the director twice for one event.
     const mine = [...state.pending, ...lines.filter(line => !state.followed.has(line.jobId))]
-    state.pending = []
+    // Held, not cleared: a round that cannot push (a turn is running) used to
+    // empty the carry and drop with it every line an earlier refusal had kept.
+    state.pending = mine.slice(-12)
     if (state.push && mine.length && !state.busy) {
       // A plugin's own submit skips this plugin's prompt.submit hooks, so the
       // text itself is what the director reads; keep it short and let it fetch
@@ -218,7 +223,7 @@ async function poll($: EngineInterface, state: State) {
       // Carry those lines to the next poll rather than failing the round: the
       // cursors this round advanced are committed either way, so a refusal must
       // not make every job re-read and re-report the events already seen.
-      if (result.drop) state.pending = mine.slice(-12)
+      if (!result.drop) state.pending = []
     }
     state.ledger = ledger
     await $.store.set(state.key, ledger)
