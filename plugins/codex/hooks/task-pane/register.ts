@@ -26,7 +26,8 @@ type State = {
   opened: boolean
   selected: string | null
   followed: Set<string>
-  unreadable: Set<string>
+  unreadable: Map<string, number>
+  pending: { jobId: string; text: string }[]
 }
 
 const PANE = 'codex_tasks'
@@ -35,12 +36,19 @@ const DONE = ['completed', 'failed', 'cancelled']
 // stops at. Everything else is progress the pane already shows.
 const ACTIONABLE = ['director.notified', 'question.opened', 'job.completed', 'job.failed', 'job.cancelled']
 const RESCAN_TICKS = 15
+// Polls a job may fail in a row before the pane stops asking for it.
+const GIVE_UP = 5
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
   const result = await $.process.run(['node', state.script, 'observe', ...args, '--cwd', cwd], {
     cwd, env: { CODEX_COMPANION_SESSION_ID: state.sessionId }, timeoutMs: 20000,
   })
-  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `observe ${args[0]} failed`)
+  // observe reports an error as JSON on stdout and leaves stderr empty, so a
+  // message taken from stderr alone would name the command and nothing else.
+  if (result.exitCode !== 0) {
+    const reason = result.stderr.trim() || result.stdout.trim().split('\n')[0] || ''
+    throw new Error(reason ? `observe ${args[0]}: ${clip(reason, 200)}` : `observe ${args[0]} failed`)
+  }
   return result.stdout
 }
 
@@ -107,10 +115,14 @@ async function poll($: EngineInterface, state: State) {
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; text: string }[] = []
     for (const { job, cwd } of found) {
-      if (state.unreadable.has(job.id)) continue
+      // A job dispatched seconds ago is listed before its event history is
+      // written, so one failure means "not yet", not "never". Keep trying, and
+      // give up only once it has failed a few polls in a row.
+      if ((state.unreadable.get(job.id) ?? 0) >= GIVE_UP) continue
       try {
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
+        state.unreadable.delete(job.id)
         if (!state.paths.has(job.id)) {
           state.paths.set(job.id, (await companion($, state, cwd, ['view-path', job.id])).trim())
         }
@@ -136,8 +148,11 @@ async function poll($: EngineInterface, state: State) {
           receipt.terminal = status
         }
       } catch (error) {
-        state.unreadable.add(job.id)
-        $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
+        const failures = (state.unreadable.get(job.id) ?? 0) + 1
+        state.unreadable.set(job.id, failures)
+        // Said once: the poll runs every two seconds and would otherwise repeat
+        // the same line for as long as the job is listed.
+        if (failures === 1) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     await refreshViews($, state)
@@ -146,20 +161,25 @@ async function poll($: EngineInterface, state: State) {
       await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
     }
-    if (!lines.length) {
+    if (!lines.length && !state.pending.length) {
       state.ledger = ledger
       return
     }
     for (const line of lines) $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
     // A job whose follow row is on screen is reported by its own agent; pushing
     // it again would wake the director twice for one event.
-    const mine = lines.filter(line => !state.followed.has(line.jobId))
+    const mine = [...state.pending, ...lines.filter(line => !state.followed.has(line.jobId))]
+    state.pending = []
     if (state.push && mine.length && !state.busy) {
       // A plugin's own submit skips this plugin's prompt.submit hooks, so the
       // text itself is what the director reads; keep it short and let it fetch
       // the detail with the companion.
       const result = await $.prompt.submit({ text: `Codex tasks\n${mine.slice(0, 6).map(line => clip(line.text, 200)).join('\n')}` })
-      if (result.drop) throw new Error(result.drop)
+      // The host refuses a submit made too soon after the plugin's last one.
+      // Carry those lines to the next poll rather than failing the round: the
+      // cursors this round advanced are committed either way, so a refusal must
+      // not make every job re-read and re-report the events already seen.
+      if (result.drop) state.pending = mine.slice(-12)
     }
     state.ledger = ledger
     await $.store.set(state.key, ledger)
@@ -219,7 +239,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
-    followed, unreadable: new Set<string>(),
+    followed, unreadable: new Map<string, number>(), pending: [],
   }
 
   on('session.start', async ($, e, next) => {

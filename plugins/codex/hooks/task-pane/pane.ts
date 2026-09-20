@@ -73,6 +73,11 @@ export function paneBody(
   // pane shows what a task is doing, not a whole answer.
   const trimmed: LiveView = {
     ...focused,
+    // The card draws its running commands above the trace as a summary, which
+    // earns its place in a row clipped to a few lines. The pane draws the whole
+    // trace, where every one of them is already a row of its own, in the order
+    // it was issued: drawn twice, the pair reads as events out of order.
+    activeCommands: [],
     lastMessage: focused.lastMessage ? { ...focused.lastMessage, text: shorten(focused.lastMessage.text, 2000) } : null,
     tail: focused.tail.map(event => ({ ...event, text: shorten(event.text, 1000) })),
   }
