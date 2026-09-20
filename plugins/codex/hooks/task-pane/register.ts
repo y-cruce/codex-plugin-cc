@@ -466,6 +466,18 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 }) },
     })] })
   })
+  // The arrows move the site's focus ring, so a task is chosen by moving onto
+  // its row rather than by moving and then pressing: the trace follows the ring.
+  on('ui.focus', ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
+    const jobId = /^codex_tab_(.+)$/.exec(String(e.element ?? ''))?.[1]
+    if (jobId && jobId !== state.selected) {
+      state.selected = jobId
+      state.toEnd = true
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const jobs = visibleJobs(state)

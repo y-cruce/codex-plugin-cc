@@ -69,7 +69,9 @@ export function paneBody(
       Button({
         key: `codex_tab_${data.jobId}`,
         label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
-        plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
+        // The ring starts on the task in view, so the arrows that move it start
+        // from where the reader is rather than from the top of the list.
+        plain: true, autoFocus: isFocused, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
       }),
       Text({ dimColor: true, children: ` · ${state}` }),
     ] })
