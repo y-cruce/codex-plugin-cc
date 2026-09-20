@@ -83,6 +83,8 @@ export class JobRuntime {
       try { historical = await readHistory(cwd, jobId, { limit: 1 }); }
       catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
       const job = stored ?? historical.metadata?.job ?? { id: jobId, workspaceRoot: cwd, status: "running" };
+      const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
+      const openedForSweep = !this.jobs.has(key);
       let entry;
       try {
         entry = await this.openEntry(cwd, jobId, job, false);
@@ -90,12 +92,15 @@ export class JobRuntime {
         if (["STORE_BUSY", "ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue;
         throw error;
       }
-      if (await historyHasTerminalEvent(cwd, jobId)) {
-        this.jobs.delete(entry.key);
-        await entry.store.close();
-        continue;
+      try {
+        if (await historyHasTerminalEvent(cwd, jobId)) continue;
+        await this.failOwnerExited(entry, job);
+      } finally {
+        if (openedForSweep) {
+          this.jobs.delete(entry.key);
+          await entry.store.close();
+        }
       }
-      await this.failOwnerExited(entry, job);
     }
   }
 

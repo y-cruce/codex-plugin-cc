@@ -291,6 +291,9 @@ test("startup reconciliation fails unfinished history whose owner exited", async
   assert.equal(history.events.at(-1).payload.reason.message, "owner process exited");
   const after = await h.cli("observe", "list", "--json");
   assert.equal(JSON.parse(after.stdout).jobs[0].status, "failed");
+  const reopened = await new JobEventStore(h.cwd, h.job.id).initialize({ job: h.job });
+  await reopened.close();
+  assert.equal(runtime.jobs.size, 0);
 });
 
 test("startup reconciliation fails unfinished history without a job record", async (t) => {
