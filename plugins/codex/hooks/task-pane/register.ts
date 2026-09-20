@@ -37,10 +37,10 @@ type State = {
 }
 
 const PANE = 'codex_tasks'
-// How often the pane repaints while a task is live, which is what turns the
-// spinner. Fast enough to read as alive, slow enough not to rebuild the trace
-// for nothing.
-const SPIN_MS = 500
+// How often the pane repaints while a task is live, which is what moves the
+// breath in its heading. Claude Code's own status line samples at this rate;
+// one rebuild of the trace measured 1.4ms, so this costs about 9ms a second.
+const SPIN_MS = 150
 const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.

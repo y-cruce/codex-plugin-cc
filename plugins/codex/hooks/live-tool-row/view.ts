@@ -28,8 +28,17 @@ export type LiveView = {
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
 // A task that is thinking sends nothing, and a pane that draws nothing new
-// reads as a pane that has stopped. The mark on a live heading turns.
-const SPIN = ['◐', '◓', '◑', '◒']
+// reads as a pane that has stopped, so a live heading breathes. The figures
+// are Claude Code's own: quiet for three seconds, then a two-second sine
+// between two greys, sampled every 150ms.
+const QUIET_MS = 3000
+const BREATH_MS = 2000
+const DIM = [153, 153, 153]
+const LIT = [185, 185, 185]
+function breath(elapsed: number, lit = LIT): string {
+  const phase = elapsed < QUIET_MS ? 0 : (Math.sin((elapsed - QUIET_MS) / BREATH_MS * Math.PI * 2) + 1) / 2
+  return `#${DIM.map((from, index) => Math.round(from + (lit[index]! - from) * phase).toString(16).padStart(2, '0')).join('')}`
+}
 
 // `endedAt` is the authority on whether a job is over, not `status`: a view can
 // be written again after its job ended -- a later turn on the same thread sets
@@ -124,13 +133,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // An ACP agent never reports usage, so its counts stay at zero for the whole
   // run: the header says nothing rather than saying the same nothing forever.
   const counted = data.usage.inputTokens > 0 || data.usage.outputTokens > 0 || data.usage.cachedInputTokens > 0
-  // Only the pane turns it: it repaints itself while a task is live, while a
+  // Only the pane breathes: it repaints itself while a task is live, while a
   // row in the transcript is drawn when the engine asks and would sit on
   // whichever frame it happened to catch.
   const live = headingLast && !result && !isOver(data)
+  const pulse = live ? breath(now - Date.parse(data.startedAt), [230, 230, 230]) : undefined
   const header = [
-    { text: `${live ? SPIN[Math.floor(now / 500) % SPIN.length] : '●'} ${executor} · ` },
-    { text: data.label, bold: true },
+    { text: `● ${executor} · `, color: pulse },
+    { text: data.label, bold: true, color: live ? breath(now - Date.parse(data.startedAt)) : undefined },
     { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(data.startedAt)) : elapsed(data.startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
