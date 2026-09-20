@@ -1,0 +1,11 @@
+{
+  "name": "@openai/codex-plugin-cc-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Runtime dependencies of the installed plugin. Claude Code runs `npm ci --ignore-scripts` here when it copies the plugin into its version cache, so the ACP executor resolves its SDK from the version's own node_modules.",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "zod": "^4.6.5"
+  }
+}

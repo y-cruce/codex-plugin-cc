@@ -86,3 +86,20 @@ test("bump-version check mode reports stale metadata", () => {
   assert.match(result.stderr, /plugins\/codex\/\.claude-plugin\/plugin\.json version/);
   assert.match(result.stderr, /\.claude-plugin\/marketplace\.json metadata\.version/);
 });
+
+test("the plugin root declares the runtime dependencies the installed copy imports", () => {
+  // Claude Code installs a plugin's npm dependencies only when the plugin root
+  // -- what the marketplace ships, `plugins/codex` -- holds both a package.json
+  // and a supported lockfile; it then runs `npm ci --ignore-scripts` there. A
+  // dependency declared only at the repository root never reaches the installed
+  // copy, which is how 1.3.1 shipped an ACP driver that could not load its SDK.
+  const root = readJson(path.join(ROOT, "package.json"));
+  const runtime = readJson(path.join(ROOT, "plugins", "codex", "package.json"));
+  const lock = readJson(path.join(ROOT, "plugins", "codex", "package-lock.json"));
+  assert.deepEqual(runtime.dependencies, root.dependencies);
+  assert.deepEqual(lock.packages[""].dependencies, runtime.dependencies);
+  // The lockfile travels to every user, so the registry it names is theirs too.
+  for (const [name, entry] of Object.entries(lock.packages)) {
+    if (entry.resolved) assert.ok(entry.resolved.startsWith("https://registry.npmjs.org/"), `${name} resolves to ${entry.resolved}`);
+  }
+});
