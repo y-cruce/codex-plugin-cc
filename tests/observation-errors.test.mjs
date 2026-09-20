@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
 import { JobEventStore, readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
-import { writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveJobFile, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
 import { handleObserve } from "../plugins/codex/scripts/lib/job-observe.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
@@ -262,6 +262,110 @@ test("owner-exit terminal history remains followable after runtime shutdown", as
   const followed = await h.cli("observe", "follow", h.job.id);
   assert.equal(followed.code, 0, followed.stderr);
   assert.match(followed.stdout, /^FAILED job=.*owner process exited$/m);
+});
+
+async function seedUnfinishedHistory(h) {
+  const runtime = new JobRuntime();
+  await runtime.register({}, h.cwd, h.job.id);
+  await runtime.close();
+}
+
+test("startup reconciliation fails unfinished history whose owner exited", async (t) => {
+  const h = fixture(t, "running");
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(dead, "exit");
+  h.job.pid = dead.pid;
+  writeJobFile(h.cwd, h.job.id, h.job);
+  upsertJob(h.cwd, h.job);
+  await seedUnfinishedHistory(h);
+
+  const before = await h.cli("observe", "list", "--json");
+  assert.equal(JSON.parse(before.stdout).jobs[0].status, "running");
+
+  const runtime = new JobRuntime({ historySweepMs: 0 });
+  t.after(() => runtime.close());
+  await runtime.start(h.cwd);
+
+  const history = await readHistory(h.cwd, h.job.id);
+  assert.equal(history.events.at(-1).type, "job.failed");
+  assert.equal(history.events.at(-1).payload.reason.message, "owner process exited");
+  const after = await h.cli("observe", "list", "--json");
+  assert.equal(JSON.parse(after.stdout).jobs[0].status, "failed");
+});
+
+test("startup reconciliation fails unfinished history without a job record", async (t) => {
+  const h = fixture(t, "running");
+  h.job.pid = process.pid;
+  writeJobFile(h.cwd, h.job.id, h.job);
+  upsertJob(h.cwd, h.job);
+  await seedUnfinishedHistory(h);
+  fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
+
+  const runtime = new JobRuntime({ historySweepMs: 0 });
+  t.after(() => runtime.close());
+  await runtime.start(h.cwd);
+
+  const history = await readHistory(h.cwd, h.job.id);
+  assert.equal(history.events.at(-1).type, "job.failed");
+  assert.equal(history.events.at(-1).payload.reason.message, "owner process exited");
+});
+
+test("startup reconciliation preserves unfinished history with a live owner", async (t) => {
+  const h = fixture(t, "running");
+  h.job.pid = process.pid;
+  writeJobFile(h.cwd, h.job.id, h.job);
+  upsertJob(h.cwd, h.job);
+  await seedUnfinishedHistory(h);
+
+  const runtime = new JobRuntime({ historySweepMs: 0 });
+  t.after(() => runtime.close());
+  await runtime.start(h.cwd);
+
+  const history = await readHistory(h.cwd, h.job.id);
+  assert.equal(history.events.at(-1).type, "job.started");
+  const listed = await h.cli("observe", "list", "--json");
+  assert.equal(JSON.parse(listed.stdout).jobs[0].status, "running");
+});
+
+test("periodic reconciliation recovers an owner that exits after startup", async (t) => {
+  const h = fixture(t, "running");
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (owner.exitCode === null) owner.kill(); });
+  h.job.pid = owner.pid;
+  writeJobFile(h.cwd, h.job.id, h.job);
+  upsertJob(h.cwd, h.job);
+  await seedUnfinishedHistory(h);
+
+  const runtime = new JobRuntime({ historySweepMs: 0 });
+  t.after(() => runtime.close());
+  await runtime.start(h.cwd);
+  assert.equal((await readHistory(h.cwd, h.job.id)).events.at(-1).type, "job.started");
+
+  owner.kill();
+  await once(owner, "exit");
+  await runtime.sweepHistory();
+
+  assert.equal((await readHistory(h.cwd, h.job.id)).events.at(-1).type, "job.failed");
+});
+
+test("startup reconciliation preserves recordless history owned by a live writer", async (t) => {
+  const h = fixture(t, "running");
+  h.job.pid = process.pid;
+  writeJobFile(h.cwd, h.job.id, h.job);
+  upsertJob(h.cwd, h.job);
+  const owner = new JobRuntime();
+  t.after(() => owner.close());
+  await owner.register({}, h.cwd, h.job.id);
+  fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
+
+  const runtime = new JobRuntime({ historySweepMs: 0 });
+  t.after(() => runtime.close());
+  await runtime.start(h.cwd);
+
+  const history = await readHistory(h.cwd, h.job.id);
+  assert.equal(history.events.at(-1).type, "job.started");
+  const listed = await h.cli("observe", "list", "--json");
+  assert.equal(JSON.parse(listed.stdout).jobs[0].status, "running");
 });
 
 test("quiet follow prints only cursor and DONE without result or item text, even with verbose", async (t) => {

@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JobEventStore, readHistory, resolveLiveViewPath, cursorFor, cleanupHistory } from "./job-event-store.mjs";
+import { JobEventStore, readHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
 import { createCanonicalEvent } from "./executor-events.mjs";
 import { createLiveView, applyJobEvent } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
+import { resolveStateDir } from "./state.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified",
@@ -35,6 +36,10 @@ export class JobRuntime {
     this.followers = new Map();
     this.onTerminal = options.onTerminal ?? null;
     this.reconciling = false;
+    this.historySweepMs = options.historySweepMs ?? 60000;
+    this.historyCwds = new Set();
+    this.historySweep = null;
+    this.historyTimer = null;
     this.timer = setInterval(() => this.reconcile().catch((error) => this.diagnostic(error)), 1000);
     this.timer.unref();
     this.cleaner = setInterval(() => this.cleanup().catch((error) => this.diagnostic(error)), 300000);
@@ -43,72 +48,130 @@ export class JobRuntime {
 
   diagnostic(error) { process.stderr.write(`Observation: ${error.message}\n`); }
 
+  async start(cwd) {
+    this.historyCwds.add(path.resolve(cwd));
+    await this.sweepHistory();
+    if (this.historySweepMs > 0 && !this.historyTimer) {
+      this.historyTimer = setInterval(() => this.sweepHistory().catch((error) => this.diagnostic(error)), this.historySweepMs);
+      this.historyTimer.unref();
+    }
+  }
+
+  async sweepHistory() {
+    if (this.historySweep) return this.historySweep;
+    this.historySweep = (async () => {
+      for (const cwd of this.historyCwds) await this.reconcileHistory(cwd);
+    })().finally(() => { this.historySweep = null; });
+    return this.historySweep;
+  }
+
+  async reconcileHistory(cwd) {
+    const root = path.join(resolveStateDir(cwd), "job-history");
+    let histories;
+    try { histories = await fs.readdir(root, { withFileTypes: true }); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    for (const history of histories) {
+      if (!history.isDirectory()) continue;
+      const jobId = history.name;
+      const stored = readStoredJob(cwd, jobId);
+      if (stored && ownerProcessAlive(stored.pid) !== false) continue;
+      let hasTerminal;
+      try { hasTerminal = await historyHasTerminalEvent(cwd, jobId); }
+      catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
+      if (hasTerminal) continue;
+      let historical;
+      try { historical = await readHistory(cwd, jobId, { limit: 1 }); }
+      catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
+      const job = stored ?? historical.metadata?.job ?? { id: jobId, workspaceRoot: cwd, status: "running" };
+      let entry;
+      try {
+        entry = await this.openEntry(cwd, jobId, job, false);
+      } catch (error) {
+        if (["STORE_BUSY", "ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue;
+        throw error;
+      }
+      if (await historyHasTerminalEvent(cwd, jobId)) {
+        this.jobs.delete(entry.key);
+        await entry.store.close();
+        continue;
+      }
+      await this.failOwnerExited(entry, job);
+    }
+  }
+
+  async openEntry(cwd, jobId, job, appendStarted = true) {
+    const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
+    let entry = this.jobs.get(key);
+    if (entry) return entry;
+    entry = { key, cwd: job.workspaceRoot ?? cwd, job, view: createLiveView(job), writeTail: Promise.resolve(), viewTimer: null,
+      lastViewAt: 0, ended: false, failure: null };
+    entry.store = new JobEventStore(entry.cwd, jobId, {
+      createCheckpoint: (events, snapshot) => {
+        const view = structuredClone(entry.view);
+        for (const event of events) applyJobEvent(view, event);
+        view.history.committedSeq = snapshot.committedSeq;
+        view.history.continuity = snapshot.continuity;
+        return view;
+      },
+      onRetention: (snapshot) => {
+        entry.view.history.continuity = snapshot.continuity;
+        entry.view.history.earliestSeq = snapshot.earliestSeq;
+        this.scheduleView(entry);
+      },
+      onError: (error) => {
+        entry.failure = error.message;
+        entry.view.history.continuity = "partial";
+        this.scheduleView(entry);
+        this.diagnostic(error);
+      },
+      onCommit: async (events, snapshot) => {
+        for (const event of events) applyJobEvent(entry.view, event, {
+          onDiagnostic: (message) => this.diagnostic(new Error(message))
+        });
+        entry.view.history.committedSeq = snapshot.committedSeq;
+        if (snapshot.continuity === "partial") entry.view.history.continuity = "partial";
+        if (!events.some((event) => event.type.startsWith("job.") && terminal(entry.view.status))) this.scheduleView(entry);
+        const segment = snapshot.segments.at(-1)?.file;
+        if (entry.lastSegment && entry.lastSegment !== segment) setImmediate(() => this.cleanup().catch((error) => this.diagnostic(error)));
+        entry.lastSegment = segment;
+        for (const follower of this.followers.values()) if (follower.entry === entry) this.wake(follower);
+      },
+      retainedCursors: () => [...this.followers.values()]
+        .filter((follower) => follower.entry === entry && !follower.closed)
+        .map((follower) => follower.after ?? follower.retentionCursor)
+    });
+    await entry.store.initialize({ job });
+    entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);
+    const previous = entry.store.checkpoint;
+    if (previous) entry.view = previous;
+    entry.view.history.continuity = entry.store.snapshot.continuity;
+    let after = previous ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
+    do {
+      const history = await readHistory(entry.cwd, jobId, { after, limit: 256 });
+      for (const event of history.events) {
+        if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
+      }
+      after = history.nextCursor;
+      if (!history.events.length || history.events.at(-1).seq === history.committedSeq) break;
+    } while (true);
+    this.jobs.set(key, entry);
+    if (appendStarted && entry.store.snapshot.committedSeq === "0") {
+      await this.append(entry, jobEvent(job, "job.started"));
+      await entry.store.flush();
+    }
+    clearTimeout(entry.viewTimer);
+    entry.viewTimer = null;
+    await this.writeView(entry);
+    return entry;
+  }
+
   async register(socket, cwd, jobId) {
     const job = readStoredJob(cwd, jobId);
     if (!job) throw Object.assign(new Error(`UNKNOWN_JOB ${jobId}`), { code: "UNKNOWN_JOB" });
     const key = `${job.workspaceRoot}\0${job.id}`;
     let entry = this.jobs.get(key);
     if (!entry) {
-      entry = { key, cwd: job.workspaceRoot, job, view: createLiveView(job), writeTail: Promise.resolve(), viewTimer: null,
-        lastViewAt: 0, ended: false, failure: null };
-      entry.store = new JobEventStore(entry.cwd, jobId, {
-        createCheckpoint: (events, snapshot) => {
-          const view = structuredClone(entry.view);
-          for (const event of events) applyJobEvent(view, event);
-          view.history.committedSeq = snapshot.committedSeq;
-          view.history.continuity = snapshot.continuity;
-          return view;
-        },
-        onRetention: (snapshot) => {
-          entry.view.history.continuity = snapshot.continuity;
-          entry.view.history.earliestSeq = snapshot.earliestSeq;
-          this.scheduleView(entry);
-        },
-        onError: (error) => {
-          entry.failure = error.message;
-          entry.view.history.continuity = "partial";
-          this.scheduleView(entry);
-          this.diagnostic(error);
-        },
-        onCommit: async (events, snapshot) => {
-          for (const event of events) applyJobEvent(entry.view, event, {
-            onDiagnostic: (message) => this.diagnostic(new Error(message))
-          });
-          entry.view.history.committedSeq = snapshot.committedSeq;
-          if (snapshot.continuity === "partial") entry.view.history.continuity = "partial";
-          if (!events.some((event) => event.type.startsWith("job.") && terminal(entry.view.status))) this.scheduleView(entry);
-          const segment = snapshot.segments.at(-1)?.file;
-          if (entry.lastSegment && entry.lastSegment !== segment) setImmediate(() => this.cleanup().catch((error) => this.diagnostic(error)));
-          entry.lastSegment = segment;
-          for (const follower of this.followers.values()) if (follower.entry === entry) this.wake(follower);
-        },
-        retainedCursors: () => [...this.followers.values()]
-          .filter((follower) => follower.entry === entry && !follower.closed)
-          // The protocol has no client ack: consumed means written to the follower socket.
-          .map((follower) => follower.after ?? follower.retentionCursor)
-      });
-      await entry.store.initialize({ job });
-      entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);
-      const previous = entry.store.checkpoint;
-      if (previous) entry.view = previous;
-      entry.view.history.continuity = entry.store.snapshot.continuity;
-      let after = previous ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
-      do {
-        const history = await readHistory(entry.cwd, jobId, { after, limit: 256 });
-        for (const event of history.events) {
-          if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
-        }
-        after = history.nextCursor;
-        if (!history.events.length || history.events.at(-1).seq === history.committedSeq) break;
-      } while (true);
-      this.jobs.set(key, entry);
-      if (entry.store.snapshot.committedSeq === "0") {
-        await this.append(entry, jobEvent(job, "job.started"));
-        await entry.store.flush();
-      }
-      clearTimeout(entry.viewTimer);
-      entry.viewTimer = null;
-      await this.writeView(entry);
+      entry = await this.openEntry(cwd, jobId, job);
       this.cleanup().catch((error) => this.diagnostic(error));
     }
     this.owners.set(socket, entry);
@@ -202,16 +265,22 @@ export class JobRuntime {
         const job = await fs.readFile(entry.jobFile, "utf8").then(JSON.parse).catch(() => null);
         if (job && terminal(job.status)) await this.finish(entry.cwd, entry.job.id);
         else if (job && ownerProcessAlive(job.pid) === false) {
-          entry.ended = true;
-          entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
-          await this.append(entry, jobEvent(entry.job, "job.failed"));
-          await entry.store.flush();
-          await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
-          await this.writeView(entry);
-          this.onTerminal?.(entry.job);
+          await this.failOwnerExited(entry, job);
         }
       }
     } finally { this.reconciling = false; }
+  }
+
+  async failOwnerExited(entry, job) {
+    entry.ended = true;
+    entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
+    await this.append(entry, jobEvent(entry.job, "job.failed"));
+    await entry.store.flush();
+    await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
+    clearTimeout(entry.viewTimer);
+    entry.viewTimer = null;
+    await this.writeView(entry);
+    this.onTerminal?.(entry.job);
   }
 
   async follow(socket, cwd, jobId, after) {
@@ -269,6 +338,8 @@ export class JobRuntime {
   async close() {
     clearInterval(this.timer);
     clearInterval(this.cleaner);
+    clearInterval(this.historyTimer);
+    await this.historySweep?.catch((error) => this.diagnostic(error));
     for (const follower of this.followers.values()) follower.closed = true;
     this.followers.clear();
     for (const entry of this.jobs.values()) {

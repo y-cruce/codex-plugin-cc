@@ -106,6 +106,7 @@ async function main() {
   let codexEvents;
   const jobs = new JobRuntime({ onTerminal: (job) => codexEvents?.releaseJob(job.id) });
   codexEvents = new CodexEventAdapter((event) => jobs.record(event));
+  await jobs.start(cwd);
   let activeRequestSocket = null;
   const streamOwners = new Map();
   const pendingThreadStarts = new Map();

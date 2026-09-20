@@ -9,6 +9,7 @@ import { resolveStateDir } from "./state.mjs";
 const ACTIVE_STORES = new Map();
 const HISTORY_ROOTS = new Map();
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
 
 function writerAlive(manifest) {
   if (manifest.closed || !Number.isInteger(manifest.writerPid)) return false;
@@ -132,28 +133,52 @@ async function readSegment(directory, segment, afterSeq = -1n, limit = Infinity)
   try {
     for (const block of segment.blocks ?? [{ offset: 0, bytes: segment.bytes, lastSeq: segment.lastSeq }]) {
       if (BigInt(block.lastSeq) <= afterSeq) continue;
-      const bytes = Buffer.alloc(block.bytes);
-      let offset = 0;
-      while (offset < bytes.length) {
-        const result = await handle.read(bytes, offset, bytes.length - offset, block.offset + offset);
-        if (!result.bytesRead) throw historyError("HISTORY_CORRUPT", "Committed history segment is incomplete");
-        offset += result.bytesRead;
-      }
-      for (const line of bytes.toString("utf8").split("\n")) {
-        if (!line) continue;
-        const batch = JSON.parse(line);
-        if (createHash("sha256").update(JSON.stringify(batch.events)).digest("hex") !== batch.sha256) throw historyError("HISTORY_CORRUPT", "History checksum mismatch");
-        for (const stored of batch.events) {
-          const event = upgradeLegacyJobEvent(stored);
-          if (BigInt(event.seq) > afterSeq) events.push(event);
-          if (events.length >= limit) return events;
-        }
+      for (const event of await readBlock(handle, block)) {
+        if (BigInt(event.seq) > afterSeq) events.push(event);
+        if (events.length >= limit) return events;
       }
     }
     return events;
   } finally {
     await handle.close();
   }
+}
+
+async function readBlock(handle, block) {
+  const bytes = Buffer.alloc(block.bytes);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.read(bytes, offset, bytes.length - offset, block.offset + offset);
+    if (!result.bytesRead) throw historyError("HISTORY_CORRUPT", "Committed history segment is incomplete");
+    offset += result.bytesRead;
+  }
+  const events = [];
+  for (const line of bytes.toString("utf8").split("\n")) {
+    if (!line) continue;
+    const batch = JSON.parse(line);
+    if (createHash("sha256").update(JSON.stringify(batch.events)).digest("hex") !== batch.sha256) throw historyError("HISTORY_CORRUPT", "History checksum mismatch");
+    events.push(...batch.events.map(upgradeLegacyJobEvent));
+  }
+  return events;
+}
+
+export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
+  const defaultDirectory = resolveHistoryDir(cwd, jobId);
+  const directory = stateDir ? path.join(stateDir, "job-history", jobId) : defaultDirectory;
+  const manifest = await loadManifest(directory);
+  if (manifest.tombstone && TERMINAL.has(manifest.metadata.status ?? manifest.metadata.job?.status)) return true;
+  for (const segment of [...manifest.segments].reverse()) {
+    const handle = await fs.open(path.join(directory, "segments", segment.file), "r");
+    try {
+      const blocks = segment.blocks ?? [{ offset: 0, bytes: segment.bytes, lastSeq: segment.lastSeq }];
+      for (const block of [...blocks].reverse()) {
+        if ((await readBlock(handle, block)).some((event) => TERMINAL_EVENTS.has(event.type))) return true;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return false;
 }
 
 export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDir } = {}) {
@@ -376,7 +401,7 @@ export class JobEventStore {
 
   async prepareCheckpoint(events, manifest, force = false) {
     if (!this.options.createCheckpoint) return null;
-    const terminalEvent = events.some((event) => ["job.completed", "job.failed", "job.cancelled"].includes(event.type));
+    const terminalEvent = events.some((event) => TERMINAL_EVENTS.has(event.type));
     if (!force && manifest.checkpoint && !terminalEvent && Date.now() - manifest.checkpoint.savedAt < this.options.checkpointIntervalMs) return null;
     const checkpoint = await this.options.createCheckpoint(events, structuredClone(manifest));
     if (!checkpoint) throw historyError("CHECKPOINT_FAILED", "Projection checkpoint callback returned no snapshot");
