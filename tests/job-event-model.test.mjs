@@ -110,6 +110,20 @@ test("short Codex messages and command lifecycle keep their compact rows", () =>
   assert.deepEqual(view.tail.map((row) => row.positionSeq), ["1", "4"]);
 });
 
+test("a command or patch the sandbox declined is not recorded as a success", () => {
+  const { view, accept } = harness();
+  // app-server reports "declined" for work its sandbox refused; it never ran,
+  // so anything but a failure would show a refusal as a completed command.
+  // Three separate mappings decide this: commands, patches and other tools.
+  assert.equal(accept("item/completed", { item: { type: "commandExecution", id: "c", command: "rm -rf /", status: "declined" } }).payload.status, "failed");
+  assert.equal(accept("item/completed", { item: { type: "fileChange", id: "f", status: "declined", changes: [] } }).payload.status, "failed");
+  assert.equal(accept("item/completed", { item: { type: "mcpToolCall", id: "t", status: "declined" } }).payload.tool.status, "failed");
+  assert.equal(accept("item/completed", { item: { type: "commandExecution", id: "f2", command: "x", status: "failed" } }).payload.status, "failed");
+  assert.equal(accept("item/completed", { item: { type: "commandExecution", id: "i", command: "x", status: "interrupted" } }).payload.status, "cancelled");
+  assert.equal(accept("item/completed", { item: { type: "commandExecution", id: "ok", command: "x", status: "completed" } }).payload.status, "completed");
+  assert.ok(view.tail.length > 0);
+});
+
 test("command output updates one item while completion removes active command", () => {
   const { view, accept } = harness();
   accept("item/started", { item: { type: "commandExecution", id: "c", command: "npm test", cwd: "/repo" } });

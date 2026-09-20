@@ -112,7 +112,10 @@ function terminalReason(status, error) {
 function itemStatus(item, lifecycle) {
   if (lifecycle === "started") return "in_progress";
   if (item.status === "failed") return "failed";
-  if (item.status === "cancelled" || item.status === "interrupted") return "failed";
+  // "declined" is what app-server reports for a command or patch the sandbox
+  // refused; it never ran, so the fallthrough to completed showed it in the
+  // history as a success.
+  if (item.status === "cancelled" || item.status === "interrupted" || item.status === "declined") return "failed";
   return "completed";
 }
 
@@ -142,7 +145,7 @@ function payloadFor(type, message, receivedAt) {
     case "command.output.delta": return { delta: p.delta ?? "" };
     case "command.interaction": return { stdin: p.stdin ?? "", processId: p.processId == null ? null : String(p.processId) };
     case "command.completed": return { command: item.command ?? "", commandKnown: true, cwd: item.cwd ?? null,
-      status: item.status === "failed" ? "failed" : item.status === "interrupted" ? "cancelled" : "completed",
+      status: item.status === "failed" || item.status === "declined" ? "failed" : item.status === "interrupted" ? "cancelled" : "completed",
       exitCode: typeof item.exitCode === "number" ? item.exitCode : null, signal: item.signal ?? null,
       durationMs: typeof item.durationMs === "number" ? item.durationMs : null, output: content(item.aggregatedOutput), outputText: item.aggregatedOutput ?? null };
     case "fileChange.started": case "fileChange.patch.updated": case "fileChange.completed":
@@ -152,7 +155,7 @@ function payloadFor(type, message, receivedAt) {
     case "plan.delta": return { delta: p.delta ?? "" };
     case "plan.updated": return { entries: (p.plan ?? []).map((entry) => ({ content: entry.step ?? entry.content ?? "", priority: entry.priority ?? "unknown", status: entry.status ?? "unknown" })), markdown: p.explanation ?? null, uri: null };
     case "tool.started": return { tool: toolSnapshot(item, "in_progress") };
-    case "tool.completed": return { tool: toolSnapshot(item, item.status === "failed" ? "failed" : "completed") };
+    case "tool.completed": return { tool: toolSnapshot(item, item.status === "failed" || item.status === "declined" ? "failed" : "completed") };
     case "tool.progress": return { message: p.message ?? "", content: content(p.message) };
     case "usage.updated": return { usage: usage(p.tokenUsage?.total, p.tokenUsage?.last, Boolean(p.tokenUsage?.total)) };
     case "turn.diff.updated": return { diff: p.diff ?? "", files: changedFiles(p.changes) };
