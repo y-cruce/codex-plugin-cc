@@ -76,11 +76,18 @@ function recordMonitors($: EngineInterface, state: State) {
     Object.fromEntries([...state.monitors].map(([root, monitor]) => [root, monitor.armedAt]))).catch(() => {})
 }
 
-function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
+async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   for (const root of live) {
-    if (state.monitors.has(root)) continue
+    // Not `has`: a reload adopts what the last module armed, and the promise
+    // whose end would clear that entry belongs to the instance that is gone.
+    // Past the host's cap the monitor is over whoever armed it, so the entry
+    // ages out and the watch comes back by itself rather than dying quietly.
+    const monitor = state.monitors.get(root)
+    if (monitor && now - monitor.armedAt < MONITOR_MS) continue
     state.monitors.set(root, { armedAt: now })
-    void recordMonitors($, state)
+    // Awaited, or a reload between the arm and the write reads the old set and
+    // arms a second monitor for the same repository.
+    await recordMonitors($, state)
     void $.tool.call({
       tool: 'Monitor',
       command: `bash ${state.home}/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd ${root}`,
@@ -178,7 +185,7 @@ async function poll($: EngineInterface, state: State) {
     await refreshViews($, state)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
-    ensureMonitors($, state, new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd)), await $.clock.now())
+    await ensureMonitors($, state, new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd)), await $.clock.now())
     for (const { job, cwd } of found) {
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
