@@ -131,16 +131,22 @@ test("a web search says what it searched for and its empty start draws no row", 
   // A webSearch item carries its target in `action` and names no tool, so a
   // row built from the title alone read as a bare string; the started event
   // has no query at all and drew a bullet with nothing after it.
-  accept("item/started", { item: { type: "webSearch", id: "w1" } });
+  // The shape app-server really sends for a search that has not run yet.
+  accept("item/started", { item: { type: "webSearch", id: "w1", query: "", action: null } });
   assert.deepEqual(view.tail, []);
-  accept("item/completed", { item: { type: "webSearch", id: "w1", query: "node esm resolution", action: { type: "search", query: "node esm resolution", queries: null } } });
-  accept("item/completed", { item: { type: "webSearch", id: "w2", query: "https://example.com/docs", action: { type: "openPage", url: "https://example.com/docs" } } });
-  accept("item/completed", { item: { type: "webSearch", id: "w3", query: "'dependencies'", action: { type: "findInPage", url: "https://example.com/docs", pattern: "dependencies" } } });
-  assert.deepEqual(view.tail.map((row) => row.text), [
-    "webSearch completed: web search: node esm resolution",
-    "webSearch completed: web open: https://example.com/docs",
-    "webSearch completed: web find: dependencies in https://example.com/docs"
-  ]);
+  const searches = [
+    [{ query: "node esm resolution", action: { type: "search", query: "node esm resolution", queries: null } }, "web search: node esm resolution"],
+    [{ query: "a", action: { type: "search", query: "a", queries: ["", ""] } }, "web search: a"],
+    [{ query: "https://example.com/docs", action: { type: "openPage", url: "https://example.com/docs" } }, "web open: https://example.com/docs"],
+    // The v1 spelling of the same action.
+    [{ query: "https://example.com/a", action: { type: "open_page", url: "https://example.com/a" } }, "web open: https://example.com/a"],
+    [{ query: "'dependencies'", action: { type: "findInPage", url: "https://example.com/docs", pattern: "dependencies" } }, "web find: dependencies in https://example.com/docs"],
+    // Every field of an action is nullable; the item's query still says what
+    // was looked for.
+    [{ query: "'dependencies'", action: { type: "findInPage", url: "https://example.com/docs", pattern: null } }, "web find: 'dependencies' in https://example.com/docs"]
+  ];
+  searches.forEach(([item], index) => accept("item/completed", { item: { type: "webSearch", id: `s${index}`, ...item } }));
+  assert.deepEqual(view.tail.map((row) => row.text), searches.map(([, expected]) => `webSearch completed: ${expected}`));
 });
 
 test("command output updates one item while completion removes active command", () => {

@@ -75,12 +75,16 @@ function canonicalMessage(item, role) {
 function webSearchTitle(item) {
   const action = item.action ?? {};
   const kind = String(action.type ?? "").replaceAll("_", "").toLowerCase();
-  const target = kind === "openpage" ? action.url
-    : kind === "findinpage" ? [action.pattern, action.url].filter(Boolean).join(" in ")
-    : (action.queries ?? []).join(" | ") || action.query;
-  const detail = target || item.query || "";
-  if (!detail) return "";
-  return `web ${kind === "openpage" ? "open" : kind === "findinpage" ? "find" : "search"}: ${detail}`;
+  // Every field of an action is nullable, and the item's own query is what the
+  // search was asked for: a missing pattern or an empty queries array falls
+  // back to it rather than leaving the row saying only where it looked.
+  const query = (action.queries ?? []).filter(Boolean).join(" | ") || action.query || item.query || "";
+  if (kind === "openpage") return action.url || query ? `web open: ${action.url || query}` : "";
+  if (kind === "findinpage") {
+    const detail = [action.pattern || query, action.url].filter(Boolean).join(" in ");
+    return detail ? `web find: ${detail}` : "";
+  }
+  return query ? `web search: ${query}` : "";
 }
 
 function toolSnapshot(item, status) {
