@@ -3,11 +3,11 @@ import { cellWidth, clean } from './format.ts'
 
 type UI = Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
 
+const INLINE = /(?<!`)`([^`\n]+)`(?!`)|\*\*([^*\n]+)\*\*|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!\w)_([^_\n]+)_(?!\w)|(?<!!)\[([^\]\n]+)\]\([^\s)]+\)/g
 function inlineParts(text: string): (TextProps & { children: string })[] {
   const parts: (TextProps & { children: string })[] = []
-  const pattern = /(?<!`)`([^`\n]+)`(?!`)|\*\*([^*\n]+)\*\*|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!\w)_([^_\n]+)_(?!\w)|(?<!!)\[([^\]\n]+)\]\([^\s)]+\)/g
   let start = 0
-  for (const match of text.matchAll(pattern)) {
+  for (const match of text.matchAll(INLINE)) {
     if (match.index > start) parts.push({ children: text.slice(start, match.index) })
     const [, code, bold, star, underscore, link] = match
     parts.push({
@@ -75,6 +75,19 @@ function table(ui: UI, rows: string[][], columns: number, props: TextProps) {
 }
 
 // Only terminal primitives; Code.source's 10000-character limit is a host contract.
+// A marker is only formatting once it closes. Drawn before that it is a literal
+// asterisk or backtick on screen that disappears a keystroke later, which is the
+// half-rendered Markdown a streaming row is meant to spare the reader. Every
+// span `inline` would format is kept; the text is held at the first marker after
+// the last of them, since nothing yet says what that one will become.
+const STRAY = /[`*[]|(?<!\w)_/
+function settled(text: string): string {
+  let end = 0
+  for (const match of text.matchAll(INLINE)) end = match.index + match[0].length
+  const stray = STRAY.exec(text.slice(end))
+  return stray ? text.slice(0, end + stray.index) : text
+}
+
 export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '', columns = 120, streaming = false) {
   const nodes: ReturnType<UI['Text']>[] = []
   const lines = clean(text).split('\n')
@@ -101,10 +114,11 @@ export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '
     // into, so it is drawn as it arrives; a heading, table, list, quote or
     // fence still waits.
     const pending = lines.slice(boundary).join('\n').trim()
-    if (!closing && pending && !/^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||`{3,}|~{3,})/m.test(pending)) {
+    const shown = settled(pending)
+    if (!closing && shown && !/^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||`{3,}|~{3,})/m.test(pending)) {
       nodes.push(ui.Text({ ...props, wrap: 'wrap', children: [
         ...(nodes.length === 0 && prefix ? [ui.Text({ children: prefix })] : []),
-        ...inline(ui, pending),
+        ...inline(ui, shown),
       ] }))
     }
     nodes.push(ui.Text({ ...props, dimColor: true, children: `${nodes.length ? '' : prefix}…` }))

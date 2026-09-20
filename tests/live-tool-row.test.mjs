@@ -633,6 +633,23 @@ describe('Markdown and prompt footer', () => {
       assert.equal(textOf(nodes[0]), '› …');
     }
   });
+  test('holds streaming prose at a marker that has not closed yet', ($, on) => {
+    world($, on);
+    // A marker drawn before it closes is a literal asterisk or backtick that
+    // vanishes a keystroke later; the span appears once it is whole.
+    const cases = [
+      ['修复了 **三', '› 修复了 …'],
+      ['修复了 **三处**', '› 修复了 三处…'],
+      ['用 `npm te', '› 用 …'],
+      ['见 [文档](http', '› 见 …'],
+      ['见 [文档](http://x) 了', '› 见 文档 了…'],
+      // An underscore inside a word never opens emphasis, so identifiers flow.
+      ['改了 snake_case 两处', '› 改了 snake_case 两处…'],
+    ];
+    for (const [source, expected] of cases) {
+      assert.equal(markdown($.ui.resolve(row()), source, {}, '› ', 100, true).map(textOf).join(''), expected, source);
+    }
+  });
   test('hides an unclosed fence including internal blank lines and commits only after its closing blank line', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
