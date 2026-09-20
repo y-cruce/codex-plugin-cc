@@ -33,3 +33,14 @@ jobs:
 
       - name: Run build
         run: npm run build
+
+      # What users install is `plugins/codex`, and Claude Code runs `npm ci`
+      # there, not at the repository root: a lockfile that is broken only in
+      # the shipped manifest fails nowhere else.
+      - name: Install the plugin's own dependencies
+        working-directory: plugins/codex
+        run: npm ci --ignore-scripts
+
+      - name: Load the ACP driver the way an installed plugin does
+        working-directory: plugins/codex
+        run: node -e "import('./scripts/lib/executors/acp-driver.mjs').then(m => { if (!m.openAcpExecutorJob) throw new Error('driver export missing') })"

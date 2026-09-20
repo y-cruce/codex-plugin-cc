@@ -99,7 +99,16 @@ test("the plugin root declares the runtime dependencies the installed copy impor
   assert.deepEqual(runtime.dependencies, root.dependencies);
   assert.deepEqual(lock.packages[""].dependencies, runtime.dependencies);
   // The lockfile travels to every user, so the registry it names is theirs too.
-  for (const [name, entry] of Object.entries(lock.packages)) {
-    if (entry.resolved) assert.ok(entry.resolved.startsWith("https://registry.npmjs.org/"), `${name} resolves to ${entry.resolved}`);
+  // A lockfile written with --omit-lockfile-registry-resolved is valid and has
+  // no `resolved` at all, so every external entry must carry one or the check
+  // passes by having nothing to look at.
+  const external = Object.entries(lock.packages).filter(([name]) => name);
+  assert.ok(external.length > 0);
+  for (const [name, entry] of external) {
+    assert.ok(entry.resolved?.startsWith("https://registry.npmjs.org/"), `${name} resolves to ${entry.resolved}`);
   }
+  // npm 6 reads a version 2 lockfile and fails on a version 3 one; the plugin
+  // asks for Node 18.18, where npm is 9, but npm is whatever is on the PATH of
+  // the machine Claude Code installs on.
+  assert.equal(lock.lockfileVersion, 2);
 });
