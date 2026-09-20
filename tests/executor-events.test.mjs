@@ -88,3 +88,37 @@ test("an ACP sub-agent is reported as a sub-agent, not as a tool called Agent", 
   assert.equal(events[0].identity.agentId, "fc_1");
   assert.equal(events[1].payload.detail, "Seven bare imports, all declared.");
 });
+
+test("what a sub-agent does while the parent waits is the sub-agent's", async () => {
+  // A sub-agent's messages and tool calls arrive on the session the parent is
+  // using, with nothing on them to say whose they are: the trace ran the two
+  // together and the reader could not tell which was which. The parent is
+  // waiting while the call it made runs, so the window between that call's
+  // start and its end belongs to the sub-agent.
+  const events = [];
+  const adapter = new AcpEventAdapter((event) => events.push(event), { job: { id: "job-1" } });
+  adapter.bindSession("session-1");
+  await adapter.startTurn("turn-1", []);
+  const say = (text) => adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text } } });
+  await say("planning first");
+  await adapter.accept({ sessionId: "session-1", update: { toolCallId: "ag", title: "Agent", kind: "think",
+    status: "pending", rawInput: { subagent_type: "Explore", description: "sweep the adapters" }, sessionUpdate: "tool_call" } });
+  await say("reading both adapters");
+  await adapter.accept({ sessionId: "session-1", update: { toolCallId: "r1", title: "Read …/acp.mjs", kind: "read",
+    status: "completed", sessionUpdate: "tool_call" } });
+  await adapter.accept({ sessionId: "session-1", update: { toolCallId: "ag", status: "completed", sessionUpdate: "tool_call_update" } });
+  await say("now I write it up");
+  const owners = events.filter((event) => /^(message|tool)\./.test(event.type))
+    .map((event) => `${event.agent?.path ?? "parent"}:${event.type}`);
+  assert.deepEqual(owners, ["parent:message.started", "parent:message.delta", "parent:message.completed",
+    "Explore:message.started", "Explore:message.delta", "Explore:tool.started", "Explore:tool.completed",
+    "Explore:message.completed", "parent:message.started", "parent:message.delta"]);
+  // Qoder sends no message id, so every chunk of a turn fell into one message:
+  // both speakers' words ran together and the whole of it was attributed to
+  // whoever was speaking when it closed.
+  const said = (agent) => events.filter((event) => event.type === "message.completed" && (event.agent?.path ?? null) === agent)
+    .map((event) => event.payload.message.text);
+  assert.deepEqual(said(null), ["planning first"]);
+  assert.deepEqual(said("Explore"), ["reading both adapters"]);
+});

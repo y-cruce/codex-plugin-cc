@@ -48,6 +48,21 @@ function vendorTool(tool) {
   return null;
 }
 
+// A sub-agent reports back in full -- three thousand characters of Markdown, a
+// table and a console dump in the two measured here -- and its line has room
+// for the sentence that answers the ask. Headings, table rows, rules and
+// anything inside a fence are not that sentence.
+function headline(text) {
+  let fenced = false;
+  for (const raw of String(text).split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("```")) { fenced = !fenced; continue; }
+    if (fenced || !line || /^#{1,6}\s/.test(line) || /^[|>]/.test(line) || /^[-*_]{3,}$/.test(line)) continue;
+    return line;
+  }
+  return null;
+}
+
 function toolContent(tool) {
   return (tool.content ?? []).flatMap((entry) => entry.type === "content" ? [contentBlock(entry.content)] : []);
 }
@@ -138,6 +153,8 @@ export class AcpEventAdapter {
     this.currentMessages = new Map();
     this.tools = new Map();
     this.plan = null;
+    this.subagent = null;
+    this.speaker = 0;
   }
 
   bindSession(sessionId) {
@@ -150,6 +167,8 @@ export class AcpEventAdapter {
     this.currentMessages.clear();
     this.tools.clear();
     this.plan = null;
+    this.subagent = null;
+    this.speaker = 0;
     return this.emit("turn.started", { ordinal: 0, prompt }, { turnId });
   }
 
@@ -159,7 +178,14 @@ export class AcpEventAdapter {
       job: this.job,
       executor: "acp",
       type,
-      identity: { sessionId: this.sessionId, turnId: this.turnId, ...identity },
+      // A sub-agent's own messages and tool calls arrive on the session the
+      // parent is using, with nothing on them to say whose they are. The
+      // parent is waiting while the call it made runs, so everything between
+      // that call's start and its end is the sub-agent's, and the pane folds
+      // it into the agent's own line as it does for a Codex sub-agent.
+      ...(this.subagent ? { agent: this.subagent } : {}),
+      identity: { sessionId: this.sessionId, turnId: this.turnId,
+        ...(this.subagent ? { agentId: this.subagent.id } : {}), ...identity },
       occurredAt: receivedAt,
       receivedAt,
       timeBasis: "received",
@@ -185,7 +211,11 @@ export class AcpEventAdapter {
 
   async contentUpdate(notification, role) {
     const update = notification.update;
-    const fallback = `${this.turnId}/${role === "reasoning" ? "reasoning" : role}`;
+    // An agent that sends no message id has every chunk of a turn fall into
+    // one message. Across a sub-agent's window that runs both speakers' words
+    // together, and the whole of it is attributed to whoever was speaking when
+    // it closed, so each window opens a message of its own.
+    const fallback = `${this.turnId}/${role === "reasoning" ? "reasoning" : role}/${this.speaker}`;
     const messageId = String(update.messageId ?? fallback);
     const previous = this.currentMessages.get(role);
     if (previous && previous !== messageId) await this.flushMessage(role);
@@ -233,14 +263,19 @@ export class AcpEventAdapter {
       // it was created with -- and what it was asked for stands until then.
       const report = created ? null : textFor((notification.update.content ?? [])
         .flatMap((entry) => entry.type === "content" ? [contentBlock(entry.content)] : []));
-      // A sub-agent reports back in full -- the one that finished here sent
-      // three thousand characters of Markdown and a table -- and its line has
-      // room for the sentence that answers the ask, not for the whole report.
-      const said = report && (report.split("\n").map((line) => line.trim())
-        .find((line) => line && !/^#{1,6}\s/.test(line) && !/^[|>-]/.test(line)) ?? report);
+      const said = report && (headline(report) ?? report);
+      // A message open at the boundary would run the sub-agent's words and the
+      // parent's into one, and the whole of it would be attributed to whoever
+      // was speaking when it closed.
+      for (const role of [...this.currentMessages.keys()]) await this.flushMessage(role);
+      this.speaker += 1;
+      // The announcement is the parent's, so it is sent outside the window it
+      // opens and closes.
+      if (terminal) this.subagent = null;
       await this.emit("agent.activity", { agentId: String(tool.toolCallId), parentAgentId: null, path: subagent, status,
         detail: said ?? (created && typeof tool.rawInput?.description === "string" ? tool.rawInput.description : null) },
       { agentId: String(tool.toolCallId) }, notification);
+      if (created) this.subagent = { id: String(tool.toolCallId), path: subagent };
       return;
     }
     if (tool.kind === "execute") {
