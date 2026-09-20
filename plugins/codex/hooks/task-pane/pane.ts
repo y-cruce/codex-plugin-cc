@@ -55,21 +55,23 @@ export function paneBody(
   // One task is always in view: the height belongs to its trace, not to a list
   // of tasks each spending two rows on itself.
   const focused = jobs.find(data => data.jobId === selected) ?? jobs[0]!
-  const running = jobs.filter(data => !isOver(data)).length
-  // Tabs share the width by how many there are, and the one in view gets more
-  // of it: the others only have to be recognizable, it has to be readable.
-  const share = Math.min(30, Math.max(8, Math.floor((width - jobs.length * 3) / jobs.length)))
-  const focusedWidth = Math.min(44, share + 10)
 
-  // Tabs across the top, numbered so `/codex:tasks 2` names one of them. Each is
-  // a button too: Tab walks them while the pane has the keyboard.
-  const tabs = jobs.map((data, index) => {
+  // The list sits at the foot, a task to a row, because the pane follows the end
+  // of a growing trace: whatever is last stays in view, and a row across the top
+  // does not -- it scrolled away as soon as the task had anything to say. A row
+  // each also gives a name room to be read rather than cut to a dozen cells.
+  const list = jobs.map((data, index) => {
     const isFocused = data.jobId === focused.jobId
     const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
-    const label = tabLabel(`${index + 1} ${data.label}${executor}`, isFocused ? focusedWidth : share)
+    const state = isOver(data) ? data.status : data.status === 'waiting-for-answer' ? 'waiting' : data.status
     return Box({ flexDirection: 'row', children: [
-      Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸' : '·' }),
-      Button({ key: `codex_tab_${data.jobId}`, label, plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId) }),
+      Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸ ' : '  ' }),
+      Button({
+        key: `codex_tab_${data.jobId}`,
+        label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
+        plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
+      }),
+      Text({ dimColor: true, children: ` · ${state}` }),
     ] })
   })
 
@@ -89,8 +91,7 @@ export function paneBody(
 
   // The body is the same card the follow row draws: it already groups commands,
   // files, questions and messages, and drops the bookkeeping events.
-  const tabRows = Math.max(1, Math.ceil((focusedWidth + (jobs.length - 1) * share + jobs.length * 5) / width))
-  const body = Math.max(4, rows - tabRows - (jobs.length > 1 ? 2 : 1))
+  const body = Math.max(4, rows - list.length - 3)
   // The whole trace is drawn and the pane scrolls it; the visible height only
   // sets how much of it shows at once.
   const TAIL = 200
@@ -101,12 +102,10 @@ export function paneBody(
   // showing to the foot of the pane rather than the mid grey the engine paints
   // under an element that stops early.
   return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
-    Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: tabs }),
-    // Blank rows, not margins: a margin belongs to no element, so the mid grey
-    // the engine paints under the pane is what shows through it -- a bar across
-    // the foot of an otherwise dark panel.
-    Text({ children: ' ' }),
     Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true)] }),
-    ...(jobs.length > 1 ? [Text({ children: ' ' }), Text({ dimColor: true, children: `${running} running · /codex:tasks <n> to switch` })] : []),
+    // A blank row, not a margin: a margin belongs to no element, so the mid grey
+    // the engine paints under the pane is what shows through it.
+    Text({ children: ' ' }),
+    ...list,
   ] })
 }

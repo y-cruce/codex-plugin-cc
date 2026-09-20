@@ -99,11 +99,9 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // An ACP agent never reports usage, so its counts stay at zero for the whole
   // run: the header says nothing rather than saying the same nothing forever.
   const counted = data.usage.inputTokens > 0 || data.usage.outputTokens > 0 || data.usage.cachedInputTokens > 0
-  // The pane names the task in its tabs, with the one in view marked; repeating
-  // the name in the footer under it spends a third of the row saying it twice.
   const header = [
-    { text: `● ${executor}${headingLast ? '' : ' · '}` },
-    { text: headingLast ? '' : data.label, bold: true },
+    { text: `● ${executor} · ` },
+    { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(data.startedAt)) : elapsed(data.startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
