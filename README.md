@@ -12,7 +12,7 @@ they already have.
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:transfer`, `/codex:status`, `/codex:result`, `/codex:answer`, `/codex:message`, and `/codex:cancel` to hand off sessions and steer or manage background jobs
-- delegation itself is driven by the [codex-director](https://github.com/y-cruce/codex-director) workflow: its `codex-task` subagent starts a Codex task through the companion and follows it with `observe follow`, while the `live-tool-row` mod draws the live trace
+- delegation itself is driven by the [codex-director](https://github.com/y-cruce/codex-director) workflow: it starts a Codex task through the companion and leaves it running, while the `task-pane` mod watches every job of the session, draws its live trace and raises the events the director must act on
 
 ## Requirements
 
