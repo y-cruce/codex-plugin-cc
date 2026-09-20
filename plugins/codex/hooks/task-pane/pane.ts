@@ -94,7 +94,7 @@ export function paneBody(
 
   // The body is the same card the follow row draws: it already groups commands,
   // files, questions and messages, and drops the bookkeeping events.
-  const body = Math.max(4, rows - list.length - 3)
+  const body = Math.max(4, rows - list.length - 4)
   // The whole trace is drawn and the pane scrolls it; the visible height only
   // sets how much of it shows at once.
   const TAIL = 200
@@ -110,5 +110,8 @@ export function paneBody(
     // the engine paints under the pane is what shows through it.
     Text({ children: ' ' }),
     ...list,
+    // The list would otherwise sit against the pane's bottom edge, which the
+    // engine draws in its own grey.
+    Text({ children: ' ' }),
   ] })
 }
