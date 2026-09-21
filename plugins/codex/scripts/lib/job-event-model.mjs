@@ -356,6 +356,11 @@ export function applyJobEvent(view, event, options = {}) {
       tailKey = key;
       break;
     }
+    // The start claims the row the rest of the change is drawn in: without its
+    // key the completion had none to replace and drew a second row for the same
+    // file. It writes no file list, though -- what a tool has begun is not a
+    // change the pane reports as one.
+    case "fileChange.started": tailKey = key; break;
     case "fileChange.completed": case "fileChange.patch.updated":
       for (const file of p.files ?? []) {
         const value = { path: file.path, kind: file.kind, additions: file.additions, deletions: file.deletions };

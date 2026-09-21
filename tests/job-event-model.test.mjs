@@ -217,6 +217,46 @@ test("patch line statistics distinguish unknown from zero", () => {
   ]);
 });
 
+test("a file change keeps one row that its completion redraws in place", () => {
+  // The start and the completion of one patch are the same tool call, so the
+  // row the start opens is the row the completion finishes in; left without a
+  // key, the start drew a row of its own and the completion appended a second
+  // one for the same file.
+  const job = { id: "job-files", executor: "acp", threadId: "session-1" };
+  const view = createLiveView(job);
+  let seq = 0;
+  const accept = (type, toolCallId, status, files) => {
+    const event = createCanonicalEvent({
+      job, executor: "acp", type, payload: { status, files },
+      identity: { sessionId: "session-1", turnId: "turn-1", toolCallId },
+      occurredAt: "2026-09-19T00:00:00.000Z",
+      receivedAt: "2026-09-19T00:00:00.000Z"
+    });
+    event.seq = String(++seq);
+    applyJobEvent(view, event);
+  };
+
+  const edited = [{ path: "/repo/biz/a.ts", kind: "add", additions: 2, deletions: 0 }];
+  accept("fileChange.started", "tool-1", "in_progress", edited);
+  assert.deepEqual(view.tail.map((row) => row.text), ["Files in_progress: add /repo/biz/a.ts (+2 −0)"]);
+  // A change that has only begun is not yet a file the pane reports.
+  assert.deepEqual(view.files, []);
+  accept("fileChange.completed", "tool-1", "completed", edited);
+  assert.deepEqual(view.tail.map((row) => row.text), ["Files completed: add /repo/biz/a.ts (+2 −0)"]);
+  assert.equal(view.tail[0].seq, "2");
+  assert.equal(view.tail[0].positionSeq, "1");
+  assert.deepEqual(view.files, [{ path: "/repo/biz/a.ts", kind: "add", additions: 2, deletions: 0 }]);
+
+  // Another tool's patch is another row, finished or not.
+  const rewritten = [{ path: "/repo/b.ts", kind: "update", additions: 1, deletions: 1 }];
+  accept("fileChange.started", "tool-2", "in_progress", rewritten);
+  accept("fileChange.completed", "tool-2", "failed", rewritten);
+  assert.deepEqual(view.tail.map((row) => row.text), [
+    "Files completed: add /repo/biz/a.ts (+2 −0)",
+    "Files failed: update /repo/b.ts (+1 −1)"
+  ]);
+});
+
 test("usage snapshots add increments rather than cumulative totals across turns", () => {
   const { view, accept } = harness();
   accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 20, outputTokens: 5, cachedInputTokens: 3 } } });
