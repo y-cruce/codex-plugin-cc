@@ -102,7 +102,7 @@ function seedTrackedThread(repo, pluginDataDir, threadId, sessionId = "sess-othe
   );
 }
 
-test("status without a job id only shows jobs from the current Claude session", () => {
+test("status lists another session's jobs too, marked as such", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
   const jobsDir = path.join(stateDir, "jobs");
@@ -167,10 +167,16 @@ test("status without a job id only shows jobs from the current Claude session", 
   });
 
   assert.equal(result.status, 0, result.stderr);
+  // Hiding another session's jobs left no way to see them at all, so both are
+  // listed and the line says which one this session did not start. Continuing a
+  // thread and cancelling without an id stay scoped to this session.
   assert.deepEqual(
     [...new Set(result.stdout.match(/review-(?:current|other)/g) ?? [])],
-    ["review-current"]
+    ["review-current", "review-other"]
   );
+  const line = result.stdout.split("\n").find((row) => row.includes("review-other"));
+  assert.match(line, /other session/);
+  assert.doesNotMatch(result.stdout.split("\n").find((row) => row.includes("review-current")), /other session/);
 });
 
 test("result returns the stored output for the latest finished job by default", () => {
