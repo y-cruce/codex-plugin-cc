@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 
 import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
-import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
@@ -65,7 +66,7 @@ test("ACP observation endpoint follows events and persists a nonblank live view"
   await h.port.close();
   const history = await readHistory(h.cwd, h.job.id);
   assert.ok(history.events.some((event) => event.type === "job.completed"));
-  const view = JSON.parse(fs.readFileSync(resolveLiveViewPath(h.cwd, h.job.id), "utf8"));
+  const view = JSON.parse(fs.readFileSync((await resolveJobHistory(h.cwd, h.job.id)).liveView, "utf8"));
   assert.equal(view.executor.kind, "acp");
   assert.equal(view.lastMessage.text, "Basic complete");
   assert.equal(view.files.length, 1);
@@ -130,4 +131,3 @@ test("ACP follow prints a recovery cursor when its endpoint closes before a term
   assert.match(followed.stdout, /^CURSOR: /m);
   assert.match(followed.stderr, /^BROKER_UNAVAILABLE Broker disconnected; continue with --after$/m);
 });
-

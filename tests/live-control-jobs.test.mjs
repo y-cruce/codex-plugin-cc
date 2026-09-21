@@ -77,7 +77,8 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   const job = await waitFor(() => {
     const result = h.cli("status");
     assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout).running.find((item) => item.pid === child.pid && item.threadId && item.turnId);
+    const snapshot = JSON.parse(result.stdout);
+    return (snapshot.threads ?? snapshot.running).find((item) => item.pid === child.pid && item.threadId && item.turnId);
   });
   return { job, done, child };
 }
@@ -88,7 +89,8 @@ test("concurrent task jobs share a repository and retain both results and progre
   assert.notEqual(jobs[0].job.threadId, jobs[1].job.threadId);
   const status = h.cli("status");
   assert.equal(status.status, 0, status.stderr);
-  assert.deepEqual(JSON.parse(status.stdout).running.map((job) => job.id).sort(), jobs.map(({ job }) => job.id).sort());
+  const snapshot = JSON.parse(status.stdout);
+  assert.deepEqual((snapshot.threads ?? snapshot.running).map((job) => job.id).sort(), jobs.map(({ job }) => job.id).sort());
   const control = await h.connect();
   await Promise.all(jobs.map(({ job }) => control.request("turn/steer", {
     threadId: job.threadId, expectedTurnId: job.turnId, input: [{ type: "text", text: "finish" }]

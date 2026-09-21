@@ -102,7 +102,7 @@ export interface CanonicalQuestionField {
 }
 
 export interface CanonicalEventPayloadMap {
-  "job.started": { label: string; startedAt: string };
+  "job.started": { label: string; startedAt: string; sessionId?: string | null; prompt?: string | null; resumed?: boolean };
   "job.completed": JobTerminalPayload;
   "job.failed": JobTerminalPayload;
   "job.cancelled": JobTerminalPayload;
@@ -156,6 +156,7 @@ interface JobTerminalPayload {
   completedAt: string;
   finalMessages: CanonicalMessage[];
   error: { code?: string | number; message: string; data?: unknown } | null;
+  result?: unknown;
 }
 
 interface FileChangePayload {

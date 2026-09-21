@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
@@ -11,6 +12,7 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { LiveTurnControl, DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
 import { JobRuntime } from "./lib/job-runtime.mjs";
 import { CodexEventAdapter } from "./lib/executors/codex-event-adapter.mjs";
+import { THREAD_RECORDS_ENABLED } from "./lib/thread-records.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const EXECUTOR_CONTROL_METHODS = new Set([
@@ -74,7 +76,7 @@ function writePidFile(pidFile) {
   fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
 }
 
-async function main() {
+export async function main(runtimeOptions = {}) {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (subcommand !== "serve") {
     throw new Error("Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
@@ -104,7 +106,8 @@ async function main() {
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, requestUserInput: true });
   const controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs);
   let codexEvents;
-  const jobs = new JobRuntime({ onTerminal: (job) => codexEvents?.releaseJob(job.id) });
+  const jobs = new JobRuntime({ onTerminal: (job) => codexEvents?.releaseJob(job.id),
+    threadRecords: runtimeOptions.threadRecords ?? THREAD_RECORDS_ENABLED });
   codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   await jobs.start(cwd);
   let activeRequestSocket = null;
@@ -327,6 +330,12 @@ async function main() {
           if (message.params?.threadId && job) await codexEvents.bindSession(message.params.threadId, job);
           try {
             const result = await appClient.request(message.method, message.params ?? {});
+            const responseThreadId = result.thread?.id ?? result.reviewThreadId ??
+              (message.method === "turn/start" ? message.params?.threadId : null);
+            if (job && jobs.threadRecords && responseThreadId &&
+              ["thread/start", "turn/start", "review/start"].includes(message.method)) {
+              await jobs.bind(socket, job.workspaceRoot ?? cwd, job.id, responseThreadId, result.turn?.id ?? null);
+            }
             if (result.thread?.id && job) await codexEvents.bindSession(result.thread.id, job);
             if (result.reviewThreadId && job) await codexEvents.bindSession(result.reviewThreadId, job);
             if (message.method === "thread/start") pendingThreadStarts.delete(result.thread?.id);
@@ -387,7 +396,9 @@ async function main() {
   resetIdleTimer();
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

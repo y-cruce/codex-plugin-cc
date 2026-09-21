@@ -79,6 +79,11 @@ test("observe falls back to HOME data root, pins history/result reads, and merge
   const jobs = JSON.parse(list.stdout).jobs;
   assert.deepEqual(jobs.map((job) => job.id).sort(), ["task-only-inline", "task-shared"]);
   assert.equal(jobs.find((job) => job.id === "task-shared").label, "new");
+  const threads = await h.cli(["threads", "--json"]);
+  assert.equal(threads.code, 0, threads.stderr);
+  const thread = JSON.parse(threads.stdout).threads.find((entry) => entry.id === "task-shared");
+  assert.equal(thread.label, "new");
+  assert.equal(thread.viewPath, path.join(recent.stateDir, "job-history/task-shared/live-view.json"));
   const current = await h.cli(["view-path", "task-shared"], { CLAUDE_PLUGIN_DATA: path.dirname(path.dirname(old.stateDir)) });
   assert.equal(current.stdout.trim(), path.join(old.stateDir, "job-history/task-shared/live-view.json"));
   const missing = await h.cli(["view-path", "missing"]);
@@ -94,6 +99,9 @@ test("observe resolves history-only jobs across data roots", async (t) => {
   const list = await h.cli(["list", "--json"]);
   assert.equal(list.code, 0, list.stderr);
   assert.equal(JSON.parse(list.stdout).jobs.some((job) => job.id === entry.job.id), true);
+  const threads = await h.cli(["threads", "--json"]);
+  assert.equal(threads.code, 0, threads.stderr);
+  assert.equal(JSON.parse(threads.stdout).threads.find((thread) => thread.id === entry.job.id).layout, "legacy");
 
   const view = await h.cli(["view-path", entry.job.id]);
   assert.equal(view.code, 0, view.stderr);

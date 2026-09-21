@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { buildSingleJobSnapshot } from "./job-control.mjs";
+import { readRoundContext } from "./history-resolver.mjs";
 import { ObservationClient } from "./observation-client.mjs";
 
 function executorSessionId(job) {
@@ -14,6 +15,22 @@ async function withLiveClient(cwd, job, action, options = {}) {
   } finally {
     await client.close();
   }
+}
+
+export function inactiveRoundMessage(jobId, activeRoundId) {
+  return activeRoundId
+    ? `Job ${jobId} is not the active round; active job is ${activeRoundId}.`
+    : `Job ${jobId} is not active; this thread has no active round.`;
+}
+
+export async function requireActiveRound(cwd, job) {
+  const context = await readRoundContext(cwd, job.id);
+  if (context.layout === "thread-record" && context.activeRoundId !== job.id) {
+    throw Object.assign(new Error(inactiveRoundMessage(job.id, context.activeRoundId)), {
+      code: "STALE_ROUND", activeRoundId: context.activeRoundId
+    });
+  }
+  return context;
 }
 
 export async function liveStatus(cwd, job, options = {}) {
@@ -39,6 +56,7 @@ export async function acknowledgeNotifications(cwd, job, ids) {
 export async function sendLiveCommand(cwd, reference, command, options, text) {
   if (!reference) throw new Error("Pass an explicit job ID from /codex:status.");
   const { job } = buildSingleJobSnapshot(cwd, reference);
+  await requireActiveRound(cwd, job);
   if (job.jobClass !== "task" || job.status !== "running" || !executorSessionId(job)) {
     throw new Error("This command requires a running task with a known executor session and turn.");
   }
@@ -71,6 +89,7 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
 }
 
 export async function cancelLiveJob(cwd, job) {
+  await requireActiveRound(cwd, job);
   const sessionId = executorSessionId(job);
   if (!sessionId || !job.turnId) return { attempted: false, interrupted: false, detail: "missing executorSessionId or turnId" };
   try {

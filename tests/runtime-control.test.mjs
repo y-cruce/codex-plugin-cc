@@ -102,7 +102,7 @@ function seedTrackedThread(repo, pluginDataDir, threadId, sessionId = "sess-othe
   );
 }
 
-test("status without a job id only shows jobs from the current Claude session", () => {
+test("status without a job id lists every session's jobs and marks the other session's", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
   const jobsDir = path.join(stateDir, "jobs");
@@ -168,9 +168,12 @@ test("status without a job id only shows jobs from the current Claude session", 
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(
-    [...new Set(result.stdout.match(/review-(?:current|other)/g) ?? [])],
-    ["review-current"]
+    [...new Set(result.stdout.match(/review-(?:current|other)/g) ?? [])].sort(),
+    ["review-current", "review-other"]
   );
+  const line = (id) => result.stdout.split("\n").find((row) => row.includes(id)) ?? "";
+  assert.match(line("review-other"), /other session/);
+  assert.doesNotMatch(line("review-current"), /other session/);
 });
 
 test("result returns the stored output for the latest finished job by default", () => {

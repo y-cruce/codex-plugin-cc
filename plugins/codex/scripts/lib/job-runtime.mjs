@@ -1,16 +1,28 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JobEventStore, readHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
+import { JobEventStore, readHistory, readRecordHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
 import { createCanonicalEvent } from "./executor-events.mjs";
 import { createLiveView, applyJobEvent } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
+import { stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
+import { bindProvisionalDispatch, bufferProvisionalEvent, createProvisionalDispatch, failProvisionalDispatch,
+  MAX_PROVISIONAL_BYTES, MAX_PROVISIONAL_EVENTS, updateRoundReceipt } from "./thread-record-binding.mjs";
+import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified",
   "job.completed", "job.failed", "job.cancelled"]);
+const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
 
-function jobEvent(job, type) {
+function roundPrompt(job) {
+  const prompt = job.request?.prompt;
+  if (typeof prompt !== "string" || !prompt.trim()) return null;
+  const marker = prompt.lastIndexOf("---- Brief ----");
+  return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
+}
+
+function jobEvent(job, type, threadRecord = false) {
   const completedAt = job.completedAt ?? new Date().toISOString();
   const status = type.slice(4);
   const errorMessage = job.errorMessage ?? job.result?.error?.message ?? null;
@@ -21,10 +33,11 @@ function jobEvent(job, type) {
     identity: { sessionId: job.executorSessionId ?? job.threadId ?? null, turnId: job.turnId ?? null },
     occurredAt: type === "job.started" ? job.startedAt ?? job.createdAt : completedAt,
     payload: type === "job.started"
-      ? { label: job.label ?? job.title ?? job.id, startedAt: job.startedAt ?? job.createdAt ?? completedAt }
+      ? { label: job.label ?? job.title ?? job.id, startedAt: job.startedAt ?? job.createdAt ?? completedAt,
+        ...(threadRecord ? { sessionId: job.sessionId ?? null, prompt: roundPrompt(job), resumed: Boolean(job.request?.resumeThreadId) } : {}) }
       : { status, reason: terminal?.reason ?? { code: status === "cancelled" ? "cancelled" : status === "completed" ? "end_turn" : "backend_error",
         backendCode: status, message: errorMessage, retryable: false }, completedAt, finalMessages: terminal?.finalMessages ?? [],
-        error: errorMessage ? { message: errorMessage } : null },
+        error: errorMessage ? { message: errorMessage } : null, ...(threadRecord ? { result: job.result ?? null } : {}) },
     source: { protocol: "local", method: type, raw: null }
   });
 }
@@ -35,6 +48,8 @@ export class JobRuntime {
     this.owners = new Map();
     this.followers = new Map();
     this.onTerminal = options.onTerminal ?? null;
+    this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
+    this.executorIdentity = options.executorIdentity ?? null;
     this.reconciling = false;
     this.historySweepMs = options.historySweepMs ?? 60000;
     this.historyCwds = new Set();
@@ -157,7 +172,8 @@ export class JobRuntime {
         if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
       }
       after = history.nextCursor;
-      if (!history.events.length || history.events.at(-1).seq === history.committedSeq) break;
+      if (history.caughtUp === true || (history.caughtUp === undefined &&
+        (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
     } while (true);
     this.jobs.set(key, entry);
     if (appendStarted && entry.store.snapshot.committedSeq === "0") {
@@ -170,9 +186,113 @@ export class JobRuntime {
     return entry;
   }
 
+  async persistRound(entry) {
+    const round = entry.view.rounds?.find((value) => value.jobId === entry.job.id);
+    if (round && entry.location?.roundReceipt) await updateRoundReceipt(entry.location, round, entry.job);
+  }
+
+  async noteRoundTurn(entry, turnId) {
+    if (!turnId) return;
+    entry.view.turnId = turnId;
+    const round = entry.view.rounds?.find((value) => value.jobId === entry.job.id);
+    if (round && !round.executorTurnIds.includes(turnId)) round.executorTurnIds.push(turnId);
+    await this.persistRound(entry);
+  }
+
+  async openThreadEntry(entry, binding) {
+    entry.recordId = binding.recordId;
+    entry.location = binding.location;
+    entry.receipt = binding.receipt;
+    entry.view = createLiveView(entry.job, { recordId: binding.recordId });
+    entry.store = new JobEventStore(entry.cwd, binding.recordId, {
+      directory: binding.location.directory,
+      threadRecord: { recordId: binding.recordId, workspaceRoot: entry.provisional.workspaceRoot,
+        executorKey: entry.provisional.executorKey, threadId: entry.job.threadId },
+      createCheckpoint: (events, snapshot) => {
+        const view = structuredClone(entry.view);
+        for (const event of events) applyJobEvent(view, event);
+        view.history.committedSeq = snapshot.committedSeq;
+        view.history.continuity = snapshot.continuity;
+        return view;
+      },
+      onRetention: (snapshot) => {
+        entry.view.history.continuity = snapshot.continuity;
+        entry.view.history.earliestSeq = snapshot.earliestSeq;
+        this.scheduleView(entry);
+      },
+      onError: (error) => {
+        entry.failure = error.message;
+        entry.view.history.continuity = "partial";
+        this.scheduleView(entry);
+        this.diagnostic(error);
+      },
+      onCommit: async (events, snapshot) => {
+        for (const event of events) applyJobEvent(entry.view, event, {
+          onDiagnostic: (message) => this.diagnostic(new Error(message))
+        });
+        entry.view.history.committedSeq = snapshot.committedSeq;
+        if (snapshot.continuity === "partial") entry.view.history.continuity = "partial";
+        await this.persistRound(entry);
+        if (!events.some((event) => event.type.startsWith("job.") && terminal(entry.view.status))) this.scheduleView(entry);
+        for (const follower of this.followers.values()) if (follower.entry === entry) this.wake(follower);
+      },
+      retainedCursors: () => [...this.followers.values()]
+        .filter((follower) => follower.entry === entry && !follower.closed)
+        .map((follower) => follower.after ?? follower.retentionCursor)
+    });
+    await entry.store.initialize({ recordId: binding.recordId });
+    const previous = entry.store.checkpoint;
+    if (previous?.recordId === binding.recordId) entry.view = previous;
+    entry.view.history.continuity = entry.store.snapshot.continuity;
+    let after = previous?.recordId === binding.recordId ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
+    do {
+      const history = await readRecordHistory(entry.cwd, binding.recordId, { after, limit: 256 });
+      for (const event of history.events) {
+        if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
+      }
+      after = history.nextCursor;
+      if (history.caughtUp === true || (history.caughtUp === undefined &&
+        (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
+    } while (true);
+    await this.persistRound(entry);
+    clearTimeout(entry.viewTimer);
+    entry.viewTimer = null;
+    await this.writeView(entry);
+    entry.bound = true;
+    return entry;
+  }
+
+  queueBindingEvent(entry, event) {
+    const value = structuredClone(event);
+    const bytes = Buffer.byteLength(JSON.stringify(value));
+    if (entry.bindingEvents.length >= MAX_PROVISIONAL_EVENTS || entry.bindingBytes + bytes > MAX_PROVISIONAL_BYTES) {
+      throw Object.assign(new Error("Provisional dispatch exceeded its bind-window event buffer"), { code: "PROVISIONAL_BUFFER_OVERFLOW" });
+    }
+    entry.bindingEvents.push(value);
+    entry.bindingBytes += bytes;
+  }
+
   async register(socket, cwd, jobId) {
     const job = readStoredJob(cwd, jobId);
     if (!job) throw Object.assign(new Error(`UNKNOWN_JOB ${jobId}`), { code: "UNKNOWN_JOB" });
+    if (this.threadRecords) {
+      const key = `${job.workspaceRoot}\0${job.id}`;
+      let entry = this.jobs.get(key);
+      if (!entry) {
+        entry = { key, cwd: job.workspaceRoot ?? cwd, job, provisional: createProvisionalDispatch({
+          workspaceRoot: job.workspaceRoot ?? cwd, job, executor: this.executorIdentity ?? {}
+        }), view: createLiveView(job, { recordId: job.id }), writeTail: Promise.resolve(), viewTimer: null,
+        lastViewAt: 0, ended: false, failure: null, bound: false, store: null };
+        entry.binding = false;
+        entry.bindingEvents = [];
+        entry.bindingBytes = 0;
+        entry.jobFile = path.join(stateDirFor(entry.cwd), "jobs", `${jobId}.json`);
+        bufferProvisionalEvent(entry.provisional, jobEvent(job, "job.started", true));
+        this.jobs.set(key, entry);
+      }
+      this.owners.set(socket, entry);
+      return { historyAvailable: false, jobId, streamId: null };
+    }
     const key = `${job.workspaceRoot}\0${job.id}`;
     let entry = this.jobs.get(key);
     if (!entry) {
@@ -181,6 +301,33 @@ export class JobRuntime {
     }
     this.owners.set(socket, entry);
     return { historyAvailable: true, jobId, streamId: entry.store.snapshot.streamId };
+  }
+
+  async bind(socket, cwd, jobId, threadId, turnId = null) {
+    if (!this.threadRecords) return { bound: false, jobId };
+    const entry = this.owners.get(socket) ?? [...this.jobs.values()].find((item) => item.cwd === cwd && item.job.id === jobId);
+    if (!entry || entry.job.id !== jobId) throw Object.assign(new Error(`UNKNOWN_JOB ${jobId}`), { code: "UNKNOWN_JOB" });
+    entry.job = { ...entry.job, threadId, executorSessionId: threadId, ...(turnId ? { turnId } : {}) };
+    entry.provisional.job = structuredClone(entry.job);
+    if (entry.bound) {
+      await this.noteRoundTurn(entry, turnId);
+      return { bound: true, jobId, recordId: entry.recordId };
+    }
+    entry.binding = true;
+    try {
+      const binding = await bindProvisionalDispatch(entry.provisional, threadId);
+      await this.openThreadEntry(entry, binding);
+      await this.noteRoundTurn(entry, turnId);
+      const queued = entry.bindingEvents;
+      entry.bindingEvents = [];
+      entry.bindingBytes = 0;
+      for (const event of queued) await this.append(entry, event);
+      if (queued.some((event) => TERMINAL_EVENTS.has(event.type))) entry.terminalRecorded = true;
+      if (queued.some((event) => immediateEvents.has(event.type))) await entry.store.flush();
+    } finally {
+      entry.binding = false;
+    }
+    return { bound: true, jobId, recordId: entry.recordId };
   }
 
   jobForSocket(socket) {
@@ -195,7 +342,17 @@ export class JobRuntime {
   async record(event) {
     const entry = [...this.jobs.values()].find((item) => item.job.id === event.jobId);
     if (!entry) return false;
+    if (this.threadRecords && entry.binding) {
+      this.queueBindingEvent(entry, event);
+      return true;
+    }
+    if (this.threadRecords && !entry.bound) {
+      if (TERMINAL_EVENTS.has(event.type)) return true;
+      bufferProvisionalEvent(entry.provisional, event);
+      return true;
+    }
     await this.append(entry, event);
+    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) entry.terminalRecorded = true;
     if (immediateEvents.has(event.type)) await entry.store.flush();
     return true;
   }
@@ -233,7 +390,7 @@ export class JobRuntime {
   writeView(entry) {
     const content = `${JSON.stringify(entry.view)}\n`;
     entry.writeTail = entry.writeTail.catch(() => {}).then(async () => {
-      const file = resolveLiveViewPath(entry.cwd, entry.job.id);
+      const file = entry.location?.liveView ?? resolveLiveViewPath(entry.cwd, entry.job.id);
       await fs.mkdir(path.dirname(file), { recursive: true });
       const temporary = `${file}.${process.pid}.tmp`;
       await fs.writeFile(temporary, content, "utf8");
@@ -249,14 +406,28 @@ export class JobRuntime {
     const job = await fs.readFile(entry.jobFile, "utf8").then(JSON.parse).catch(() => null);
     if (!job || !terminal(job.status) || entry.ended) return { recorded: entry.ended };
     entry.ended = true;
-    entry.job = job;
-    await this.append(entry, jobEvent(job, `job.${job.status}`));
+    entry.job = this.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
+      threadId: entry.job.threadId ?? job.threadId ?? null } : job;
+    if (this.threadRecords && !entry.bound) {
+      const binding = await failProvisionalDispatch(entry.provisional, jobEvent(job, `job.${job.status}`, true));
+      entry.job = { ...job, recordId: binding.recordId, roundId: job.id, threadId: null };
+      await this.openThreadEntry(entry, binding);
+    } else if (!this.threadRecords || !entry.terminalRecorded) {
+      await this.append(entry, jobEvent(entry.job, `job.${job.status}`, this.threadRecords));
+    }
     await entry.store.flush();
-    await entry.store.updateMetadata({ job, status: job.status, completedAt: job.completedAt });
+    if (this.threadRecords) {
+      await entry.store.updateManifest({ activeRoundId: null });
+      await this.persistRound(entry);
+    } else await entry.store.updateMetadata({ job, status: job.status, completedAt: job.completedAt });
     clearTimeout(entry.viewTimer);
     entry.viewTimer = null;
     await this.writeView(entry);
     this.onTerminal?.(entry.job);
+    if (this.threadRecords) {
+      await entry.store.close();
+      entry.store = null;
+    }
     this.cleanup().catch((error) => this.diagnostic(error));
     return { recorded: true };
   }
@@ -279,20 +450,33 @@ export class JobRuntime {
   async failOwnerExited(entry, job) {
     entry.ended = true;
     entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
-    await this.append(entry, jobEvent(entry.job, "job.failed"));
+    if (this.threadRecords && !entry.bound) {
+      const binding = await failProvisionalDispatch(entry.provisional, jobEvent(entry.job, "job.failed", true));
+      entry.job = { ...entry.job, recordId: binding.recordId, roundId: entry.job.id, threadId: null };
+      await this.openThreadEntry(entry, binding);
+    } else await this.append(entry, jobEvent(entry.job, "job.failed", this.threadRecords));
     await entry.store.flush();
-    await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
+    if (this.threadRecords) {
+      await entry.store.updateManifest({ activeRoundId: null });
+      await this.persistRound(entry);
+    } else await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
     clearTimeout(entry.viewTimer);
     entry.viewTimer = null;
     await this.writeView(entry);
     this.onTerminal?.(entry.job);
+    if (this.threadRecords) {
+      await entry.store.close();
+      entry.store = null;
+    }
   }
 
   async follow(socket, cwd, jobId, after) {
     const entry = [...this.jobs.values()].find((item) => item.job.id === jobId && item.cwd === cwd);
     if (!entry) throw Object.assign(new Error("OBSERVATION_UNSUPPORTED: job is not owned by this broker"), { code: "OBSERVATION_UNSUPPORTED" });
     const page = await readHistory(cwd, jobId, { after, limit: 1 });
-    const retentionCursor = after ?? cursorFor({ jobId, streamId: page.streamId }, BigInt(page.earliestSeq) - 1n);
+    const retentionCursor = after ?? cursorFor(page.recordId
+      ? { recordId: page.recordId, streamId: page.streamId }
+      : { jobId, streamId: page.streamId }, BigInt(page.earliestSeq) - 1n);
     const follower = { socket, entry, after, retentionCursor, pumping: false, dirty: false, closed: false };
     this.followers.set(socket, follower);
     return { jobId, streamId: page.streamId, committedSeq: page.committedSeq };
@@ -328,7 +512,8 @@ export class JobRuntime {
           follower.socket.once("close", done);
         });
       }
-      if (!page.events.length || page.events.at(-1).seq === page.committedSeq) return;
+      if (page.caughtUp === true || (page.caughtUp === undefined &&
+        (!page.events.length || page.events.at(-1).seq === page.committedSeq))) return;
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
@@ -348,9 +533,9 @@ export class JobRuntime {
     for (const follower of this.followers.values()) follower.closed = true;
     this.followers.clear();
     for (const entry of this.jobs.values()) {
-      await entry.store.close();
+      await entry.store?.close();
       clearTimeout(entry.viewTimer);
-      await this.writeView(entry);
+      if (!this.threadRecords || entry.bound) await this.writeView(entry);
     }
     await this.cleanup().catch((error) => this.diagnostic(error));
   }

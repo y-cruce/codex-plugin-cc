@@ -263,7 +263,8 @@ test("task --background persists a trimmed, capped label in JSON and text launch
     assert.equal(waitedPayload.job.label, expectedLabel);
     const status = run("node", [SCRIPT, "status", "--all", "--json"], { cwd: repo, env: buildEnv(binDir) });
     assert.equal(status.status, 0, status.stderr);
-    assert.equal(JSON.parse(status.stdout).latestFinished.label, expectedLabel);
+    const statusPayload = JSON.parse(status.stdout);
+    assert.equal((statusPayload.threads?.find((thread) => thread.status !== "queued" && thread.status !== "running") ?? statusPayload.latestFinished).label, expectedLabel);
 
     const resultPayload = await waitFor(() => {
       const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
@@ -334,4 +335,3 @@ test("review accepts --background while still running as a tracked review job", 
   assert.match(status.stdout, /Codex Review/);
   assert.match(status.stdout, /completed/);
 });
-

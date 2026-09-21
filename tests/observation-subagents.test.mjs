@@ -22,7 +22,7 @@ test("subAgentActivity of every kind binds buffered and future child events to o
     const job = { id: `task-${kind}`, status: "running", workspaceRoot: cwd, pid: process.pid, threadId: "parent" };
     writeJobFile(cwd, job.id, job);
     upsertJob(cwd, job);
-    const runtime = new JobRuntime();
+    const runtime = new JobRuntime({ threadRecords: false });
     const owner = {};
     const adapter = new CodexEventAdapter((event) => runtime.record(event));
     try {

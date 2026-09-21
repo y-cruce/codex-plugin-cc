@@ -163,6 +163,8 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Phase: ${job.phase}`);
   }
   if (job.errorMessage) lines.push(`  Error: ${job.errorMessage}`);
+  if (options.showRecord && job.recordId) lines.push(`  Record: ${job.recordId}`);
+  if (options.showRecord && job.activeRoundId) lines.push(`  Active job: ${job.activeRoundId}`);
   const sandboxDetails = formatSandboxDetails(job);
   if (sandboxDetails) lines.push(`  ${sandboxDetails}`);
   if (job.status === "running") {
@@ -357,6 +359,11 @@ export function renderTaskResult(parsedResult, meta) {
 }
 
 export function renderStatusReport(report) {
+  if (report.threads) {
+    const running = report.threads.filter((job) => job.status === "queued" || job.status === "running");
+    const finished = report.threads.filter((job) => job.status !== "queued" && job.status !== "running");
+    report = { ...report, running, latestFinished: finished[0] ?? null, recent: finished.slice(1) };
+  }
   const lines = [
     "# Codex Status",
     "",
@@ -416,7 +423,8 @@ export function renderJobStatusReport(job) {
     showLog: true,
     showCancelHint: true,
     showResultHint: true,
-    showReviewHint: true
+    showReviewHint: true,
+    showRecord: true
   });
   if (job.live?.unavailable) lines.push(`Live controls unavailable: ${job.live.unavailable}`);
   else if (job.live) {

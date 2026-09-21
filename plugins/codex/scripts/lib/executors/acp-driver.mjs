@@ -11,6 +11,7 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "../broker-endpoint.mj
 import { ExecutorEventQueue } from "../executor-port.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
+import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
 
 const CAPABILITIES = Object.freeze({
   resumeSession: true,
@@ -186,6 +187,7 @@ export class AcpExecutorJobPort {
     this.modeId = options.modeId ?? null;
     this.modelId = options.modelId ?? null;
     this.effortId = options.effortId ?? null;
+    this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
     this.onProgress = options.onProgress ?? null;
     this.queue = new ExecutorEventQueue();
     this.permissions = new Map();
@@ -209,7 +211,8 @@ export class AcpExecutorJobPort {
   }
 
   async initialize() {
-    this.runtime = new JobRuntime();
+    this.runtime = new JobRuntime({ threadRecords: this.threadRecords,
+      executorIdentity: { kind: "acp", command: this.command, args: this.args } });
     this.owner = {};
     await this.runtime.register(this.owner, this.cwd, this.job.id);
     this.adapter = new AcpEventAdapter(async (event) => {
@@ -250,8 +253,9 @@ export class AcpExecutorJobPort {
 
   events() { return this.queue; }
 
-  sessionResult(sessionId, response) {
+  async sessionResult(sessionId, response) {
     this.sessionId = sessionId;
+    await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
     this.adapter.bindSession(sessionId);
     this.modes = response.modes ?? null;
     this.configOptions = response.configOptions ?? [];
@@ -341,7 +345,7 @@ export class AcpExecutorJobPort {
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
     await this.applyModel(response.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(response.sessionId, response, request.effortId ?? this.effortId);
-    return { ...this.sessionResult(response.sessionId, response), effortId };
+    return { ...await this.sessionResult(response.sessionId, response), effortId };
   }
 
   async resumeSession(request) {
@@ -351,7 +355,7 @@ export class AcpExecutorJobPort {
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
-    return { ...this.sessionResult(request.sessionId, response), effortId };
+    return { ...await this.sessionResult(request.sessionId, response), effortId };
   }
 
   async setMode(request) {

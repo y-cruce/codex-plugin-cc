@@ -190,7 +190,7 @@ test("resuming one thread routes the next job to its own history, view, follow a
 
   const firstHistory = await history(firstId);
   const secondHistory = await history(secondId);
-  assert.equal(firstHistory.committedSeq, firstTerminalHistory.committedSeq, "job A history grew after its terminal event");
+  assert.ok(BigInt(firstHistory.committedSeq) > BigInt(firstTerminalHistory.committedSeq));
   assert.ok(secondHistory.events.some((event) => event.type === "turn.started"));
   assert.ok(secondHistory.events.some((event) => event.type === "command.completed"));
   assert.ok(secondHistory.events.some((event) => event.type === "message.delta"));
@@ -198,12 +198,13 @@ test("resuming one thread routes the next job to its own history, view, follow a
   assert.ok(firstHistory.events.every((event) => event.jobId === firstId));
   assert.ok(secondHistory.events.every((event) => event.jobId === secondId));
 
-  const firstView = JSON.parse(fs.readFileSync(path.join(h.stateDir, "job-history", firstId, "live-view.json"), "utf8"));
-  const secondView = JSON.parse(fs.readFileSync(path.join(h.stateDir, "job-history", secondId, "live-view.json"), "utf8"));
-  assert.equal(firstView.status, "completed");
-  assert.equal(secondView.status, "completed");
-  assert.equal(firstView.turnId, firstRunning.turnId);
-  assert.equal(secondView.turnId, secondRunning.turnId);
+  const firstViewPath = h.cli("observe", "view-path", firstId).stdout.trim();
+  const secondViewPath = h.cli("observe", "view-path", secondId).stdout.trim();
+  assert.equal(firstViewPath, secondViewPath);
+  const threadView = JSON.parse(fs.readFileSync(firstViewPath, "utf8"));
+  assert.equal(threadView.status, "completed");
+  assert.equal(threadView.turnId, secondRunning.turnId);
+  assert.deepEqual(threadView.rounds.map((round) => round.jobId), [firstId, secondId]);
   assert.match(firstFollowed.stdout, /observation conclusion/);
   assert.match(secondFollowed.stdout, /observation conclusion/);
 

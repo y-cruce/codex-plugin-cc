@@ -8,10 +8,11 @@ import { renderStoredJobResult } from "./render.mjs";
 import { readHistory, cursorFor, cleanupHistory } from "./job-event-store.mjs";
 import { createLiveView, renderJobEvent } from "./job-event-model.mjs";
 import { ObservationClient } from "./observation-client.mjs";
-import { readObservationJson, observationRoots, observationJobs, resolveObservationRoot } from "./observation-paths.mjs";
+import { readObservationJson, observationRoots, observationJobs, observationThreads, resolveObservationRoot } from "./observation-paths.mjs";
 import { liveStatus } from "./live-commands.mjs";
 import { claimQuestion } from "./question-report.mjs";
 import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
+import { resolveJobHistory } from "./history-resolver.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ");
@@ -20,7 +21,8 @@ const endpointUnavailable = (error) => ["BROKER_UNAVAILABLE", "ENOENT", "ECONNRE
   /broker disconnected/i.test(error?.message ?? "");
 
 async function metadata(location, id) {
-  return readObservationJson(path.join(location.stateDir, "job-history", id, "manifest.json"));
+  const history = await resolveJobHistory(location.cwd, id, { stateDir: location.stateDir });
+  return readObservationJson(history.manifest);
 }
 
 async function findJob(location, id) {
@@ -32,6 +34,10 @@ async function findJob(location, id) {
 
 function history(location, id, options = {}) {
   return readHistory(location.cwd, id, { ...options, stateDir: location.stateDir });
+}
+
+function cursorManifest(page, jobId) {
+  return page.recordId ? { recordId: page.recordId, streamId: page.streamId } : { jobId, streamId: page.streamId };
 }
 
 async function write(text) {
@@ -49,14 +55,15 @@ function prefix(job) {
 async function questionResolvedLater(event, job, location, page) {
   if (BigInt(event.seq) > BigInt(page.committedSeq)) return false;
   const requestId = String(event.payload.requestId);
-  let after = cursorFor({ jobId: job.id, streamId: page.streamId }, event.seq);
+  let after = cursorFor(cursorManifest(page, job.id), event.seq);
   while (true) {
     const future = await history(location, job.id, { after, limit: 256 });
     for (const candidate of future.events) {
       if (["question.resolved", "question.closed"].includes(candidate.type) && String(candidate.payload.requestId) === requestId) return true;
       if (["job.completed", "job.failed", "job.cancelled"].includes(candidate.type)) return true;
     }
-    if (!future.events.length || future.events.at(-1).seq === future.committedSeq) return false;
+    if (future.caughtUp === true || (future.caughtUp === undefined &&
+      (!future.events.length || future.events.at(-1).seq === future.committedSeq))) return false;
     after = future.nextCursor;
   }
 }
@@ -89,8 +96,9 @@ async function eventExit(event, job, until, location, page) {
   return null;
 }
 
-async function follow(location, job, options) {
+export async function follow(location, job, options, dependencies = {}) {
   const { cwd } = location;
+  const output = dependencies.write ?? write;
   const followStartedAt = Date.now();
   const until = options.until;
   if (until !== undefined && until !== "done") throw errorFor("INVALID_ARGUMENT", "--until must be done");
@@ -129,7 +137,7 @@ async function follow(location, job, options) {
   }
   try { initial ??= await history(location, job.id, { after: options.after, limit: 1 }); }
   catch (error) { client?.close(); throw error; }
-  let cursor = options.after ?? cursorFor({ jobId: job.id, streamId: initial.streamId }, BigInt(initial.earliestSeq) - 1n);
+  let cursor = options.after ?? cursorFor(cursorManifest(initial, job.id), BigInt(initial.earliestSeq) - 1n);
   let finished = false;
   let lastProgress = followStartedAt;
   let lastThread = job.executorSessionId ?? job.threadId;
@@ -142,10 +150,10 @@ async function follow(location, job, options) {
   const finish = async (line) => {
     if (finished) return;
     finished = true;
-    await write(`CURSOR: ${cursor}\n${line}\n`);
+    await output(`CURSOR: ${cursor}\n${line}\n`);
     if (line.startsWith("DONE ") && !options.quiet) {
       const stored = await readObservationJson(path.join(location.stateDir, "jobs", `${job.id}.json`)) ?? (await metadata(location, job.id))?.metadata?.job;
-      await write(renderStoredJobResult(stored ?? job, stored));
+      await output(renderStoredJobResult(stored ?? job, stored));
     }
     resolveDone();
   };
@@ -153,11 +161,11 @@ async function follow(location, job, options) {
     for (const event of page.events) {
       if (finished) return;
       const canonical = upgradeLegacyJobEvent({ ...event, jobId: event.jobId ?? job.id });
-      cursor = cursorFor({ jobId: job.id, streamId: page.streamId }, canonical.seq);
+      cursor = cursorFor(cursorManifest(page, job.id), canonical.seq);
       lastThread = canonical.identity.sessionId ?? lastThread;
       lastProgress = Math.max(lastProgress, Date.parse(canonical.receivedAt) || 0);
       const text = renderJobEvent(canonical, { verbose: Boolean(options.verbose) });
-      if (text != null && !options.quiet) await write(`${clock(canonical.occurredAt)} ${text}\n`);
+      if (text != null && !options.quiet) await output(`${clock(canonical.occurredAt)} ${text}\n`);
       const exit = await eventExit(canonical, job, until, location, page);
       if (exit) { await finish(exit); return; }
     }
@@ -167,7 +175,8 @@ async function follow(location, job, options) {
     while (!finished) {
       const page = await history(location, job.id, { after: cursor, limit: 256 });
       await processPage(page);
-      if (!page.events.length || page.events.at(-1).seq === page.committedSeq) return;
+      if (page.caughtUp === true || (page.caughtUp === undefined &&
+        (!page.events.length || page.events.at(-1).seq === page.committedSeq))) return;
     }
   };
   const finishFromStoredJob = async () => {
@@ -180,7 +189,7 @@ async function follow(location, job, options) {
   const recoverUnavailable = async () => {
     await replayCommitted();
     if (finished || await finishFromStoredJob()) return;
-    await write(`CURSOR: ${cursor}\n`);
+    await output(`CURSOR: ${cursor}\n`);
     throw errorFor("BROKER_UNAVAILABLE", "Broker disconnected; continue with --after");
   };
   const enqueue = (action) => {
@@ -196,9 +205,9 @@ async function follow(location, job, options) {
   const outputError = (error) => { finished = true; client?.close(); rejectDone(error); };
   process.stdout.on("error", outputError);
   try {
-    if (!options.quiet && initial.continuity !== "complete") await write(`${clock(new Date().toISOString())} History is partial; earliest retained sequence ${initial.earliestSeq}\n`);
+    if (!options.quiet && initial.continuity !== "complete") await output(`${clock(new Date().toISOString())} History is partial; earliest retained sequence ${initial.earliestSeq}\n`);
     if (options.quiet && client) heartbeat = setInterval(() => enqueue(async () => {
-      if (!finished) await write(`… ${clock(new Date().toISOString())} still running\n`);
+      if (!finished) await output(`… ${clock(new Date().toISOString())} still running\n`);
     }), 60000);
     if (maxSeconds != null && !terminal(job.status)) timeout = setTimeout(() => enqueue(() => finish(`TIMEOUT ${prefix(job)} thread=${lastThread ?? "unknown"} ${maxSeconds}s elapsed, continue with --after`)), Math.max(0, maxSeconds * 1000 - (Date.now() - followStartedAt)));
     stalled = setInterval(() => {
@@ -280,14 +289,44 @@ export async function handleObserve(argv) {
       await write(`${JSON.stringify({ jobs: result })}\n`);
       return;
     }
+    if (command === "threads") {
+      const roots = process.env.CLAUDE_PLUGIN_DATA ? [resolveStateDir(cwd)] : await observationRoots(cwd);
+      const selected = new Map();
+      for (const stateDir of roots) {
+        for (const entry of await observationThreads(stateDir)) {
+          if (!selected.has(entry.thread.id) || selected.get(entry.thread.id).mtime < entry.mtime) {
+            selected.set(entry.thread.id, entry);
+          }
+        }
+      }
+      const result = [];
+      for (const entry of selected.values()) {
+        const thread = entry.thread;
+        if (thread.layout === "legacy" && !await readObservationJson(thread.viewPath)) {
+          const job = (await observationJobs(entry.stateDir)).find((candidate) => candidate.job.id === thread.jobId)?.job;
+          if (job) {
+            const view = createLiveView(job);
+            view.history.continuity = "legacy";
+            await fs.mkdir(path.dirname(thread.viewPath), { recursive: true });
+            const temporary = `${thread.viewPath}.${process.pid}.tmp`;
+            await fs.writeFile(temporary, `${JSON.stringify(view)}\n`);
+            await fs.rename(temporary, thread.viewPath);
+          }
+        }
+        result.push(thread);
+      }
+      await write(`${JSON.stringify({ threads: result })}\n`);
+      return;
+    }
     const id = positionals[0];
     if (!id) throw errorFor("INVALID_ARGUMENT", "Pass a job id");
     const stateDir = await resolveObservationRoot(cwd, id);
     const location = { cwd, stateDir, fallback: stateDir !== resolveStateDir(cwd) };
     const job = await findJob(location, id);
     if (command === "view-path") {
-      const file = path.join(stateDir, "job-history", id, "live-view.json");
-      if (!(await metadata(location, id)) && !location.fallback) {
+      const historyLocation = await resolveJobHistory(cwd, id, { stateDir });
+      const file = historyLocation.liveView;
+      if (!(await metadata(location, id)) && !location.fallback && historyLocation.layout === "legacy") {
         const view = createLiveView(job);
         view.history.continuity = "legacy";
         await fs.mkdir(path.dirname(file), { recursive: true });
@@ -309,12 +348,13 @@ export async function handleObserve(argv) {
         const events = page.events.filter((event) => BigInt(event.seq) <= BigInt(committedSeq));
         for (const event of events) await write(`${JSON.stringify(event)}\n`);
         remaining -= events.length;
-        after = events.length ? cursorFor({ jobId: id, streamId: page.streamId }, events.at(-1).seq) : after ?? page.nextCursor;
-        if (!events.length || events.at(-1).seq === committedSeq) break;
+        after = page.nextCursor;
+        if (page.caughtUp === true || (page.caughtUp === undefined &&
+          (!events.length || events.at(-1).seq === committedSeq))) break;
       } while (remaining > 0);
       await write(`${JSON.stringify({ type: "end", nextCursor: after, committedSeq })}\n`);
     } else if (command === "follow") await follow(location, job, options);
-    else throw errorFor("INVALID_ARGUMENT", "Usage: observe list | replay | view-path | follow");
+    else throw errorFor("INVALID_ARGUMENT", "Usage: observe list | threads | replay | view-path | follow");
   } catch (error) {
     const payload = { type: "error", code: error.code ?? "OBSERVATION_FAILED", message: error.message,
       earliestAvailableCursor: error.earliestAvailableCursor };

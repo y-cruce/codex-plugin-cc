@@ -4,10 +4,11 @@ import path from "node:path";
 
 import { assertCanonicalEventDraft } from "./executor-events.mjs";
 import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
+import { resolveJobHistory, resolveLegacyJobHistory, stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
+import { historyCursorVersion, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
 
 const ACTIVE_STORES = new Map();
-const HISTORY_ROOTS = new Map();
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
 
@@ -17,7 +18,7 @@ function writerAlive(manifest) {
   catch (error) { return error.code !== "ESRCH"; }
 }
 
-async function acquireWriter(directory) {
+export async function acquireWriter(directory) {
   const lease = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
   const temporary = path.join(directory, `.writer-${process.pid}-${randomUUID()}.tmp`);
   const lock = path.join(directory, "writer.lock");
@@ -46,7 +47,7 @@ async function acquireWriter(directory) {
   }
 }
 
-async function releaseWriter(directory, lease) {
+export async function releaseWriter(directory, lease) {
   const lock = path.join(directory, "writer.lock");
   try {
     if (await fs.readFile(lock, "utf8") === lease) await fs.unlink(lock);
@@ -54,12 +55,7 @@ async function releaseWriter(directory, lease) {
 }
 
 export function resolveHistoryDir(cwd, jobId) {
-  if (!jobId || path.basename(jobId) !== jobId || jobId === "." || jobId === "..") {
-    throw historyError("UNKNOWN_JOB", `Unknown job: ${jobId}`);
-  }
-  const key = `${process.env.CLAUDE_PLUGIN_DATA ?? ""}\0${path.resolve(cwd)}`;
-  if (!HISTORY_ROOTS.has(key)) HISTORY_ROOTS.set(key, path.join(resolveStateDir(cwd), "job-history"));
-  return path.join(HISTORY_ROOTS.get(key), jobId);
+  return resolveLegacyJobHistory(cwd, jobId).directory;
 }
 
 export function resolveLiveViewPath(cwd, jobId) {
@@ -71,7 +67,10 @@ function historyError(code, message, details = {}) {
 }
 
 export function cursorFor(manifest, seq) {
-  return Buffer.from(JSON.stringify({ protocolVersion: 1, jobId: manifest.jobId, streamId: manifest.streamId, lastAppliedSeq: String(seq) })).toString("base64url");
+  const value = manifest.recordId
+    ? { protocolVersion: 2, recordId: manifest.recordId, streamId: manifest.streamId, lastAppliedSeq: String(seq) }
+    : { protocolVersion: 1, jobId: manifest.jobId, streamId: manifest.streamId, lastAppliedSeq: String(seq) };
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
 function parseCursor(manifest, cursor) {
@@ -79,7 +78,11 @@ function parseCursor(manifest, cursor) {
   let value;
   try {
     value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (value.protocolVersion !== 1 || value.jobId !== manifest.jobId || !/^(0|[1-9]\d*)$/.test(value.lastAppliedSeq)) throw new Error();
+    const version = historyCursorVersion(value);
+    const identityMatches = manifest.recordId
+      ? version === THREAD_RECORD_CURSOR_VERSION && value.recordId === manifest.recordId
+      : version === LEGACY_CURSOR_VERSION && value.jobId === manifest.jobId;
+    if (!identityMatches || !/^(0|[1-9]\d*)$/.test(value.lastAppliedSeq)) throw new Error();
   } catch {
     throw historyError("INVALID_CURSOR", "Invalid history cursor");
   }
@@ -100,7 +103,7 @@ async function syncDirectory(directory) {
   try { await handle.sync(); } finally { await handle.close(); }
 }
 
-async function atomicJson(file, value) {
+export async function atomicJson(file, value) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   const handle = await fs.open(temporary, "wx");
   try {
@@ -163,16 +166,17 @@ async function readBlock(handle, block) {
 }
 
 export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
-  const defaultDirectory = resolveHistoryDir(cwd, jobId);
-  const directory = stateDir ? path.join(stateDir, "job-history", jobId) : defaultDirectory;
+  const location = await resolveJobHistory(cwd, jobId, { stateDir });
+  const directory = location.directory;
   const manifest = await loadManifest(directory);
-  if (manifest.tombstone && TERMINAL.has(manifest.metadata.status ?? manifest.metadata.job?.status)) return true;
+  if (location.layout === "legacy" && manifest.tombstone && TERMINAL.has(manifest.metadata.status ?? manifest.metadata.job?.status)) return true;
   for (const segment of [...manifest.segments].reverse()) {
     const handle = await fs.open(path.join(directory, "segments", segment.file), "r");
     try {
       const blocks = segment.blocks ?? [{ offset: 0, bytes: segment.bytes, lastSeq: segment.lastSeq }];
       for (const block of [...blocks].reverse()) {
-        if ((await readBlock(handle, block)).some((event) => TERMINAL_EVENTS.has(event.type))) return true;
+        if ((await readBlock(handle, block)).some((event) => TERMINAL_EVENTS.has(event.type) &&
+          (location.layout === "legacy" || event.jobId === jobId))) return true;
       }
     } finally {
       await handle.close();
@@ -182,8 +186,17 @@ export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
 }
 
 export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDir } = {}) {
-  const defaultDirectory = resolveHistoryDir(cwd, jobId);
-  const directory = stateDir ? path.join(stateDir, "job-history", jobId) : defaultDirectory;
+  const location = await resolveJobHistory(cwd, jobId, { stateDir });
+  return readHistoryLocation(location, { after, limit, roundId: location.layout === "thread-record" ? jobId : null });
+}
+
+export async function readRecordHistory(cwd, recordId, { after, limit = Infinity, stateDir } = {}) {
+  const root = stateDir ?? stateDirFor(cwd);
+  return readHistoryLocation(threadRecordPaths(root, recordId), { after, limit, roundId: null });
+}
+
+async function readHistoryLocation(location, { after, limit, roundId }) {
+  const directory = location.directory;
   // Retention publishes its new manifest before deleting old segments. Retry a
   // read crossing that boundary so callers receive CURSOR_EXPIRED, not ENOENT.
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -191,25 +204,34 @@ export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDi
     const afterSeq = parseCursor(manifest, after);
     if (!(limit === Infinity || (Number.isInteger(limit) && limit > 0))) throw historyError("INVALID_LIMIT", "limit must be a positive integer");
     const events = [];
+    let scannedSeq = afterSeq;
+    let scanned = 0;
     try {
+      let full = false;
       for (const segment of manifest.segments) {
         if (BigInt(segment.lastSeq) <= afterSeq) continue;
-        for (const event of await readSegment(directory, segment, afterSeq, limit - events.length)) {
-          if (BigInt(event.seq) > afterSeq && BigInt(event.seq) <= BigInt(manifest.committedSeq)) events.push(event);
-          if (events.length >= limit) break;
+        for (const event of await readSegment(directory, segment, afterSeq)) {
+          if (BigInt(event.seq) > BigInt(manifest.committedSeq)) break;
+          scannedSeq = BigInt(event.seq);
+          scanned += 1;
+          if (!roundId || event.jobId === roundId) events.push(event);
+          if (scanned >= limit) { full = true; break; }
         }
-        if (events.length >= limit) break;
+        if (full) break;
       }
-      return {
+      const result = {
         events,
-        nextCursor: cursorFor(manifest, events.at(-1)?.seq ?? afterSeq),
+        nextCursor: cursorFor(manifest, scannedSeq),
         committedSeq: manifest.committedSeq,
         earliestSeq: manifest.earliestSeq,
         streamId: manifest.streamId,
         continuity: manifest.continuity,
         metadata: manifest.metadata,
-        closed: manifest.closed
+        closed: manifest.closed,
+        ...(manifest.recordId ? { recordId: manifest.recordId,
+          caughtUp: scannedSeq >= BigInt(manifest.committedSeq) } : {})
       };
+      return result;
     } catch (error) {
       if (error.code !== "ENOENT" || attempt === 2) throw error;
     }
@@ -220,7 +242,8 @@ export class JobEventStore {
   constructor(cwd, jobId, options = {}) {
     this.cwd = cwd;
     this.jobId = jobId;
-    this.directory = resolveHistoryDir(cwd, jobId);
+    this.directory = options.directory ?? resolveHistoryDir(cwd, jobId);
+    this.threadRecord = options.threadRecord ?? null;
     this.options = {
       flushMs: 50,
       batchBytes: 262144,
@@ -267,11 +290,22 @@ export class JobEventStore {
       }
     } catch (error) {
       if (error.code !== "UNKNOWN_JOB") throw error;
-      this.manifest = {
+      this.manifest = this.threadRecord ? {
+        schemaVersion: 1, recordId: this.threadRecord.recordId,
+        workspaceRoot: this.threadRecord.workspaceRoot, executorKey: this.threadRecord.executorKey,
+        threadId: this.threadRecord.threadId, activeRoundId: null, streamId: randomUUID(),
+        earliestSeq: "1", committedSeq: "0", continuity: "complete",
+        segments: [], nextSegment: 1, metadata: {}, createdAt: new Date().toISOString()
+      } : {
         schemaVersion: 1, jobId: this.jobId, streamId: randomUUID(),
         earliestSeq: "1", committedSeq: "0", continuity: "complete",
         segments: [], nextSegment: 1, metadata: {}, createdAt: new Date().toISOString()
       };
+    }
+    if (this.threadRecord && (this.manifest.recordId !== this.threadRecord.recordId ||
+      this.manifest.workspaceRoot !== this.threadRecord.workspaceRoot || this.manifest.executorKey !== this.threadRecord.executorKey ||
+      this.manifest.threadId !== this.threadRecord.threadId)) {
+      throw historyError("HISTORY_RECORD_MISMATCH", "Thread record identity does not match its manifest");
     }
     this.checkpoint = this.manifest.checkpoint
       ? JSON.parse(await fs.readFile(path.join(this.directory, this.manifest.checkpoint.file), "utf8"))
@@ -295,8 +329,9 @@ export class JobEventStore {
     const canonical = event?.schemaVersion === 2
       ? structuredClone(event)
       : upgradeLegacyJobEvent({ ...structuredClone(event), jobId: event?.jobId ?? this.jobId });
-    const record = { ...canonical, schemaVersion: 2, streamId: this.manifest.streamId, jobId: this.jobId,
-      identity: { ...canonical.identity, jobId: this.jobId }, seq: String(this.nextSeq) };
+    const jobId = this.threadRecord ? canonical.jobId : this.jobId;
+    const record = { ...canonical, schemaVersion: 2, streamId: this.manifest.streamId, jobId,
+      identity: { ...canonical.identity, jobId }, seq: String(this.nextSeq) };
     assertCanonicalEventDraft(record);
     const bytes = Buffer.byteLength(encodeBatch([record]));
     if (bytes > this.options.maxJobBytes) throw historyError("EVENT_TOO_LARGE", "One event exceeds the job history budget");
@@ -444,6 +479,15 @@ export class JobEventStore {
     await this.flush();
     this.chain = this.chain.then(async () => {
       this.manifest.metadata = { ...this.manifest.metadata, ...metadata };
+      await atomicJson(path.join(this.directory, "manifest.json"), this.manifest);
+    });
+    return this.chain;
+  }
+
+  async updateManifest(patch) {
+    await this.flush();
+    this.chain = this.chain.then(async () => {
+      this.manifest = { ...this.manifest, ...patch };
       await atomicJson(path.join(this.directory, "manifest.json"), this.manifest);
     });
     return this.chain;

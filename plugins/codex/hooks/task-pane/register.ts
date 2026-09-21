@@ -4,7 +4,8 @@ import { isOver } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
-type Job = { id: string; label: string | null; status: string; startedAt: string | null }
+type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
+  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string }
 type Receipt = { cursor?: string; terminal?: string }
 type Ledger = Record<string, Receipt>
 type State = {
@@ -28,6 +29,7 @@ type State = {
   selected: string | null
   followed: Set<string>
   unreadable: Map<string, number>
+  owners: Map<string, string[]>
   pending: { jobId: string; cwd: string; text: string }[]
   worker: string
   toEnd: boolean
@@ -175,8 +177,11 @@ async function discoverRoots($: EngineInterface, state: State) {
         try {
           const stat = await $.fs.stat(path)
           if (stat.mtimeMs < state.since) continue
+          // Whoever dispatched it: a repository another session is working in
+          // is a repository this pane has something to show, and the rows say
+          // whose the work is. The mtime floor above keeps old jobs out.
           const job = JSON.parse(await $.fs.read(path)) as { sessionId?: string; workspaceRoot?: string }
-          if (job.sessionId === state.sessionId && job.workspaceRoot) roots.add(job.workspaceRoot)
+          if (job.workspaceRoot) roots.add(job.workspaceRoot)
         } catch { /* a half-written or foreign job file is skipped */ }
       }
     }
@@ -193,9 +198,11 @@ async function refreshViews($: EngineInterface, state: State) {
       const stat = await $.fs.stat(path)
       if (stat.mtimeMs === state.mtimes.get(id)) continue
       const view = JSON.parse(await $.fs.read(path)) as LiveView
-      if (view.schemaVersion !== 1 || view.jobId !== id) continue
+      if (view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
+      const owners = state.owners.get(id) ?? (view.rounds ?? []).map(round => round.sessionId).filter((sessionId): sessionId is string => Boolean(sessionId))
+      const foreign = owners.length > 0 && !owners.includes(state.sessionId)
       state.mtimes.set(id, stat.mtimeMs)
-      state.views.set(id, view)
+      state.views.set(id, { ...view, foreign })
       changed = true
     } catch {
       // A view whose file is gone is a job that was pruned, and the comment
@@ -218,13 +225,13 @@ async function poll($: EngineInterface, state: State) {
   try {
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     state.ticks += 1
-    const found: { job: Job; cwd: string }[] = []
+    const found: { thread: Thread; cwd: string }[] = []
     for (const root of state.roots) {
       if ((state.unreadable.get(root) ?? 0) >= GIVE_UP) continue
       try {
-        const listed = JSON.parse(await companion($, state, root, ['list', '--json'])) as { jobs: Job[] }
+        const listed = JSON.parse(await companion($, state, root, ['threads', '--json'])) as { threads: Thread[] }
         state.unreadable.delete(root)
-        for (const job of listed.jobs) found.push({ job, cwd: root })
+        for (const thread of listed.threads) found.push({ thread, cwd: root })
       } catch (error) {
         // Said once, then the root is left alone. This runs every two seconds,
         // and a repository whose companion cannot start -- a missing dependency
@@ -238,15 +245,20 @@ async function poll($: EngineInterface, state: State) {
         }
       }
     }
+    for (const { thread } of found) {
+      state.paths.set(thread.id, thread.viewPath)
+      state.owners.set(thread.id, thread.sessionIds)
+    }
     // Before the loop, not after: the reconciliation below reads these views for
     // the text it reports, and a round that refreshed them afterwards had none
     // to read on its first pass and sent an empty line.
     await refreshViews($, state)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
-    state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd))
+    state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
     await ensureMonitors($, state, state.liveRoots, await $.clock.now())
-    for (const { job, cwd } of found) {
+    for (const { thread, cwd } of found) {
+      const job = { id: thread.jobId, label: thread.label, status: thread.status }
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
       // give up only once it has failed a few polls in a row.
@@ -256,18 +268,21 @@ async function poll($: EngineInterface, state: State) {
         // existed, or before a reload rebuilt it: there is nothing to wake the
         // director for, so its terminal state is recorded without a line.
         const first = !state.ledger[job.id]
+        // Shown, never announced. A thread another session dispatched is drawn
+        // in the pane so its state can be seen, but waking this director for it
+        // would interrupt one window's work with another window's task.
+        const foreign = thread.sessionIds.length > 0 && !thread.sessionIds.includes(state.sessionId)
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
-        if (!state.paths.has(job.id)) {
-          state.paths.set(job.id, (await companion($, state, cwd, ['view-path', job.id])).trim())
-        }
-        const view = state.views.get(job.id)
+        const view = state.views.get(thread.id)
+        if (view && Boolean(view.foreign) !== foreign) state.views.set(thread.id, { ...view, foreign })
         // The owner process writes the ending, so a job whose owner died never
         // wrote one and its view says running for ever -- the pane kept a task
         // killed an hour ago in its tabs and counted it among the live ones.
         // The store knows better, and it is what the listing reports.
         if (view && DONE.includes(job.status) && !isOver(view)) {
-          state.views.set(job.id, { ...view, status: job.status as LiveView['status'], endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
+          state.views.set(thread.id, { ...view, status: job.status as LiveView['status'], activeRoundId: null,
+            endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
         }
         {
           // Read during a director turn as well. A turn can run for half an
@@ -284,7 +299,7 @@ async function poll($: EngineInterface, state: State) {
           // past them -- which is the whole point, since a cursor catching up
           // on a job that finished hours ago would otherwise replay every note
           // and question it ever wrote as though they had just arrived.
-          const announce = !DONE.includes(job.status)
+          const announce = !DONE.includes(job.status) && !foreign
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
             const line = pushLine(job.label ?? job.id, event, view)
             if (announce && line) lines.push({ jobId: job.id, cwd, text: line })
@@ -302,7 +317,7 @@ async function poll($: EngineInterface, state: State) {
         // "said once" line was said every two seconds for as long as it failed.
         state.unreadable.delete(job.id)
         if (status && receipt.terminal !== status) {
-          if (!first && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
+          if (!first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
           }
           receipt.terminal = status
@@ -423,17 +438,22 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
   }
 }
 
-// Everything this session started, newest first, dropping what ended long ago.
-function visibleJobs(state: State): LiveView[] {
+// Every thread visible to this session, newest round first, dropping what ended
+// long ago.
+function visibleThreads(state: State): LiveView[] {
   return [...state.views.values()]
     .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .sort((a, b) => {
+      const latest = (view: LiveView) => view.rounds?.find(round => round.jobId === view.latestRoundId)?.startedAt ?? view.startedAt
+      return latest(b).localeCompare(latest(a))
+    })
 }
 
 export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
+    owners: new Map<string, string[]>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
@@ -478,28 +498,28 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
-    let jobs = visibleJobs(state)
-    if (!jobs.length) {
+    let threads = visibleThreads(state)
+    if (!threads.length) {
       await poll($, state)
-      jobs = visibleJobs(state)
+      threads = visibleThreads(state)
     }
     // The pane opens whether or not anything is running: it is where tasks are
     // watched, and asking for it before dispatching one is a fair thing to do.
     const wanted = e.args.trim()
-    if (wanted && jobs.length) {
+    if (wanted && threads.length) {
       const index = Number(wanted)
-      const match = Number.isInteger(index) && index >= 1 && index <= jobs.length
-        ? jobs[index - 1]
-        : jobs.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
-      if (!match) return { text: `No task matches "${wanted}". Open tasks: ${jobs.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
-      state.selected = match.jobId
+      const match = Number.isInteger(index) && index >= 1 && index <= threads.length
+        ? threads[index - 1]
+        : threads.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
+      if (!match) return { text: `No task matches "${wanted}". Open tasks: ${threads.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
+      state.selected = match.recordId ?? match.jobId
       state.toEnd = true
     }
     state.opened = true
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
-    if (!jobs.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
-    const shown = jobs.find(view => view.jobId === state.selected) ?? jobs[0]!
+    if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
+    const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }
   })
   // Closing the pane is the person's call, so it is not reopened for them.
@@ -522,9 +542,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // while the pane has rows to scroll, so they move the trace, not the ring.
   on('ui.focus', ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const jobId = /^codex_tab_(.+)$/.exec(String(e.element ?? ''))?.[1]
-    if (jobId && jobId !== state.selected) {
-      state.selected = jobId
+    const recordId = /^codex_tab_(.+)$/.exec(String(e.element ?? ''))?.[1]
+    if (recordId && recordId !== state.selected) {
+      state.selected = recordId
       state.toEnd = true
       $.ui.invalidate('ui.render')
     }
@@ -544,22 +564,19 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // screen, and the band would offer to open one that is already open. The
     // pane asking to be drawn is the proof that it is.
     state.opened = true
-    const jobs = visibleJobs(state)
-    // A task that leaves the pane takes the focus with it, and the trace drawn
-    // in its place starts at its end: the window is where the departed task's
-    // reader left it, and a shrinking tree raises no scroll event to say so.
-    if (state.selected && !jobs.some(view => view.jobId === state.selected)) {
+    const threads = visibleThreads(state)
+    if (state.selected && !threads.some(view => (view.recordId ?? view.jobId) === state.selected)) {
       state.selected = null
       state.toEnd = true
     }
-    const select = (jobId: string) => {
-      state.selected = state.selected === jobId ? null : jobId
-      // A job is switched to in order to see what it is doing now, and its
+    const select = (recordId: string) => {
+      state.selected = state.selected === recordId ? null : recordId
+      // A thread is switched to in order to see what it is doing now, and its
       // trace is drawn whole, so the window starts at the end of it.
       state.toEnd = true
       $.ui.invalidate('ui.render')
     }
-    const tree = paneBody($.ui.resolve(e), jobs, Math.max(20, e.props.bodyColumns),
+    const tree = paneBody($.ui.resolve(e), threads, Math.max(20, e.props.bodyColumns),
       Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
     // The status line is the tree's last row and the engine scrolls the whole
     // tree, so a trace that grows carries the status off the bottom of the

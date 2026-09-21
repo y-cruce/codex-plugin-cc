@@ -252,7 +252,7 @@ test("owner-exit terminal history remains followable after runtime shutdown", as
   h.job.pid = dead.pid;
   writeJobFile(h.cwd, h.job.id, h.job);
   upsertJob(h.cwd, h.job);
-  const runtime = new JobRuntime();
+  const runtime = new JobRuntime({ threadRecords: false });
   t.after(() => runtime.close());
   await runtime.register({}, h.cwd, h.job.id);
   await runtime.reconcile();
@@ -265,7 +265,7 @@ test("owner-exit terminal history remains followable after runtime shutdown", as
 });
 
 async function seedUnfinishedHistory(h) {
-  const runtime = new JobRuntime();
+  const runtime = new JobRuntime({ threadRecords: false });
   await runtime.register({}, h.cwd, h.job.id);
   await runtime.close();
 }
@@ -282,7 +282,7 @@ test("startup reconciliation fails unfinished history whose owner exited", async
   const before = await h.cli("observe", "list", "--json");
   assert.equal(JSON.parse(before.stdout).jobs[0].status, "running");
 
-  const runtime = new JobRuntime({ historySweepMs: 0 });
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
@@ -304,7 +304,7 @@ test("startup reconciliation fails unfinished history without a job record", asy
   await seedUnfinishedHistory(h);
   fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
 
-  const runtime = new JobRuntime({ historySweepMs: 0 });
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
@@ -320,7 +320,7 @@ test("startup reconciliation preserves unfinished history with a live owner", as
   upsertJob(h.cwd, h.job);
   await seedUnfinishedHistory(h);
 
-  const runtime = new JobRuntime({ historySweepMs: 0 });
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
@@ -339,7 +339,7 @@ test("periodic reconciliation recovers an owner that exits after startup", async
   upsertJob(h.cwd, h.job);
   await seedUnfinishedHistory(h);
 
-  const runtime = new JobRuntime({ historySweepMs: 0 });
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
   assert.equal((await readHistory(h.cwd, h.job.id)).events.at(-1).type, "job.started");
@@ -356,12 +356,12 @@ test("startup reconciliation preserves recordless history owned by a live writer
   h.job.pid = process.pid;
   writeJobFile(h.cwd, h.job.id, h.job);
   upsertJob(h.cwd, h.job);
-  const owner = new JobRuntime();
+  const owner = new JobRuntime({ threadRecords: false });
   t.after(() => owner.close());
   await owner.register({}, h.cwd, h.job.id);
   fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
 
-  const runtime = new JobRuntime({ historySweepMs: 0 });
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 

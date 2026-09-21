@@ -1,6 +1,6 @@
 ---
-description: Show the stored final output for a finished Codex job in this repository
-argument-hint: '[job-id]'
+description: Show the stored final output for a finished Codex job or the newest round on a thread
+argument-hint: '[job-id] [--thread <thread-id>]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---

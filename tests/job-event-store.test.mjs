@@ -203,7 +203,7 @@ test("segment retention advances with pages sent to an active follower", async (
     status: "running", startedAt: new Date().toISOString(), createdAt: new Date().toISOString(), pid: process.pid };
   writeJobFile(cwd, job.id, job);
   upsertJob(cwd, job);
-  const runtime = new JobRuntime();
+  const runtime = new JobRuntime({ threadRecords: false });
   try {
     await runtime.register({}, cwd, job.id);
     const entry = [...runtime.jobs.values()][0];
@@ -244,7 +244,7 @@ test("runtime reports a terminal job after its final history and view are commit
   writeJobFile(cwd, job.id, job);
   upsertJob(cwd, job);
   const terminal = [];
-  const runtime = new JobRuntime({ onTerminal: (finished) => terminal.push(finished.id) });
+  const runtime = new JobRuntime({ threadRecords: false, onTerminal: (finished) => terminal.push(finished.id) });
   try {
     await runtime.register({}, cwd, job.id);
     writeJobFile(cwd, job.id, { ...job, status: "completed", completedAt: new Date().toISOString(), pid: null });

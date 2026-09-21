@@ -1,8 +1,10 @@
 import { setTimeout } from "node:timers/promises";
 import { buildStatusSnapshot, checkJobLiveness, DEFAULT_STALL_MS, lastJobProgressAt, readStoredJob } from "./job-control.mjs";
 import { acknowledgeNotifications, liveStatus } from "./live-commands.mjs";
+import { readRoundContext } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
 import { claimQuestion } from "./question-report.mjs";
+import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
 
 export const DEFAULT_QUESTION_REMIND_MS = 120000;
 
@@ -10,7 +12,8 @@ function oneLine(text) {
   return String(text ?? "").replace(/[\r\n]+/g, " ");
 }
 
-export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, questionRemindMs = DEFAULT_QUESTION_REMIND_MS, exitIdleMs = 3600000, signal } = {}, dependencies = {}) {
+export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, questionRemindMs = DEFAULT_QUESTION_REMIND_MS,
+  exitIdleMs = 3600000, signal, threadRecords = THREAD_RECORDS_ENABLED } = {}, dependencies = {}) {
   const snapshot = dependencies.snapshot ?? buildStatusSnapshot;
   const status = dependencies.status ?? liveStatus;
   const acknowledge = dependencies.acknowledge ?? acknowledgeNotifications;
@@ -19,6 +22,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const now = dependencies.now ?? Date.now;
   const progressAt = dependencies.progressAt ?? lastJobProgressAt;
   const claim = dependencies.claimQuestion ?? ((cwd, jobId, requestId) => claimQuestion(resolveStateDir(cwd), jobId, requestId));
+  const roundContext = dependencies.roundContext ?? ((cwd, jobId) => readRoundContext(cwd, jobId));
   const active = new Set();
   const questions = new Map();
   const notifications = new Set();
@@ -26,13 +30,15 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const stalls = new Map();
   let lastActiveAt = now();
   while (!signal?.aborted) {
-    const report = snapshot(cwd, { all: true });
+    const report = snapshot(cwd, { all: true, threadRecords: false });
     for (let job of [...report.running, report.latestFinished, ...report.recent].filter(Boolean)) {
       if (signal?.aborted) break;
       let running = job.status === "queued" || job.status === "running";
       if (running) active.add(job.id);
       if (!active.has(job.id)) continue;
-      let live = await status(cwd, job);
+      const context = threadRecords ? await roundContext(report.workspaceRoot ?? cwd, job.id) : null;
+      const currentRound = !context || context.layout === "legacy" || context.activeRoundId === job.id;
+      let live = currentRound ? await status(cwd, job) : null;
       if (signal?.aborted) continue;
       job = checkJobLiveness(report.workspaceRoot ?? cwd, job, live, brokerFailures, dependencies);
       const jobPrefix = `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;

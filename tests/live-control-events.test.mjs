@@ -77,7 +77,8 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   const job = await waitFor(() => {
     const result = h.cli("status");
     assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout).running.find((item) => item.pid === child.pid && item.threadId && item.turnId);
+    const snapshot = JSON.parse(result.stdout);
+    return (snapshot.threads ?? snapshot.running).find((item) => item.pid === child.pid && item.threadId && item.turnId);
   });
   return { job, done, child };
 }
@@ -221,7 +222,8 @@ test("task sandbox and network options are persisted and preserved through inter
   }
   const readonly = h.cli("task", "--write", "--sandbox", "read-only", "initial");
   assert.equal(readonly.status, 0, readonly.stderr);
-  const job = JSON.parse(h.cli("status").stdout).latestFinished;
+  const snapshot = JSON.parse(h.cli("status").stdout);
+  const job = snapshot.threads?.find((thread) => thread.status !== "queued" && thread.status !== "running") ?? snapshot.latestFinished;
   assert.equal(job.sandbox, "read-only");
   assert.equal(job.write, false);
   const started = h.requests().find((item) => item.method === "turn/start" && item.params.threadId === job.threadId);

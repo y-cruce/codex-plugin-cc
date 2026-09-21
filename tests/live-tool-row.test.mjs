@@ -195,7 +195,7 @@ describe('live ToolUse row', () => {
       { seq: '2', at: data.startedAt, type: 'message.completed', text: 'assistant: first line second line…' },
       { seq: '3', at: data.startedAt, type: 'reasoning.completed', text: 'reasoning: older thought' },
     ];
-    const tree = liveTree($.ui.resolve(row()), data, 40, 0);
+    const tree = liveTree($.ui.resolve(row()), data, 40, 0, undefined, undefined, 200);
     const rows = rowsOf(tree).map(node => ({ text: textOf(node), wrap: node.props?.wrap }));
     const command = rows.find(r => r.text.startsWith('● $ xxx'));
     assert.equal(command.wrap, 'truncate-middle');
@@ -669,7 +669,7 @@ describe('Markdown and prompt footer', () => {
       assert.equal(markdown(ui, source + fence + '\n\n', {}, '', 100, true)[0].type, 'Code');
     }
   });
-  test('switches newest delta tables to columns on completion and always renders result cards as Markdown', async ($, on) => {
+  test('keeps transcript message previews compact and always renders result cards as Markdown', async ($, on) => {
     const { state, clock } = world($, on);
     const data = fixture(); data.activeCommands = []; data.files = [];
     data.lastMessage.text = '| Name | Detail |\n|--|--|\n| file | [a](/x/y) |';
@@ -678,7 +678,7 @@ describe('Markdown and prompt footer', () => {
     await $.ui.render(row()); await clock.settle();
     let tree = await $.ui.render(row());
     assert.match(textOf(tree), /› older/);
-    assert.equal(textOf(rowsOf(tree).at(-1)), '› …');
+    assert.equal(textOf(rowsOf(tree).at(-1)), '…');
     assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
     const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
     assert.deepEqual(rowsOf(result).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);
@@ -686,8 +686,8 @@ describe('Markdown and prompt footer', () => {
     state.text = JSON.stringify(data); state.mtime++;
     await clock.advance(500);
     tree = await $.ui.render(row());
-    assert.deepEqual(rowsOf(tree).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);
-    assert.doesNotMatch(textOf(tree), /\|--|\/x\/y/);
+    assert.equal(textOf(rowsOf(tree).at(-1)), '› truncated');
+    assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
   });
   test('renders inline bold, both italics, cyan code and link labels in wrapping paragraphs', ($, on) => {
     world($, on);
@@ -749,7 +749,7 @@ describe('Markdown and prompt footer', () => {
       { type: 'reasoning.completed', text: 'reasoning: **plain** `raw`' },
     ];
     const ui = $.ui.resolve(row());
-    let tree = liveTree(ui, data, 120, 0);
+    let tree = liveTree(ui, data, 120, 0, undefined, undefined, 200);
     assert.match(textOf(tree), /› older\n \n› Full answer\nconst full = true/);
     // The trace shows the answer and the work; the thinking behind it stays out.
     assert.doesNotMatch(textOf(tree), /plain|raw/);
@@ -871,7 +871,7 @@ describe('table layout, body indent and startup noise', () => {
     data.lastMessage.text = source;
     data.tail.push({ type: 'other', text: 'x'.repeat(100) });
     for (const result of [undefined, { output: 'CURSOR: abc123456' }]) {
-      const tree = liveTree(ui, data, 26, 0, undefined, result);
+      const tree = liveTree(ui, data, 26, 0, undefined, result, result ? undefined : 200);
       assert.equal(tree.children.length, 2);
       assert.match(textOf(tree.children[0]), /^● Codex/);
       const body = tree.children[1];

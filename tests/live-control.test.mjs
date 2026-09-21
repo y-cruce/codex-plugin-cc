@@ -185,7 +185,8 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   const job = await waitFor(() => {
     const result = h.cli("status");
     assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout).running.find((item) => item.pid === child.pid && item.threadId && item.turnId);
+    const snapshot = JSON.parse(result.stdout);
+    return (snapshot.threads ?? snapshot.running).find((item) => item.pid === child.pid && item.threadId && item.turnId);
   });
   return { job, done, child };
 }

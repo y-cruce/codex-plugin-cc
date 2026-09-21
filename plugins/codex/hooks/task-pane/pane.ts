@@ -36,43 +36,42 @@ function tabLabel(text: string, columns: number): string {
 
 export function paneBody(
   ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Button'>,
-  jobs: LiveView[],
+  threads: LiveView[],
   columns: number,
   rows: number,
   now: number,
   selected: string | null,
-  onSelect: (jobId: string) => void,
+  onSelect: (recordId: string) => void,
   background?: string,
 ) {
   const { Box, Text, Button } = ui
   const width = Math.max(24, columns)
-  if (!jobs.length) {
+  if (!threads.length) {
     return Box({ flexDirection: 'column', backgroundColor: background, width: columns, height: rows, children: [
       Text({ dimColor: true, children: 'No tasks dispatched from this session yet.' }),
       Box({ flexGrow: 1 }),
     ] })
   }
-  // One task is always in view: the height belongs to its trace, not to a list
-  // of tasks each spending two rows on itself.
-  const focused = jobs.find(data => data.jobId === selected) ?? jobs[0]!
+  const focused = threads.find(data => (data.recordId ?? data.jobId) === selected) ?? threads[0]!
 
-  // The list sits at the foot, a task to a row, because the pane follows the end
+  // The list sits at the foot, a thread to a row, because the pane follows the end
   // of a growing trace: whatever is last stays in view, and a row across the top
   // does not -- it scrolled away as soon as the task had anything to say. A row
   // each also gives a name room to be read rather than cut to a dozen cells.
-  const list = jobs.map((data, index) => {
-    const isFocused = data.jobId === focused.jobId
+  const list = threads.map((data, index) => {
+    const recordId = data.recordId ?? data.jobId
+    const isFocused = recordId === (focused.recordId ?? focused.jobId)
     const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
-    const state = isOver(data) ? data.status : data.status === 'waiting-for-answer' ? 'waiting' : data.status
+    const state = `${isOver(data) ? data.status : data.status === 'waiting-for-answer' ? 'waiting' : data.status}${data.foreign ? ' · other' : ''}`
     return Box({ flexDirection: 'row', children: [
       Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸ ' : '  ' }),
       Button({
-        key: `codex_tab_${data.jobId}`,
+        key: `codex_tab_${recordId}`,
         label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
         // No `autoFocus`: the ring is drawn inverse, so starting it on the task
         // in view leaves a highlighted row sitting there when nobody is walking
         // the list. The marker already says which task the trace belongs to.
-        plain: true, dimColor: !isFocused, onPress: () => onSelect(data.jobId),
+        plain: true, dimColor: !isFocused, onPress: () => onSelect(recordId),
       }),
       Text({ dimColor: true, children: ` · ${state}` }),
     ] })

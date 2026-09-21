@@ -115,11 +115,13 @@ unified_exec = true
   const job = await waitFor(async () => {
     const status = await launch("codex-companion.mjs", ["status", "--json"]);
     const snapshot = JSON.parse(status.stdout);
-    if (snapshot.latestFinished) {
+    const threads = snapshot.threads ?? snapshot.running;
+    const latestFinished = snapshot.threads?.find((thread) => thread.status !== "queued" && thread.status !== "running") ?? snapshot.latestFinished;
+    if (latestFinished) {
       const result = await first;
       throw new Error(`Question was not held: ${result.stdout} ${result.stderr}; tool outputs: ${JSON.stringify(requests.flatMap((r) => r.input.filter((item) => item.type.includes("output"))))}`);
     }
-    return snapshot.running.find((entry) => entry.live?.questions?.length);
+    return threads.find((entry) => entry.live?.questions?.length);
   });
   const question = job.live.questions[0];
   await control.request("broker/answer", { threadId: job.threadId, turnId: question.turnId,

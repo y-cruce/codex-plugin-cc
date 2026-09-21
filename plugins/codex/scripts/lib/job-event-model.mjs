@@ -153,9 +153,13 @@ function briefOf(job) {
   return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
 }
 
-export function createLiveView(job) {
+function emptyUsage(complete = true) {
+  return { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete };
+}
+
+export function createLiveView(job, options = {}) {
   const executor = job.executor ?? "codex";
-  return {
+  const view = {
     schemaVersion: 1,
     jobId: job.id ?? job.jobId,
     label: job.label ?? job.title ?? job.kindLabel ?? job.id ?? job.jobId,
@@ -168,7 +172,7 @@ export function createLiveView(job) {
     activeCommands: [],
     lastMessage: null,
     files: [],
-    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: !job.request?.resumeThreadId },
+    usage: emptyUsage(!job.request?.resumeThreadId),
     pendingQuestion: null,
     prompt: briefOf(job),
     plan: null,
@@ -178,6 +182,26 @@ export function createLiveView(job) {
     _usage: {},
     _resumed: Boolean(job.request?.resumeThreadId)
   };
+  if (options.recordId) {
+    Object.assign(view, { recordId: options.recordId, activeRoundId: null, latestRoundId: null, rounds: [] });
+  }
+  return view;
+}
+
+function roundFor(view, event) {
+  if (!Array.isArray(view.rounds)) return null;
+  let round = view.rounds.find((entry) => entry.jobId === event.jobId);
+  if (!round) {
+    round = { jobId: event.jobId, sessionId: null, prompt: null, executorTurnIds: [], firstSeq: String(event.seq),
+      lastSeq: String(event.seq), usage: emptyUsage(true), result: null, status: "running", startedAt: null, endedAt: null };
+    view.rounds.push(round);
+  }
+  round.firstSeq ??= String(event.seq);
+  round.lastSeq = String(event.seq);
+  if (event.type !== "usage.updated" && event.identity.turnId && !round.executorTurnIds.includes(event.identity.turnId)) {
+    round.executorTurnIds.push(event.identity.turnId);
+  }
+  return round;
 }
 
 function updateTail(view, event, text, key = null) {
@@ -230,6 +254,7 @@ export function applyJobEvent(view, event, options = {}) {
   view._items ??= {};
   view._usage ??= {};
   view.history.committedSeq = String(event.seq);
+  const round = roundFor(view, event);
   const child = Boolean(event.agent);
   const turnAfterTerminal = !child && event.type === "turn.started" && terminal(view.status);
   if (!turnAfterTerminal && !child && identity.sessionId && (!view.threadId || identity.sessionId === view.threadId)) {
@@ -270,12 +295,33 @@ export function applyJobEvent(view, event, options = {}) {
       tailKey = key;
       break;
     }
-    case "job.started": view.status = "running"; view.startedAt = p.startedAt ?? view.startedAt ?? event.occurredAt; break;
+    case "job.started":
+      view.status = "running";
+      if (round) {
+        view.jobId = event.jobId;
+        view.label = p.label ?? view.label;
+        view.prompt = p.prompt ?? null;
+        view.activeRoundId = event.jobId;
+        view.latestRoundId = event.jobId;
+        view.endedAt = null;
+        view.startedAt ??= p.startedAt ?? event.occurredAt;
+        view._resumed = Boolean(p.resumed);
+        Object.assign(round, { sessionId: p.sessionId ?? null, prompt: p.prompt ?? null, status: "running",
+          startedAt: p.startedAt ?? event.occurredAt, endedAt: null, result: null });
+      } else view.startedAt = p.startedAt ?? view.startedAt ?? event.occurredAt;
+      break;
     case "job.completed": case "job.failed": case "job.cancelled":
       view.status = event.type.slice(4);
       view.endedAt = p.completedAt ?? event.occurredAt;
       view.activeCommands = [];
       view.pendingQuestion = null;
+      if (round) {
+        round.status = event.type.slice(4);
+        round.endedAt = p.completedAt ?? event.occurredAt;
+        round.result = p.result ?? null;
+        view.latestRoundId = event.jobId;
+        if (view.activeRoundId === event.jobId) view.activeRoundId = null;
+      }
       break;
     case "turn.started":
       if (!child && turnAfterTerminal) {
@@ -380,7 +426,11 @@ export function applyJobEvent(view, event, options = {}) {
       break;
     case "usage.updated": {
       const total = p.usage;
-      if (!total || total.inputTokens == null || total.outputTokens == null) { view.usage.complete = false; break; }
+      if (!total || total.inputTokens == null || total.outputTokens == null) {
+        view.usage.complete = false;
+        if (round) round.usage.complete = false;
+        break;
+      }
       const usageKey = identity.sessionId ?? "unknown";
       const prior = view._usage[usageKey];
       const fields = ["inputTokens", "outputTokens", "cachedInputTokens"];
@@ -388,9 +438,12 @@ export function applyJobEvent(view, event, options = {}) {
       for (const field of fields) {
         const increment = (total[field] ?? 0) - (first[field] ?? 0);
         if (increment < 0) view.usage.complete = false;
-        view.usage[field] += Math.max(0, increment);
+        const added = Math.max(0, increment);
+        view.usage[field] += added;
+        if (round) round.usage[field] += added;
       }
       view.usage.complete &&= total.complete !== false;
+      if (round) round.usage.complete &&= total.complete !== false;
       view._usage[usageKey] = total;
       break;
     }
@@ -402,6 +455,7 @@ export function applyJobEvent(view, event, options = {}) {
       view.pendingQuestion = { requestId: String(p.requestId), text: p.message, openedAt,
         expiresAt: Number.isFinite(expires) ? new Date(expires).toISOString() : null };
       view.status = "waiting-for-answer";
+      if (round) round.status = "waiting-for-answer";
       break;
     }
     case "question.resolved": case "question.closed":
@@ -409,6 +463,7 @@ export function applyJobEvent(view, event, options = {}) {
       if (view.pendingQuestion?.requestId === String(p.requestId)) {
         view.pendingQuestion = null;
         view.status = "running";
+        if (round) round.status = "running";
       }
       break;
     case "history.retention.changed": case "history.continuity.lost": case "history.recording.failed":

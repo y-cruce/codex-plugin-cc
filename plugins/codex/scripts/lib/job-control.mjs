@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { executorKeyFor, THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -276,6 +277,42 @@ export function buildStatusSnapshot(cwd, options = {}) {
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
+  if (options.threadRecords ?? THREAD_RECORDS_ENABLED) {
+    const groups = [];
+    const byThread = new Map();
+    for (const job of jobs) {
+      let executorKey;
+      try {
+        executorKey = executorKeyFor({ executor: job.executor ?? "codex",
+          command: job.request?.executorCommand, args: job.request?.executorArgs ?? [] });
+      } catch { executorKey = `${job.executor ?? "codex"}:${job.id}`; }
+      const key = job.threadId ? `${executorKey}\0${job.threadId}` : `job:${job.id}`;
+      let group = byThread.get(key);
+      if (!group) {
+        group = [];
+        byThread.set(key, group);
+        groups.push(group);
+      }
+      group.push(job);
+    }
+    const threads = groups.map((rounds) => {
+      const latest = rounds[0];
+      const active = rounds.find((job) => job.status === "queued" || job.status === "running") ?? null;
+      const handle = active ?? latest;
+      const stored = readStoredJob(workspaceRoot, handle.id);
+      return enrichJob({ ...latest, id: handle.id, currentJobId: handle.id,
+        recordId: stored?.recordId ?? latest.recordId ?? rounds.at(-1).id,
+        activeRoundId: active?.id ?? null }, { maxProgressLines });
+    });
+    return {
+      workspaceRoot,
+      config,
+      sessionRuntime: getSessionRuntimeStatus(options.env, workspaceRoot),
+      threads: options.all ? threads : threads.slice(0, maxJobs),
+      needsReview: Boolean(config.stopReviewGate)
+    };
+  }
+
   const running = jobs
     .filter((job) => job.status === "queued" || job.status === "running")
     .map((job) => enrichJob(job, { maxProgressLines }));
@@ -336,6 +373,13 @@ export function resolveResultJob(cwd, reference) {
   }
 
   throw new Error("No finished Codex jobs found for this repository yet.");
+}
+
+export function resolveThreadResultJob(cwd, threadId) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const rounds = sortJobsNewestFirst(listJobs(workspaceRoot).filter((job) => job.threadId === threadId));
+  if (!rounds.length) throw new Error(`No thread found for "${threadId}". Run /codex:status to inspect known threads.`);
+  return resolveResultJob(workspaceRoot, rounds[0].id);
 }
 
 export function resolveCancelableJob(cwd, reference, options = {}) {

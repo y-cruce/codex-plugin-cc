@@ -5,7 +5,10 @@ import { markdown } from './markdown.ts'
 export { clip } from './format.ts'
 
 export type LiveView = {
+  // Dispatched by another Claude session: drawn, but never announced here.
+  foreign?: boolean
   schemaVersion: 1
+  recordId?: string
   jobId: string
   label: string
   status: 'running' | 'waiting-for-answer' | 'completed' | 'failed' | 'cancelled'
@@ -21,6 +24,21 @@ export type LiveView = {
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null } | null
   prompt?: string | null
+  activeRoundId?: string | null
+  latestRoundId?: string | null
+  rounds?: {
+    jobId: string
+    sessionId: string | null
+    prompt: string | null
+    executorTurnIds: string[]
+    firstSeq: string
+    lastSeq: string
+    usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
+    result: unknown
+    status: 'running' | 'waiting-for-answer' | 'completed' | 'failed' | 'cancelled'
+    startedAt: string | null
+    endedAt: string | null
+  }[]
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
@@ -28,11 +46,10 @@ export type LiveView = {
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
 
-// `endedAt` is the authority on whether a job is over, not `status`: a view can
-// be written again after its job ended -- a later turn on the same thread sets
-// the status back to running -- and a task that says it is running never leaves
-// the pane and is counted among the live ones for good.
-export function isOver(view: Pick<LiveView, 'status' | 'endedAt'>): boolean {
+// A thread is over when it has no active round. Legacy views have no round
+// fields, so their terminal state keeps the prior endedAt/status definition.
+export function isOver(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundId'>): boolean {
+  if (Object.hasOwn(view, 'activeRoundId')) return view.activeRoundId === null
   return Boolean(view.endedAt) || ['completed', 'failed', 'cancelled'].includes(view.status)
 }
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
@@ -90,9 +107,9 @@ function toolTitle(text: string, columns: number): string {
   return title.replace(/(^|\s)(\/\S+)/g, (_, space, path) => `${space}${shortPath(path, Math.max(12, Math.floor(columns / 2)))}`)
 }
 
-// `maxTail` lets a caller that scrolls (the tasks pane) draw the whole trace and
-// let its surface window it; a tool row inline in the transcript must not grow
-// that far, so it keeps the row-derived limit.
+// `maxTail` lets a caller that scrolls (the tasks pane) draw the whole trace,
+// including the brief and complete newest message, and let its surface window
+// it; a tool row inline in the transcript keeps the short event previews.
 // `headingLast` puts the status line under the trace: a row in the transcript
 // is read top down and announces itself first, while a pane already names the
 // task in its tabs and wants its foot to say how the task is doing.
@@ -115,6 +132,7 @@ function planLines(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, data: LiveVie
 
 export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number, headingLast = false) {
   const { Box, Text } = ui
+  const fullTrace = maxTail !== undefined
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
   const stalled = data.status === 'running' && data.tail.length ? now - Date.parse(data.tail.at(-1)!.at) : 0
@@ -164,6 +182,11 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     separate(block)
     lines.push(Text({ ...props, wrap: 'wrap', children: clean(text) }))
   }
+  const prompt = (text: string) => {
+    separate(true)
+    lines.push(...markdown(ui, text.length > 1200 ? `${text.slice(0, 1199)}…` : text,
+      { dimColor: true }, '› ', columns))
+  }
   const files = () => {
     for (const file of data.files.slice(0, 3)) {
       const counts = ` (+${file.additions ?? '?'} −${file.deletions ?? '?'})`
@@ -184,14 +207,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     }
     return tree()
   }
-  // The trace starts with what the agent was asked, so a reader who scrolls to
-  // the top finds the brief rather than the first thing the agent did. It is
+  // A full trace starts with what the agent was asked, so a reader who scrolls
+  // to the top finds the brief rather than the first thing the agent did. It is
   // Markdown, like the answer that comes back, and long enough to need a cut.
-  if (data.prompt) {
-    separate(true)
-    lines.push(...markdown(ui, data.prompt.length > 1200 ? `${data.prompt.slice(0, 1199)}…` : data.prompt,
-      { dimColor: true }, '› ', columns))
-  }
+  if (fullTrace && data.prompt) prompt(data.prompt)
   if (data.pendingQuestion) {
     prose(`? ${data.pendingQuestion.text}`, { color: 'magenta', bold: true })
     lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(waiting(data.pendingQuestion.openedAt, data.pendingQuestion.expiresAt, now), columns) }))
@@ -237,10 +256,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
   const isKind = (event: LiveView['tail'][number]) => !event.agent && typeOf(event).startsWith(kind === 'assistant' ? 'message' : 'reasoning')
   const newest = kind ? grouped.findLastIndex(isKind) : -1
-  // lastMessage holds the whole message, and a row holds a 300-character
-  // preview, so the last row is swapped for the full text -- from where its own
-  // stretch begins, since writing that resumed after a tool has a row per
-  // stretch and the whole text there would draw every earlier one again.
+  // In a full trace, lastMessage replaces the newest 300-character preview from
+  // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
   grouped.forEach((event, index) => {
     const type = typeOf(event)
@@ -251,6 +268,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     }
     if (type === 'question.resolved') {
       add('→ answer delivered', { color: 'cyan' })
+      return
+    }
+    if (fullTrace && type === 'prompt') {
+      prompt(event.text)
       return
     }
     if (type.startsWith('command')) {
@@ -279,7 +300,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     }
     const prefix = type.startsWith('message') ? '›' : type.startsWith('reasoning') ? '…' : type.startsWith('question') ? '?' : (type.startsWith('director') || type.startsWith('control.message')) ? '→' : type.startsWith('file') ? '✎' : ''
     const color = /error|failed/.test(type) ? 'red' : type.startsWith('question') ? 'magenta' : (type.startsWith('director') || type.startsWith('control.message')) ? 'cyan' : undefined
-    const text = index === newest ? data.lastMessage!.text.slice(Math.min(from, data.lastMessage!.text.length)) : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
+    const text = fullTrace && index === newest ? data.lastMessage!.text.slice(Math.min(from, data.lastMessage!.text.length)) : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
     const props = { color, dimColor: type === 'source.warning' || type.startsWith('reasoning') || (!prefix && !color) }
     if (type.startsWith('message')) {
       separate(true)

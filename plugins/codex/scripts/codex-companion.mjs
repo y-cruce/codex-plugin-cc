@@ -22,9 +22,10 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { runAcpTurn } from "./lib/acp.mjs";
-import { acknowledgeNotifications, cancelLiveJob, liveStatus, sendLiveCommand } from "./lib/live-commands.mjs";
+import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
+import { readRoundContext } from "./lib/history-resolver.mjs";
 import { finishObservedJob } from "./lib/observation-client.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
@@ -47,6 +48,7 @@ import {
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
+  resolveThreadResultJob,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import {
@@ -95,7 +97,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
-      "  node scripts/codex-companion.mjs result [job-id] [--json]",
+      "  node scripts/codex-companion.mjs result [job-id] [--thread <thread-id>] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
     ].join("\n")
   );
@@ -1072,7 +1074,16 @@ async function handleStatus(argv) {
           stallMs: parseStallMs(options)
         })
       : buildSingleJobSnapshot(cwd, reference);
-    snapshot.job.live ??= await liveStatus(snapshot.workspaceRoot, snapshot.job);
+    const context = await readRoundContext(snapshot.workspaceRoot, snapshot.job.id);
+    if (context.layout === "thread-record") {
+      snapshot.job.recordId = context.recordId;
+      snapshot.job.activeRoundId = context.activeRoundId;
+    }
+    if (context.layout === "legacy" || context.activeRoundId === snapshot.job.id) {
+      snapshot.job.live ??= await liveStatus(snapshot.workspaceRoot, snapshot.job);
+    } else {
+      snapshot.job.live = { unavailable: inactiveRoundMessage(snapshot.job.id, context.activeRoundId) };
+    }
     if (isActiveJobStatus(snapshot.job.status) && snapshot.job.live?.questions?.length) snapshot.job.phase = "waiting-for-answer";
     const stalledLine = snapshot.stalled
       ? `STALLED job=${snapshot.job.id} thread=${snapshot.job.threadId ?? "unknown"} ${snapshot.job.progressAgeMinutes}m without progress\n`
@@ -1086,7 +1097,8 @@ async function handleStatus(argv) {
   }
 
   const report = buildStatusSnapshot(cwd, { all: options.all });
-  for (const job of report.running) {
+  const running = report.threads?.filter((job) => job.status === "queued" || job.status === "running") ?? report.running;
+  for (const job of running) {
     job.live = await liveStatus(report.workspaceRoot, job);
     if (job.live?.questions?.length) job.phase = "waiting-for-answer";
     else if (job.live?.interrupting) job.phase = "interrupting";
@@ -1108,16 +1120,20 @@ async function handleLiveCommand(command, argv) {
   outputCommandResult(result, `${JSON.stringify(result, null, 2)}\n`, options.json);
 }
 
-function handleResult(argv) {
+async function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "thread"],
     booleanOptions: ["json"]
   });
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveResultJob(cwd, reference);
-  const storedJob = readStoredJob(workspaceRoot, job.id);
+  if (options.thread && reference) throw new Error("Choose either a job id or --thread, not both.");
+  const { workspaceRoot, job } = options.thread
+    ? resolveThreadResultJob(cwd, String(options.thread))
+    : resolveResultJob(cwd, reference);
+  const context = await readRoundContext(workspaceRoot, job.id);
+  const storedJob = context.layout === "thread-record" ? context.receipt.job : readStoredJob(workspaceRoot, job.id);
   const payload = {
     job,
     storedJob
@@ -1169,7 +1185,17 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
+  let resolved;
+  if (reference) {
+    const candidate = buildSingleJobSnapshot(cwd, reference);
+    const context = await readRoundContext(candidate.workspaceRoot, candidate.job.id);
+    if (context.layout === "thread-record") {
+      await requireActiveRound(candidate.workspaceRoot, candidate.job);
+      if (!isActiveJobStatus(candidate.job.status)) throw new Error(`No active job found for "${reference}".`);
+      resolved = candidate;
+    }
+  }
+  const { workspaceRoot, job } = resolved ?? resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
@@ -1264,7 +1290,7 @@ async function main() {
       await handleLiveCommand(subcommand, argv);
       break;
     case "result":
-      handleResult(argv);
+      await handleResult(argv);
       break;
     case "task-resume-candidate":
       handleTaskResumeCandidate(argv);
