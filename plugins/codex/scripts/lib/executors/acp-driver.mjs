@@ -77,6 +77,13 @@ function findReasoningEffortOption(configOptions = []) {
 
 const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
 
+// The model and the context window are two separate settings: a model has a
+// ceiling, and the window is chosen underneath it. `dfmodel` is the cheap one
+// whose ceiling is 1M, where the agent's own default `auto` tops out at 200K,
+// so a dispatch that names no model would land under the smaller ceiling and
+// could never reach 1M -- not even by setting the window below.
+const DEFAULT_MODEL_ID = "dfmodel";
+
 function permissionQuestion(entry) {
   return { requestId: entry.requestId, turnId: entry.turnId, message: `Permission requested: ${entry.payload.tool.title}`,
     questions: [{ id: "optionId", question: `Permission requested: ${entry.payload.tool.title}`,
@@ -266,16 +273,24 @@ export class AcpExecutorJobPort {
     response.modes = { ...response.modes, currentModeId: modeId };
   }
 
-  async applyModel(sessionId, response, modelId) {
+  async applyModel(sessionId, response, modelId, { soft = false } = {}) {
     if (!modelId) return;
     const option = findModelOption(response.configOptions);
     if (!option) {
+      if (soft) {
+        this.modelNotice(`ACP agent does not expose a model select option; keeping its default instead of ${modelId}.`);
+        return;
+      }
       throw Object.assign(new Error(`ACP agent does not expose a model select option; cannot select model ${modelId}.`), {
         code: "UNSUPPORTED_CAPABILITY"
       });
     }
     const values = selectOptionValues(option);
     if (!values.includes(modelId)) {
+      if (soft) {
+        this.modelNotice(`ACP model ${modelId} is not available on this agent; keeping its default.`);
+        return;
+      }
       throw Object.assign(new Error(`ACP model ${modelId} is not available. Available values: ${values.join(", ") || "none"}.`), {
         code: "INVALID_STATE"
       });
@@ -298,6 +313,10 @@ export class AcpExecutorJobPort {
   }
 
   effortNotice(message) {
+    this.onProgress?.({ message, phase: "starting", stderrMessage: `Warning: ${message}` });
+  }
+
+  modelNotice(message) {
     this.onProgress?.({ message, phase: "starting", stderrMessage: `Warning: ${message}` });
   }
 
@@ -335,11 +354,20 @@ export class AcpExecutorJobPort {
     return selected;
   }
 
+  // A model the dispatch named is a contract and must hold; the 1M-capable
+  // default is our own preference, so an agent that has renamed or dropped it
+  // keeps its own default rather than failing every task that named no model.
+  modelChoice(request) {
+    const requested = request.modelId ?? this.modelId;
+    return requested ? { modelId: requested, soft: false } : { modelId: DEFAULT_MODEL_ID, soft: true };
+  }
+
   async startSession(request) {
     const response = await this.connection.newSession({ cwd: request.cwd ?? this.cwd,
       additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
-    await this.applyModel(response.sessionId, response, request.modelId ?? this.modelId);
+    const choice = this.modelChoice(request);
+    await this.applyModel(response.sessionId, response, choice.modelId, { soft: choice.soft });
     const effortId = await this.applyReasoningEffort(response.sessionId, response, request.effortId ?? this.effortId);
     return { ...this.sessionResult(response.sessionId, response), effortId };
   }
@@ -349,6 +377,9 @@ export class AcpExecutorJobPort {
     const response = await this.connection.resumeSession({ sessionId: request.sessionId, cwd: request.cwd ?? this.cwd,
       additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
+    // A resumed session keeps the model it was created on. The default is ours
+    // to pick when a session is new; imposing it here would switch a thread
+    // that a dispatch had deliberately started somewhere else.
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
     return { ...this.sessionResult(request.sessionId, response), effortId };
