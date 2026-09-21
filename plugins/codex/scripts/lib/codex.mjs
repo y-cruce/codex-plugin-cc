@@ -33,6 +33,7 @@
  *   commandExecutions: ThreadItem[],
  *   onProgress: ProgressReporter | null
  *   redirectInput?: UserInput[]
+ *   redirectMode?: "interrupt" | "queue"
  *   interruptedWorkspaceStatus?: string
  * }} TurnCaptureState
  */
@@ -535,6 +536,7 @@ function applyTurnNotification(state, message) {
         "finalizing"
       );
       state.redirectInput = message.params.redirectInput;
+      state.redirectMode = message.params.redirectMode;
       state.interruptedWorkspaceStatus = message.params.interruptedWorkspaceStatus;
       if (message.params.controlError) state.error = { message: message.params.controlError };
       completeTurn(state, message.params.turn);
@@ -1116,9 +1118,13 @@ export async function runAppServerTurn(cwd, options = {}) {
         fileChanges.push(...turnState.fileChanges);
         input = turnState.redirectInput;
         if (input) {
-          interruptedTurns.push({ turnId: turnState.turnId, touchedFiles: collectTouchedFiles(turnState.fileChanges),
-            workspaceStatus: turnState.interruptedWorkspaceStatus });
-          emitProgress(options.onProgress, "Turn interrupted; continuing in the same thread with the new instruction. Existing file changes are retained.", "redirecting");
+          if (turnState.redirectMode === "interrupt") {
+            interruptedTurns.push({ turnId: turnState.turnId, touchedFiles: collectTouchedFiles(turnState.fileChanges),
+              workspaceStatus: turnState.interruptedWorkspaceStatus });
+            emitProgress(options.onProgress, "Turn interrupted; continuing in the same thread with the new instruction. Existing file changes are retained.", "redirecting");
+          } else {
+            emitProgress(options.onProgress, "Queued message is starting in the same thread.", "redirecting");
+          }
         }
       } while (input);
 

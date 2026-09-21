@@ -16,6 +16,7 @@ export const CODEX_EXECUTOR_CAPABILITIES = Object.freeze({
   structuredQuestions: true,
   permissionRequests: false,
   midTurnSteer: true,
+  nextTurnQueue: true,
   notifyDirector: true,
   commandOutputDelta: true,
   commandInteraction: true,

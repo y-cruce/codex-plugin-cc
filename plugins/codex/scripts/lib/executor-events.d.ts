@@ -140,7 +140,7 @@ export interface CanonicalEventPayloadMap {
   "permission.requested": { requestId: string; tool: CanonicalToolSnapshot; options: Array<{ optionId: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | "unknown" }> };
   "permission.resolved": { requestId: string; outcome: "selected" | "cancelled"; optionId: string | null };
   "director.notified": { notificationId: string; message: string; pendingRequestId: string | null };
-  "control.message.updated": { message: string; mode: "queued" | "interrupt"; accepted: boolean };
+  "control.message.updated": { message: string; mode: "steer" | "queue" | "interrupt"; accepted: boolean };
   "agent.activity": { agentId: string; parentAgentId: string | null; path: string; status: "started" | "interacted" | "completed" | "interrupted" | "failed" };
   "source.warning": SourceNoticePayload;
   "source.error": SourceNoticePayload;

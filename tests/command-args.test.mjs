@@ -47,3 +47,17 @@ test("follow rejects unknown and unused options while preserving its job-id posi
   assert.equal(accepted.status, 1);
   assert.equal(accepted.stderr.trim(), "UNKNOWN_JOB missing-job");
 });
+
+test("message accepts queue, keeps steer as the default, and rejects queue with interrupt", () => {
+  const h = setup();
+  const conflicting = run(process.execPath, [SCRIPT, "message", "missing-job", "--queue", "--interrupt", "text"], h);
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /only one of --queue or --interrupt/);
+
+  for (const args of [["--queue", "text"], ["text"]]) {
+    const parsed = run(process.execPath, [SCRIPT, "message", "missing-job", ...args], h);
+    assert.notEqual(parsed.status, 0);
+    assert.doesNotMatch(parsed.stderr, /Unknown option/);
+    assert.match(parsed.stderr, /missing-job|Unknown job/i);
+  }
+});

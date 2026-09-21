@@ -18,6 +18,7 @@ const CAPABILITIES = Object.freeze({
   structuredQuestions: true,
   permissionRequests: true,
   midTurnSteer: false,
+  nextTurnQueue: true,
   notifyDirector: false,
   commandOutputDelta: false,
   commandInteraction: false,
@@ -148,6 +149,7 @@ class AcpControlServer {
           result = { answered: true, requestId: p.requestId };
           break;
         case "executor/steer": throw Object.assign(new Error("This executor does not support mid-turn steering."), { code: "UNSUPPORTED_CAPABILITY" });
+        case "executor/queue-message": result = await this.port.queueMessage({ turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/interrupt-turn":
           result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000,
             replacementPrompt: p.replacementPrompt ?? null });
@@ -192,6 +194,8 @@ export class AcpExecutorJobPort {
     this.questions = new Map();
     this.activeTurn = null;
     this.replacementPrompt = null;
+    this.queuedPrompt = null;
+    this.queueStarting = false;
     this.stderr = "";
     this.updateTail = Promise.resolve();
   }
@@ -384,6 +388,10 @@ export class AcpExecutorJobPort {
     this.activeTurn = active;
     active.done.then(() => { if (this.activeTurn === active) this.activeTurn = null; },
       () => { if (this.activeTurn === active) this.activeTurn = null; });
+    if (this.queueStarting) {
+      this.queuedPrompt = null;
+      this.queueStarting = false;
+    }
     return { turnId, done: active.done };
   }
 
@@ -482,13 +490,48 @@ export class AcpExecutorJobPort {
   cancelJob(request) { return this.stopTurn(request, true); }
   takeReplacementPrompt() { const value = this.replacementPrompt; this.replacementPrompt = null; return value; }
 
+  async queueMessage(request) {
+    if (this.queuedPrompt) throw Object.assign(new Error("A message is already queued for the next turn."), { code: "QUEUE_OCCUPIED" });
+    const active = this.activeTurn;
+    if (!active || active.turnId !== request.turnId) throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
+    if (!Array.isArray(request.prompt) || !request.prompt.length ||
+        request.prompt.some((item) => item.type !== "text" || !item.text?.trim())) {
+      throw new Error("A nonempty text message is required.");
+    }
+    this.queuedPrompt = request.prompt;
+    await this.adapter.emit("control.message.updated", { message: request.prompt.map((item) => item.text).join("\n"),
+      mode: "queue", accepted: true }, { turnId: request.turnId }, request, "executor/queue-message");
+    return { queued: true };
+  }
+
+  async rejectQueuedPrompt(status) {
+    if (!this.queuedPrompt) return;
+    const prompt = this.queuedPrompt;
+    this.queuedPrompt = null;
+    this.queueStarting = false;
+    await this.adapter.emit("control.message.updated", { message: prompt.map((item) => item.text).join("\n"),
+      mode: "queue", accepted: false }, {}, { terminalStatus: status }, "executor/queue-message");
+  }
+
+  async takeNextPrompt(terminal) {
+    const replacement = this.takeReplacementPrompt();
+    if (replacement) return { prompt: replacement, mode: "interrupt" };
+    if (!this.queuedPrompt) return null;
+    if (terminal.status !== "completed") {
+      await this.rejectQueuedPrompt(terminal.status);
+      return null;
+    }
+    this.queueStarting = true;
+    return { prompt: this.queuedPrompt, mode: "queue" };
+  }
+
   liveStatus() {
     return { threadId: this.sessionId, turnId: this.activeTurn?.turnId ?? null, pendingMessages: [], undeliveredMessages: [],
       questions: [...this.questions.values()].map((entry) => ({ requestId: entry.requestId, turnId: entry.turnId,
         message: entry.payload.message, questions: entry.payload.fields.map((field) => ({ id: field.id,
           question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: null })),
       permissions: [...this.permissions.values()].map(permissionQuestion), notifications: [], interrupting: Boolean(this.activeTurn?.interrupting),
-      partialChanges: [], error: null, capabilities: { midTurnSteer: false } };
+      partialChanges: [], error: null, capabilities: { midTurnSteer: false, nextTurnQueue: true } };
   }
 
   async close() {

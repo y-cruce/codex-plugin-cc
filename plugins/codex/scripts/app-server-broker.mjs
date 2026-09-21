@@ -18,6 +18,7 @@ const EXECUTOR_CONTROL_METHODS = new Set([
   "executor/ack-notifications",
   "executor/answer-question",
   "executor/steer",
+  "executor/queue-message",
   "executor/interrupt-turn",
   "executor/cancel-job"
 ]);
@@ -37,6 +38,7 @@ function executorControlRequest(message, jobs, cwd) {
     case "executor/answer-question": return { method: "broker/answer", params: { threadId, turnId: p.turnId,
       requestId: p.requestId, answers: p.values } };
     case "executor/steer": return { method: "turn/steer", params: { threadId, expectedTurnId: p.turnId, input } };
+    case "executor/queue-message": return { method: "broker/queue-message", params: { threadId, turnId: p.turnId, input } };
     case "executor/interrupt-turn": return { method: p.replacementPrompt ? "broker/redirect" : "turn/interrupt",
       params: { threadId, turnId: p.turnId, input } };
     case "executor/cancel-job": return { method: "turn/interrupt", params: { threadId, turnId: p.turnId } };
@@ -281,18 +283,19 @@ async function main() {
         if (controls.handles(message.method) || EXECUTOR_CONTROL_METHODS.has(message.method)) {
           try {
             const control = executorControlRequest(message, jobs, cwd) ?? { method: message.method, params: message.params ?? {} };
-            if (control.method === "broker/redirect" && !streamOwners.has(control.params?.threadId)) {
-              throw new Error("No task owner is connected to continue after interruption.");
+            if (["broker/redirect", "broker/queue-message"].includes(control.method) && !streamOwners.has(control.params?.threadId)) {
+              throw new Error("No task owner is connected to continue with another turn.");
             }
             let result = await controls.request(control.method, control.params);
             if (message.method === "executor/status") {
-              result = { ...result, capabilities: { midTurnSteer: true } };
+              result = { ...result, capabilities: { midTurnSteer: true, nextTurnQueue: true } };
             }
             const p = control.params;
-            if (control.method === "turn/steer" || control.method === "broker/redirect") {
+            if (["turn/steer", "broker/redirect", "broker/queue-message"].includes(control.method)) {
               await codexEvents.accept({ method: "companion/control-message", params: { threadId: p.threadId,
                 turnId: p.expectedTurnId ?? p.turnId, message: p.input.map((item) => item.text).join("\n"),
-                interrupt: control.method === "broker/redirect", status: "accepted" } });
+                mode: control.method === "broker/redirect" ? "interrupt" : control.method === "broker/queue-message" ? "queue" : "steer",
+                status: "accepted" } });
             } else if (control.method === "broker/answer") {
               await codexEvents.accept({ method: "companion/answer-delivered", params: { ...p } });
             }

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { runCommand } from "./process.mjs";
 
-const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/ack-notifications"]);
+const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/queue-message", "broker/ack-notifications"]);
 export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
@@ -18,7 +18,8 @@ export class LiveTurnControl {
   state(threadId) {
     if (!this.threads.has(threadId)) {
       this.threads.set(threadId, { threadId, turnId: null, pendingMessages: [], questions: [], notifications: [],
-        interrupting: false, partialChanges: [], undeliveredMessages: [], error: null });
+        interrupting: false, partialChanges: [], undeliveredMessages: [], queuedInput: null,
+        queueStarting: false, error: null });
     }
     return this.threads.get(threadId);
   }
@@ -41,8 +42,17 @@ export class LiveTurnControl {
   snapshot(threadId) {
     const state = this.threads.get(threadId);
     if (!state) throw new Error("Thread is not loaded in this broker.");
-    const { redirectInput, interruptedReport, finishInterrupt, ...snapshot } = state;
+    const { redirectInput, queuedInput, queueStarting, interruptedReport, finishInterrupt, ...snapshot } = state;
     return snapshot;
+  }
+
+  rejectQueuedMessage(state, status) {
+    if (!state.queuedInput) return;
+    this.notify({ method: "companion/control-message", params: { threadId: state.threadId,
+      turnId: state.turnId, message: state.queuedInput.map((item) => item.text).join("\n"),
+      mode: "queue", status: "rejected", terminalStatus: status } });
+    state.queuedInput = null;
+    state.queueStarting = false;
   }
 
   clearQuestions(state) {
@@ -59,6 +69,10 @@ export class LiveTurnControl {
     if (!threadId) return;
     const state = this.state(threadId);
     if (message.method === "turn/started") {
+      if (state.queueStarting) {
+        state.queuedInput = null;
+        state.queueStarting = false;
+      }
       this.clearQuestions(state);
       Object.assign(state, { turnId: p.turn.id, pendingMessages: [], partialChanges: [], error: null, interrupting: false });
     } else if (message.method === "item/started" && p.item?.type === "userMessage") {
@@ -81,7 +95,19 @@ export class LiveTurnControl {
           ? `Unavailable: ${status.error?.message ?? status.stderr}` : status.stdout;
         state.interruptedReport = { partialChanges: [...state.partialChanges], workspaceStatus: state.workspaceStatus };
         p.interruptedWorkspaceStatus = state.workspaceStatus;
-        if (state.redirectInput) p.redirectInput = state.redirectInput;
+        if (state.redirectInput) {
+          p.redirectInput = state.redirectInput;
+          p.redirectMode = "interrupt";
+        }
+      }
+      if (state.queuedInput) {
+        if (p.turn.status === "completed" && !p.redirectInput) {
+          p.redirectInput = state.queuedInput;
+          p.redirectMode = "queue";
+          state.queueStarting = true;
+        } else if (!(p.turn.status === "interrupted" && p.redirectInput)) {
+          this.rejectQueuedMessage(state, p.turn.status);
+        }
       }
       if (state.error) p.controlError = state.error;
       delete state.redirectInput;
@@ -145,6 +171,9 @@ export class LiveTurnControl {
       state.notifications = state.notifications.filter((notification) => !p.ids.includes(notification.id));
       return { remaining: state.notifications.length };
     }
+    if (method === "broker/queue-message" && state?.queuedInput) {
+      throw new Error("A message is already queued for the next turn.");
+    }
     if (!state?.turnId) throw new Error("No active turn or pending question in this broker.");
     const expectedTurnId = p.expectedTurnId ?? p.turnId;
     if (state.turnId !== expectedTurnId) throw new Error("Active turn mismatch; refresh status before retrying.");
@@ -165,7 +194,7 @@ export class LiveTurnControl {
       state.questions = state.questions.filter((question) => question.requestId !== p.requestId);
       return { answered: true, requestId: p.requestId };
     }
-    if (method === "turn/steer" || method === "broker/redirect") {
+    if (method === "turn/steer" || method === "broker/redirect" || method === "broker/queue-message") {
       if (!Array.isArray(p.input) || !p.input.length || p.input.some((item) => item.type !== "text" || !item.text?.trim())) {
         throw new Error("A nonempty text message is required.");
       }
@@ -186,6 +215,10 @@ export class LiveTurnControl {
         state.pendingMessages = state.pendingMessages.filter((message) => message !== entry);
         throw error;
       }
+    }
+    if (method === "broker/queue-message") {
+      state.queuedInput = p.input;
+      return { queued: true };
     }
     state.interrupting = true;
     if (method === "broker/redirect") state.redirectInput = p.input;

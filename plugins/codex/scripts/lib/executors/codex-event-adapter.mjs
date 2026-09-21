@@ -193,7 +193,7 @@ function payloadFor(type, message, receivedAt) {
     case "question.resolved": return { requestId: String(p.requestId), action: "accept", values: p.answers ?? null };
     case "question.closed": return { requestId: String(p.requestId), reason: "answered" };
     case "director.notified": return { notificationId: String(p.id ?? p.notificationId ?? ""), message: p.message ?? "", pendingRequestId: p.pendingRequestId == null ? null : String(p.pendingRequestId) };
-    case "control.message.updated": return { message: p.message ?? "", mode: p.interrupt ? "interrupt" : "queued", accepted: p.status !== "rejected" };
+    case "control.message.updated": return { message: p.message ?? "", mode: p.mode ?? (p.interrupt ? "interrupt" : "steer"), accepted: p.status !== "rejected" };
     case "agent.activity": return { agentId: String(item.agentThreadId), parentAgentId: p.threadId == null ? null : String(p.threadId),
       path: String(item.agentPath ?? item.agentThreadId).split("/").filter(Boolean).at(-1), status: item.kind ?? "interacted" };
     case "source.error": return { code: p.error?.code ?? null, message: p.error?.message ?? p.message ?? "Unknown error", data: p.error ?? null };

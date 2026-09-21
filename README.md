@@ -78,12 +78,13 @@ Use the job ID from `/codex:status` to control an already running task:
 
 ```text
 /codex:message <job-id> Use the latest plan from the plan center, not the stored chargeId.
+/codex:message <job-id> --queue Check the completed result against the new constraint next.
 /codex:message <job-id> --interrupt Stop this approach and inspect the new requirement first.
 /codex:status <job-id> --wait
 /codex:answer <job-id> --request-id <id> --answers-file /absolute/path/answers.json
 ```
 
-`message` uses native `turn/steer`: inputs stay ordered and are consumed before a later model request, not necessarily before tools already issued by the model. The acknowledgement means accepted, not executed. `--interrupt` cancels the current turn and starts a new turn in the same job and thread with the new input and the original write permission. Existing changes remain; its report includes observed file changes and the workspace's Git status, including pre-existing edits.
+`message` uses native `turn/steer`: inputs stay ordered and are consumed before a later model request, not necessarily before tools already issued by the model. The acknowledgement means accepted, not executed. `--queue` lets the active turn finish and uses one pending slot to start the next turn with the message; a second queued message is rejected until that slot is delivered. `--interrupt` cancels the current turn and starts a new turn in the same job and thread with the new input and the original write permission. Existing changes remain; its report includes observed file changes and the workspace's Git status, including pre-existing edits. `--queue` and `--interrupt` are mutually exclusive.
 
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 

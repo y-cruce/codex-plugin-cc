@@ -71,6 +71,7 @@ export async function runAcpTurn(cwd, options = {}) {
         const pending = port.takeReplacementPrompt();
         if (!pending || port.closed || error?.code === "TRANSPORT_CLOSED") {
           if (pending && error instanceof Error) error.undeliveredRedirect = true;
+          await port.rejectQueuedPrompt(error?.code ?? "failed");
           throw error;
         }
         input = pending;
@@ -78,10 +79,13 @@ export async function runAcpTurn(cwd, options = {}) {
         emitProgress(options.onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
         continue;
       }
-      input = port.takeReplacementPrompt();
-      if (input) {
+      const next = await port.takeNextPrompt(terminal);
+      input = next?.prompt;
+      if (next?.mode === "interrupt") {
         interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
         emitProgress(options.onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
+      } else if (next?.mode === "queue") {
+        emitProgress(options.onProgress, "Queued message is starting in the same ACP session.", "redirecting");
       }
     } while (input);
     await port.adapter.completeJob(terminal);

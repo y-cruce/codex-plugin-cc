@@ -288,6 +288,10 @@ test("director controls and delivered answers appear in default output and tail"
   assert.equal(control.source.raw.params.message, text);
   assert.equal(renderJobEvent(control), `director → interrupt: ${"x".repeat(200)}`);
   assert.equal(view.tail.at(-1).text, renderJobEvent(control));
+  assert.equal(accept("companion/control-message", { message: "steer", status: "accepted" }).payload.mode, "steer");
+  const queued = accept("companion/control-message", { message: "later", mode: "queue", status: "rejected" });
+  assert.deepEqual(queued.payload, { message: "later", mode: "queue", accepted: false });
+  assert.equal(renderJobEvent(queued), "director → queue rejected: later");
 });
 
 test("tail is bounded and terminal snapshot settles fields", () => {

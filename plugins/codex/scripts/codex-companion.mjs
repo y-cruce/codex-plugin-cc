@@ -93,7 +93,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs observe replay <job-id> [--after <cursor>] [--limit <n>] --jsonl",
       "  node scripts/codex-companion.mjs observe view-path <job-id> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
-      "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
+      "  node scripts/codex-companion.mjs message <job-id> [--queue|--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -1097,8 +1097,9 @@ async function handleStatus(argv) {
 async function handleLiveCommand(command, argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "prompt-file", "request-id", "answers-file"],
-    booleanOptions: ["json", "interrupt"]
+    booleanOptions: ["json", "queue", "interrupt"]
   });
+  if (options.queue && options.interrupt) throw new Error("message accepts only one of --queue or --interrupt.");
   const cwd = resolveCommandWorkspace(options);
   if (options["answers-file"]) options["answers-file"] = path.resolve(resolveCommandCwd(options), options["answers-file"]);
   const text = options["prompt-file"]

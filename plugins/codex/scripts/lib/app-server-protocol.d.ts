@@ -84,6 +84,11 @@ export interface LiveTurnStatus {
   workspaceStatus?: string;
 }
 
+export interface ExecutorCapabilities {
+  midTurnSteer: boolean;
+  nextTurnQueue: boolean;
+}
+
 export interface DirectorNotification {
   id: string;
   message: string;
@@ -106,11 +111,13 @@ export interface AppServerMethodMap {
   "broker/ack-notifications": { params: { threadId: string; ids: string[] }; result: { remaining: number } };
   "broker/answer": { params: { threadId: string; turnId: string; requestId: string | number; answers: unknown }; result: { answered: boolean; requestId: string | number } };
   "broker/redirect": { params: { threadId: string; turnId: string; input: UserInput[] }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
-  "executor/status": { params: { jobId: string; executor?: string; executorSessionId?: string | null }; result: LiveTurnStatus & { capabilities: { midTurnSteer: boolean } } };
+  "broker/queue-message": { params: { threadId: string; turnId: string; input: UserInput[] }; result: { queued: true } };
+  "executor/status": { params: { jobId: string; executor?: string; executorSessionId?: string | null }; result: LiveTurnStatus & { capabilities: ExecutorCapabilities } };
   "executor/ack-notifications": { params: { jobId: string; executorSessionId?: string | null; ids: string[] }; result: { remaining: number } };
   "executor/answer-question": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; action: string; values: unknown }; result: { answered: boolean; requestId: string | number } };
   "executor/answer-permission": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; outcome: string; optionId?: string | null }; result: { answered: boolean; requestId: string | number } };
   "executor/steer": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: TurnSteerResponse & { messageId?: string } };
+  "executor/queue-message": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: { queued: true } };
   "executor/interrupt-turn": { params: { jobId: string; executorSessionId?: string | null; turnId: string; replacementPrompt?: Array<{ type: string; text?: string }> }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
   "executor/cancel-job": { params: { jobId: string; executorSessionId?: string | null; turnId: string }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
 }
@@ -119,7 +126,7 @@ export type AppServerMethod = keyof AppServerMethodMap;
 export type AppServerRequestParams<M extends AppServerMethod> = AppServerMethodMap[M]["params"];
 export type AppServerResponse<M extends AppServerMethod> = AppServerMethodMap[M]["result"];
 export type AppServerNotification = Exclude<ServerNotification, { method: "turn/completed" }> |
-  { method: "turn/completed"; params: TurnCompletedNotification & { redirectInput?: UserInput[]; controlError?: string; interruptedWorkspaceStatus?: string } } |
+  { method: "turn/completed"; params: TurnCompletedNotification & { redirectInput?: UserInput[]; redirectMode?: "interrupt" | "queue"; controlError?: string; interruptedWorkspaceStatus?: string } } |
   { method: "companion/question"; params: { threadId: string; turnId: string; requestId: string | number } } |
   { method: "companion/notification"; params: DirectorNotification & { threadId: string } };
 export type AppServerNotificationHandler = (message: AppServerNotification) => void;

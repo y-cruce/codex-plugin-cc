@@ -201,6 +201,53 @@ test("a redirect that loses to natural completion is still delivered", async (t)
   assert.deepEqual(h.port.takeReplacementPrompt(), [{ type: "text", text: "carry on" }]);
 });
 
+test("ACP queued input starts after completion and occupies one slot", async (t) => {
+  const h = await setupPort(t, "acp-queue");
+  assert.deepEqual(h.port.liveStatus().capabilities, { midTurnSteer: false, nextTurnQueue: true });
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
+  const question = await waitFor(() => [...h.port.questions.values()][0]);
+  assert.deepEqual(await h.port.queueMessage({ turnId: turn.turnId, prompt: [{ type: "text", text: "basic" }] }), { queued: true });
+  await assert.rejects(h.port.queueMessage({ turnId: turn.turnId, prompt: [{ type: "text", text: "second" }] }), /already queued/);
+  await h.port.answerQuestion({ requestId: question.requestId, action: "accept",
+    values: { name: "Ada", choice: "a" } });
+  const next = await h.port.takeNextPrompt(await turn.done);
+  assert.deepEqual(next, { prompt: [{ type: "text", text: "basic" }], mode: "queue" });
+
+  const queuedTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: next.prompt });
+  assert.equal(h.port.queuedPrompt, null);
+  assert.equal((await queuedTurn.done).status, "completed");
+});
+
+test("ACP terminal failures reject queued input", async (t) => {
+  for (const status of ["failed", "cancelled", "interrupted"]) {
+    const h = await setupPort(t, `acp-queue-${status}`);
+    const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
+    const question = await waitFor(() => [...h.port.questions.values()][0]);
+    await h.port.queueMessage({ turnId: turn.turnId, prompt: [{ type: "text", text: status }] });
+    assert.equal(await h.port.takeNextPrompt({ status }), null);
+    assert.deepEqual(h.events.filter((event) => event.type === "control.message.updated").map((event) => event.payload.accepted),
+      [true, false], status);
+    await h.port.answerQuestion({ requestId: question.requestId, action: "cancel", values: null });
+    await turn.done;
+  }
+});
+
+test("ACP interrupt replacement runs before queued input", async (t) => {
+  const h = await setupPort(t, "acp-queue-priority");
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-late" }] });
+  await h.port.queueMessage({ turnId: turn.turnId, prompt: [{ type: "text", text: "queued" }] });
+  const terminal = await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
+    replacementPrompt: [{ type: "text", text: "replacement" }] });
+  assert.deepEqual(await h.port.takeNextPrompt(terminal), {
+    prompt: [{ type: "text", text: "replacement" }], mode: "interrupt"
+  });
+
+  const replacement = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "replacement" }] });
+  assert.deepEqual(await h.port.takeNextPrompt(await replacement.done), {
+    prompt: [{ type: "text", text: "queued" }], mode: "queue"
+  });
+});
+
 test("ACP terminal tool calls emit both lifecycle endpoints from their first update", async (t) => {
   const h = await setupPort(t, "acp-terminal-tools");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "terminal-tool-calls" }] });

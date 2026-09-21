@@ -133,6 +133,7 @@ test("liveStatus resolves a running job from executorSessionId without threadId"
   const live = await liveStatus(h.repo, { ...job, threadId: undefined });
   assert.equal(live.turnId, job.turnId);
   assert.equal(live.capabilities.midTurnSteer, true);
+  assert.equal(live.capabilities.nextTurnQueue, true);
   const finished = h.cli("message", job.id, "finish");
   assert.equal(finished.status, 0, finished.stderr);
   assert.equal((await done).code, 0);

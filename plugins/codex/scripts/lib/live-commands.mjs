@@ -57,12 +57,18 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
     if (!job.turnId) throw new Error("The task is still starting. Refresh /codex:status before sending a message.");
     const prompt = [{ type: "text", text: text.trim() }];
     let result;
-    if (options.interrupt) {
+    if (options.queue) {
+      const status = await client.request("executor/status", params);
+      if (!status.capabilities?.nextTurnQueue) {
+        throw new Error("This executor cannot queue a message for the next turn.");
+      }
+      result = await client.request("executor/queue-message", { ...params, prompt });
+    } else if (options.interrupt) {
       result = await client.request("executor/interrupt-turn", { ...params, replacementPrompt: prompt });
     } else {
       const status = await client.request("executor/status", params);
       if (!status.capabilities?.midTurnSteer) {
-        throw new Error("This executor cannot add a message to the active turn. Retry with --interrupt.");
+        throw new Error("This executor cannot add a message to the active turn. Retry with --queue or --interrupt.");
       }
       result = await client.request("executor/steer", { ...params, prompt });
     }
