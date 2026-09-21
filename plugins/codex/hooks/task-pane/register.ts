@@ -34,6 +34,7 @@ type State = {
   pinned: boolean
   clock: string
   monitors: Map<string, { armedAt: number; checkedAt?: number }>
+  liveRoots: Set<string>
 }
 
 const PANE = 'codex_tasks'
@@ -58,6 +59,22 @@ export function pushLine(
     || (event.type === 'question.opened' ? view?.pendingQuestion?.text ?? '' : '')
     || (event.type.startsWith('job.') ? view?.lastMessage?.text ?? '' : '')
   return `${label} · ${event.type}${detail ? `: ${clip(detail, 300)}` : ''}`
+}
+
+export function shouldDropMonitorExpiry(
+  text: string,
+  watchedRoots: Iterable<string>,
+  liveRoots: ReadonlySet<string>,
+  canRearm: boolean,
+): boolean {
+  if (!canRearm || !text.includes('<event>[Monitor expired after ')) return false
+  for (const root of watchedRoots) {
+    if (!liveRoots.has(root)) continue
+    const name = root.split('/').at(-1) ?? root
+    const escaped = name.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    if (text.includes(`<summary>Monitor event: "Codex job events in ${escaped}"</summary>`)) return true
+  }
+  return false
 }
 const RESCAN_TICKS = 15
 // Polls a job may fail in a row before the pane stops asking for it.
@@ -106,6 +123,11 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       if (now - (monitor.checkedAt ?? 0) < CHECK_MS) continue
       monitor.checkedAt = now
       if (await watching($, state, root)) continue
+    }
+    if (!monitor && await watching($, state, root)) {
+      state.monitors.set(root, { armedAt: now })
+      await recordMonitors($, state)
+      continue
     }
     state.monitors.set(root, { armedAt: now })
     // Awaited, or a reload between the arm and the write reads the old set and
@@ -222,7 +244,8 @@ async function poll($: EngineInterface, state: State) {
     await refreshViews($, state)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
-    await ensureMonitors($, state, new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd)), await $.clock.now())
+    state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.job.status)).map(entry => entry.cwd))
+    await ensureMonitors($, state, state.liveRoots, await $.clock.now())
     for (const { job, cwd } of found) {
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
@@ -415,6 +438,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
+    liveRoots: new Set<string>(),
   }
 
   on('session.start', async ($, e, next) => {
@@ -433,6 +457,11 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       void poll($, state)
     }
     return next(e)
+  })
+  on('prompt.submit', ($, e, next) => {
+    if (e.origin.kind !== 'task-notification'
+      || !shouldDropMonitorExpiry(e.text, state.monitors.keys(), state.liveRoots, Boolean(state.script))) return next(e)
+    return { drop: 'Codex tasks monitor expiry is re-armed by the pane' }
   })
   // A dispatch creates its job in whatever repository the brief names; waiting
   // for the next rescan would show it up to half a minute late.

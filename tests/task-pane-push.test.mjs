@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pushLine } from "../plugins/codex/hooks/task-pane/register.ts";
+import { pushLine, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
 
 const view = {
@@ -22,6 +22,28 @@ test("a push line survives an event with no body of its own", () => {
   ];
   for (const [event, data, expected] of cases) {
     assert.equal(pushLine("job", event, data), expected, event.type);
+  }
+});
+
+test("only expiry notices for monitors owned by the task pane are dropped", () => {
+  const notice = (description, event) => `<task-notification>
+<summary>Monitor event: "${description}"</summary>
+<event>${event}</event>
+</task-notification>`;
+  const watched = new Set(["/work/alpha"]);
+  const live = new Set(["/work/alpha"]);
+  const cases = [
+    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]"), live, true, true],
+    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with 2 events delivered. Re-arm it if you still need the watch.]"), live, true, true],
+    [notice("Codex job events in alpha", "[Monitor stopped]"), live, true, false],
+    [notice("Codex job events in alpha", 'Monitor "Codex job events in alpha" stream ended'), live, true, false],
+    [notice("Codex job events in alpha", "DONE job-123"), live, true, false],
+    [notice("Codex job events in beta", "[Monitor expired after 30 minutes with no events delivered.]"), live, true, false],
+    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered.]"), new Set(), true, false],
+    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered.]"), live, false, false],
+  ];
+  for (const [text, liveRoots, canRearm, expected] of cases) {
+    assert.equal(shouldDropMonitorExpiry(text, watched, liveRoots, canRearm), expected, text);
   }
 });
 
