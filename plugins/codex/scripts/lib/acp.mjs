@@ -60,7 +60,24 @@ export async function runAcpTurn(cwd, options = {}) {
     do {
       const turn = await port.startTurn({ sessionId: session.sessionId, prompt: input });
       emitProgress(options.onProgress, `Turn started (${turn.turnId}).`, "starting", { turnId: turn.turnId });
-      terminal = await turn.done;
+      try {
+        terminal = await turn.done;
+      } catch (error) {
+        // A turn can end by throwing -- the agent dropped the connection, or
+        // exited -- after a redirect already cancelled it. The correction is
+        // waiting, so carry it into another turn while the session is still
+        // usable; when it is not, say that the correction never landed rather
+        // than report a bare transport error.
+        const pending = port.takeReplacementPrompt();
+        if (!pending || port.closed || error?.code === "TRANSPORT_CLOSED") {
+          if (pending && error instanceof Error) error.undeliveredRedirect = true;
+          throw error;
+        }
+        input = pending;
+        interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
+        emitProgress(options.onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
+        continue;
+      }
       input = port.takeReplacementPrompt();
       if (input) {
         interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
@@ -75,8 +92,13 @@ export async function runAcpTurn(cwd, options = {}) {
       finalContent: message?.content ?? [], reasoningSummary, error: terminal.status === "completed" ? null : { message: terminal.reason.message ?? terminal.reason.code },
       stderr: port.stderr.trim(), fileChanges: [], touchedFiles: [], interruptedTurns, commandExecutions: [] };
   } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
     const reason = { code: error?.code === "TRANSPORT_CLOSED" ? "transport_closed" : "backend_error",
-      backendCode: error?.code ?? null, message: error instanceof Error ? error.message : String(error), retryable: error?.retryable === true };
+      backendCode: error?.code ?? null, retryable: error?.retryable === true,
+      // Said in the failure itself: a job that dies holding a correction has to
+      // report that the correction never reached the agent, or the director
+      // reads a transport error and assumes the message is still queued.
+      message: error?.undeliveredRedirect ? `${detail} (the message sent with --interrupt was never delivered)` : detail };
     await port.adapter.completeJob({ status: "failed", reason, finalMessages: [], usage: null });
     throw error;
   } finally {

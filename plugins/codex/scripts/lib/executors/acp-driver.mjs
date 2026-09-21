@@ -454,17 +454,27 @@ export class AcpExecutorJobPort {
     active.interrupting = !cancelling;
     active.cancelling = cancelling;
     await this.cancelPending();
-    await this.connection.cancel({ sessionId: request.sessionId });
+    // Stored before the cancel is sent, not after the turn has ended. The
+    // cancel cannot be taken back, so a replacement kept only on the one path
+    // where the agent ends the turn as `interrupted` is lost on every other:
+    // a dropped connection, a different stop reason, a cancellation that times
+    // out. It is also read the moment the turn settles -- the run loop awaits
+    // the same promise this method does, and it was there first -- so a write
+    // made after that race resolves comes too late even when nothing failed.
+    // Cleared again only when the cancel itself never left.
+    if (!cancelling && request.replacementPrompt) this.replacementPrompt = request.replacementPrompt;
+    try {
+      await this.connection.cancel({ sessionId: request.sessionId });
+    } catch (error) {
+      if (!cancelling) this.replacementPrompt = null;
+      throw error;
+    }
     let timer;
     try {
-      const terminal = await Promise.race([active.done, new Promise((_, reject) => {
+      return await Promise.race([active.done, new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error("Timed out waiting for ACP cancellation."), { code: "CANCEL_TIMEOUT" })), request.timeoutMs);
         timer.unref?.();
       })]);
-      if (!cancelling && terminal.status === "interrupted" && request.replacementPrompt) {
-        this.replacementPrompt = request.replacementPrompt;
-      }
-      return terminal;
     } finally { clearTimeout(timer); }
   }
 

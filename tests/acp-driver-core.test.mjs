@@ -129,6 +129,20 @@ test("ACP resume emits no replay and stop reasons retain failure semantics", asy
   }
 });
 
+test("a redirect reaches the run loop, which reads it the moment the turn settles", async (t) => {
+  // The run loop awaits the turn and takes the replacement in the same step,
+  // and it awaited first: a replacement stored after the interrupt's own race
+  // resolves is written into a field nobody reads again, and the job ends
+  // cancelled with the correction lost. This is that ordering, not the
+  // interrupt call's return value.
+  const h = await setupPort(t, "acp-redirect-order");
+  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-late" }] });
+  const consumed = turn.done.then(() => h.port.takeReplacementPrompt());
+  await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
+    replacementPrompt: [{ type: "text", text: "carry on" }] });
+  assert.deepEqual(await consumed, [{ type: "text", text: "carry on" }]);
+});
+
 test("ACP cancel waits for late updates and closes pending input requests", async (t) => {
   const h = await setupPort(t, "acp-cancel");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-late" }] });
@@ -172,13 +186,19 @@ test("ACP cancel waits for late updates and closes pending input requests", asyn
   });
 });
 
-test("ACP redirect prompt is discarded when cancellation loses to natural completion", async (t) => {
+test("a redirect that loses to natural completion is still delivered", async (t) => {
+  // It used to be dropped here: the turn ended by itself while the cancel was
+  // in flight, so the interrupt had nothing to interrupt. But the director sent
+  // a correction, and a correction that arrives a moment late is the ordinary
+  // case, not a mistake -- delivering it in the next turn is what sending it
+  // meant. Dropping it silently is the defect this whole path is being fixed
+  // for, and it cannot be told apart from the message never having been sent.
   const h = await setupPort(t, "acp-cancel-natural");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-natural" }] });
   const terminal = await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
-    replacementPrompt: [{ type: "text", text: "must not run" }] });
+    replacementPrompt: [{ type: "text", text: "carry on" }] });
   assert.equal(terminal.status, "completed");
-  assert.equal(h.port.takeReplacementPrompt(), null);
+  assert.deepEqual(h.port.takeReplacementPrompt(), [{ type: "text", text: "carry on" }]);
 });
 
 test("ACP terminal tool calls emit both lifecycle endpoints from their first update", async (t) => {
