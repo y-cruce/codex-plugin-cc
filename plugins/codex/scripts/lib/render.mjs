@@ -93,6 +93,9 @@ function formatJobLine(job) {
   if (job.title) {
     parts.push(job.title);
   }
+  if (job.otherSession) {
+    parts.push("other session");
+  }
   return parts.join(" | ");
 }
 

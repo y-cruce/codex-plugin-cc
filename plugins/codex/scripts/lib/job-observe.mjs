@@ -267,12 +267,15 @@ export async function handleObserve(argv) {
           if (!selected.has(entry.job.id) || selected.get(entry.job.id).mtime < entry.mtime) selected.set(entry.job.id, entry);
         }
       }
-      const visible = [...selected.values()].filter(({ job }) => !process.env.CODEX_COMPANION_SESSION_ID || job.sessionId === process.env.CODEX_COMPANION_SESSION_ID);
-      const result = await Promise.all(visible.map(async ({ job: original, stateDir }) => {
+      // Every job in the repository, whichever session dispatched it: the pane
+      // draws them all and says which are another session's. Only what wakes
+      // the director stays scoped to the session that asked for the work.
+      const result = await Promise.all([...selected.values()].map(async ({ job: original, stateDir }) => {
         const manifest = await metadata({ stateDir }, original.id);
         const job = terminal(manifest?.metadata?.job?.status) ? manifest.metadata.job : original;
         return { id: job.id, label: job.label ?? null, status: job.status, startedAt: job.startedAt ?? null,
-          threadId: job.threadId ?? null, historyAvailable: Boolean(manifest && !manifest.tombstone) };
+          threadId: job.threadId ?? null, sessionId: job.sessionId ?? null,
+          historyAvailable: Boolean(manifest && !manifest.tombstone) };
       }));
       await write(`${JSON.stringify({ jobs: result })}\n`);
       return;

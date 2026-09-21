@@ -265,7 +265,14 @@ function matchJobReference(jobs, reference, predicate = () => true, options = {}
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  // Listed whoever dispatched them. A job started from another Claude session
+  // is still work running in this repository, and a listing that hides it left
+  // no way to see it at all. Which session it belongs to is marked instead;
+  // continuing a thread and cancelling without an id still default to this
+  // session's own jobs.
+  const currentSessionId = getCurrentSessionId(options);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).map((job) =>
+    currentSessionId && job.sessionId && job.sessionId !== currentSessionId ? { ...job, otherSession: true } : job);
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
