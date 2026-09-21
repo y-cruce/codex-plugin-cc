@@ -153,6 +153,22 @@ function briefOf(job) {
   return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
 }
 
+const trimmed = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+// What the task runs on. A Codex turn is started with the pair the request
+// names, and that is the pair. An ACP session is told a model and asks for an
+// effort, and which rung took effect is settled with the agent when the session
+// is set up: the record then holds it as `executorEffort`, possibly one below
+// what was asked for. The effective value wins; the request stands in until the
+// session reports.
+export function jobConfig(job) {
+  const request = job?.request ?? {};
+  if ((job?.executor ?? "codex") === "acp") {
+    return { model: trimmed(request.executorModel), effort: trimmed(job.executorEffort) ?? trimmed(request.executorEffort) };
+  }
+  return { model: trimmed(request.model), effort: trimmed(request.effort) };
+}
+
 export function createLiveView(job) {
   const executor = job.executor ?? "codex";
   return {
@@ -165,6 +181,7 @@ export function createLiveView(job) {
     threadId: job.executorSessionId ?? job.threadId ?? null,
     turnId: job.turnId ?? null,
     executor: { kind: executor, label: executor === "acp" ? "Qoder" : "Codex" },
+    ...jobConfig(job),
     activeCommands: [],
     lastMessage: null,
     files: [],

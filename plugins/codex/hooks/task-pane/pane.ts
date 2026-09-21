@@ -34,6 +34,17 @@ function tabLabel(text: string, columns: number): string {
   return `${(cut > columns / 2 ? room.slice(0, cut) : room).trimEnd()}…`
 }
 
+// A row is a task's name and whatever else fits beside it: the model and the
+// rung go first when the width runs out, then the executor, each dropped whole
+// rather than cut in half -- a task is listed to be recognized by name, and a
+// name followed by half a model name is noise.
+function taskLabel(position: number, data: LiveView, executor: string, room: number): string {
+  const name = `${position} ${data.label}`
+  const config = [data.model, data.effort].filter(Boolean).join(' ')
+  const rows = [name, `${name}${executor}`, `${name}${executor}${config ? ` · ${config}` : ''}`]
+  return clip(rows.filter(row => clip(row, room) === row).at(-1) ?? name, room)
+}
+
 export function paneBody(
   ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Button'>,
   jobs: LiveView[],
@@ -68,7 +79,7 @@ export function paneBody(
       Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸ ' : '  ' }),
       Button({
         key: `codex_tab_${data.jobId}`,
-        label: clip(`${index + 1} ${data.label}${executor}`, Math.max(8, width - state.length - 7)),
+        label: taskLabel(index + 1, data, executor, Math.max(8, width - state.length - 7)),
         // No `autoFocus`: the ring is drawn inverse, so starting it on the task
         // in view leaves a highlighted row sitting there when nobody is walking
         // the list. The marker already says which task the trace belongs to.

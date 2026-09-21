@@ -14,6 +14,10 @@ export type LiveView = {
   threadId: string | null
   turnId: string | null
   executor?: { kind: 'codex' | 'acp'; label: string }
+  // Absent on views written before the pane showed them, and null while the
+  // record does not know one.
+  model?: string | null
+  effort?: string | null
   activeCommands: { itemId: string; command: string; cwd: string; startedAt: string; agentThreadId?: string }[]
   lastMessage: { kind: 'assistant' | 'reasoning'; text: string; at: string } | null
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]

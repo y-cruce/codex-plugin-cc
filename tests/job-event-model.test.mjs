@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
-import { renderJobEvent, createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { renderJobEvent, createLiveView, applyJobEvent, jobConfig } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 
 function harness(job = {}) {
@@ -495,4 +495,35 @@ test("a canonical completion migrates and clears an active item from a legacy ch
   assert.equal(view._items[legacyKey], undefined);
   assert.equal(Object.keys(view._items).length, 0);
   assert.equal(view.tail[0].exitCode, 0);
+});
+
+test("the view names the model and the effort a task runs on, and stays quiet without them", () => {
+  // A Codex turn is started with the pair the request names, so that is the pair.
+  const codex = createLiveView({ id: "job-codex", executor: "codex", request: { model: "gpt-6-astra", effort: "high" } });
+  assert.equal(codex.model, "gpt-6-astra");
+  assert.equal(codex.effort, "high");
+
+  // An ACP session is told a model and asks for an effort, and which rung took
+  // effect comes back on the record as executorEffort: it wins over the ask,
+  // which stands in only until the session has answered for it.
+  const asked = createLiveView({ id: "job-acp", executor: "acp",
+    request: { executorModel: "dfmodel", executorEffort: "xhigh" } });
+  assert.deepEqual({ model: asked.model, effort: asked.effort }, { model: "dfmodel", effort: "xhigh" });
+  const settled = createLiveView({ id: "job-acp", executor: "acp", executorEffort: "max",
+    request: { executorModel: "dfmodel", executorEffort: "xhigh" } });
+  assert.deepEqual({ model: settled.model, effort: settled.effort }, { model: "dfmodel", effort: "max" });
+
+  // A record that names neither says nothing rather than "unknown", and an
+  // event cannot invent one: the pane draws what the record knows and leaves
+  // the rest off the row.
+  assert.deepEqual(jobConfig({ id: "job-plain" }), { model: null, effort: null });
+  const bare = createLiveView({ id: "job-plain" });
+  assert.equal(bare.model, null);
+  assert.equal(bare.effort, null);
+  const event = createCanonicalEvent({ job: { id: "job-plain" }, type: "turn.started",
+    identity: { sessionId: "thread-1", turnId: "turn-1" }, payload: { ordinal: 0, prompt: [] } });
+  event.seq = "1";
+  applyJobEvent(bare, event);
+  assert.equal(bare.model, null);
+  assert.equal(bare.effort, null);
 });
