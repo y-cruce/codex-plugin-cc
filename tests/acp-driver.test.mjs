@@ -35,7 +35,7 @@ async function setupPort(t, id = "acp-job", options = {}) {
   writeJobFile(cwd, id, job);
   upsertJob(cwd, job);
   const port = await openAcpExecutorJob({ cwd, job, command: process.execPath, args: [AGENT], env: options.env,
-    modelId: options.modelId, effortId: options.effortId });
+    modelId: options.modelId, effortId: options.effortId, onProgress: options.onProgress });
   t.after(() => port.close());
   const events = [];
   const pump = (async () => { for await (const event of port.events()) events.push(event); })();
@@ -58,10 +58,31 @@ test("ACP model selection sends session/set_config_option with the exact select 
   assert.equal(h.session.configOptions.find((option) => option.id === "model").currentValue, "efficient");
 });
 
-test("ACP session creation does not set a config option when no model is requested", async (t) => {
-  const recording = path.join(makeTempDir(), "acp-recording.jsonl");
-  await setupPort(t, "acp-default-model", { env: { ...process.env, ACP_FAKE_RECORDING: recording } });
-  assert.equal(readRecording(recording).some((entry) => entry.method === "session/set_config_option"), false);
+test("ACP model selection defaults to the 1M model, and an explicit model still wins", async (t) => {
+  // A model carries a context ceiling and the window is a separate setting, so
+  // the ceiling is what the model choice decides: `dfmodel` tops out at 1M
+  // where the agent's own default (`auto`) stops at 200K. A dispatch that names
+  // no model must still land on a 1M-capable one -- unless the agent does not
+  // offer it, which is a downgrade to its own default rather than a failed task.
+  for (const row of [
+    { id: "default", expected: "dfmodel" },
+    { id: "explicit", modelId: "efficient", expected: "efficient" },
+    { id: "unavailable", env: { ACP_FAKE_MODEL_OPTIONS: "efficient,performance" }, expected: null }
+  ]) {
+    const recording = path.join(makeTempDir(), "acp-recording.jsonl");
+    const progress = [];
+    const h = await setupPort(t, `acp-model-${row.id}`, { modelId: row.modelId, onProgress: (update) => progress.push(update),
+      env: { ...process.env, ACP_FAKE_RECORDING: recording, ...row.env } });
+    const request = readRecording(recording).find((entry) => entry.method === "session/set_config_option" &&
+      entry.params.configId === "model");
+    assert.equal(request?.params.value ?? null, row.expected, row.id);
+    if (row.expected) {
+      assert.equal(h.session.configOptions.find((option) => option.id === "model").currentValue, row.expected, row.id);
+    } else {
+      assert.match(progress.map((update) => update.stderrMessage ?? "").join("\n"),
+        /ACP model dfmodel is not available on this agent; keeping its default/i, row.id);
+    }
+  }
 });
 
 test("ACP model selection fails visibly for unsupported config and invalid values", async (t) => {
