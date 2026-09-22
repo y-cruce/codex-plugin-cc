@@ -71,10 +71,10 @@ test("task pane renders one thread row with both rounds in trace order", () => {
     usage: { inputTokens: 3, outputTokens: 3, cachedInputTokens: 0, complete: true },
     history: { committedSeq: "4", continuity: "complete" },
     rounds: [
-      { jobId: "task-old", sessionId: "session", prompt: "round one brief", executorTurnIds: ["turn-old"], firstSeq: "1", lastSeq: "2",
+      { jobId: "task-old", sessionId: "session", label: "opening round", prompt: "round one brief", executorTurnIds: ["turn-old"], firstSeq: "1", lastSeq: "2",
         usage: { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, complete: true }, result: null, status: "completed",
         startedAt: "2026-09-21T01:00:00Z", endedAt: "2026-09-21T01:30:00Z" },
-      { jobId: "task-new", sessionId: "session", prompt: "round two brief", executorTurnIds: ["turn-new"], firstSeq: "3", lastSeq: "4",
+      { jobId: "task-new", sessionId: "session", label: "newest", prompt: "round two brief", executorTurnIds: ["turn-new"], firstSeq: "3", lastSeq: "4",
         usage: { inputTokens: 2, outputTokens: 2, cachedInputTokens: 0, complete: true }, result: null, status: "completed",
         startedAt: "2026-09-21T01:30:00Z", endedAt: "2026-09-21T02:00:00Z" },
     ],
@@ -95,6 +95,8 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   const text = visit(tree);
   assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
   assert.equal(nodes.find((node) => node.type === "Button").props.key, "codex_tab_task-old");
+  // The row is named by the round that opened the thread, not by the newest one.
+  assert.match(nodes.find((node) => node.type === "Button").props.label, /opening round/);
   assert.ok(text.indexOf("first round trace") < text.indexOf("second round trace"), text);
   // Each round's brief opens that round, and the round boundary is the brief
   // rather than a terminal row that says what the heading already says.

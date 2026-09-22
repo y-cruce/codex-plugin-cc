@@ -9,7 +9,7 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "../plugins/codex/scr
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { ensureBrokerSession, saveBrokerSession, sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
 import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -50,7 +50,7 @@ async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
     if (broker.exitCode === null) broker.kill();
     await closed;
   });
-  assert.equal(await waitForBrokerEndpoint(endpoint, 15000), true, errors);
+  assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, errors);
   const connect = async () => {
     const client = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
     clients.push(client);

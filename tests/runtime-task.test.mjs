@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
@@ -18,7 +18,7 @@ const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.m
 
 beforeEach(isolateTestEnvironment);
 
-async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
+async function waitFor(predicate, { timeoutMs = BROKER_READY_MS, intervalMs = 50 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const value = await predicate();

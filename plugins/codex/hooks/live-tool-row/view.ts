@@ -33,6 +33,9 @@ export type LiveView = {
   rounds?: {
     jobId: string
     sessionId: string | null
+    // The name its own dispatch was given. Absent on rounds recorded before the
+    // pane needed one, and on a round whose dispatch named nothing.
+    label?: string | null
     prompt: string | null
     executorTurnIds: string[]
     firstSeq: string

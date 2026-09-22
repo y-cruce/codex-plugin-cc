@@ -11,13 +11,13 @@ import { ObservationClient } from "../plugins/codex/scripts/lib/observation-clie
 import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 
-async function waitFor(predicate, timeoutMs = 10000) {
+async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();

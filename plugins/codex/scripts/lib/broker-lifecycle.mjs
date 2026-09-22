@@ -193,7 +193,14 @@ async function ensureLockedBrokerSession(cwd, options) {
     env: options.env ?? process.env
   });
 
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 10000);
+  // Starting the broker means spawning node, which spawns codex app-server,
+  // which then binds. On an idle machine that is a second or two, and ten
+  // seconds looked like room to spare -- but the wait is not CPU the caller
+  // controls, and on a loaded box it runs past ten and the broker is torn down
+  // and reported as absent ("a shared broker is required"), which reads as a
+  // broken install rather than a busy machine. The startup lock above already
+  // waits thirty seconds for the same broker; this matches it.
+  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 30000);
   if (!ready) {
     teardownBrokerSession({
       endpoint,

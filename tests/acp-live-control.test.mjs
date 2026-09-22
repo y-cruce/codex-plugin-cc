@@ -11,7 +11,7 @@ import { readRoundContext } from "../plugins/codex/scripts/lib/history-resolver.
 import { liveStatus, sendLiveCommand } from "../plugins/codex/scripts/lib/live-commands.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -21,7 +21,7 @@ const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 // budget has to cover them on a box running the rest of the suite beside them,
 // not the second and a half they take with the file to themselves. Ten seconds
 // was under three times the solo cost and failed whenever the suite was busy.
-async function waitFor(predicate, timeoutMs = 45000) {
+async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();
@@ -63,7 +63,7 @@ function startTask(t, mode = "default") {
   return { cwd, env, child, done, cli, recording, runningJob, release };
 }
 
-async function waitForExit(task, timeoutMs = 45000) {
+async function waitForExit(task, timeoutMs = BROKER_READY_MS) {
   let timer;
   try {
     return await Promise.race([task.done, new Promise((_, reject) => {

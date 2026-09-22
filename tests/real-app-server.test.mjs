@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const SCRIPTS = fileURLToPath(new URL("../plugins/codex/scripts/", import.meta.url));
 const enabled = process.env.CODEX_REAL_APP_SERVER_TEST === "1";
@@ -99,7 +99,7 @@ unified_exec = true
       await entry.done;
     }
   });
-  assert.equal(await waitForBrokerEndpoint(endpoint, 15000), true);
+  assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true);
   control = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
   const waitFor = async (predicate) => {
     for (let i = 0; i < 400; i += 1) {

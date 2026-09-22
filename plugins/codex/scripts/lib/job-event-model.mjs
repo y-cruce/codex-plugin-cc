@@ -209,7 +209,7 @@ function roundFor(view, event) {
   if (!Array.isArray(view.rounds)) return null;
   let round = view.rounds.find((entry) => entry.jobId === event.jobId);
   if (!round) {
-    round = { jobId: event.jobId, sessionId: null, prompt: null, executorTurnIds: [], firstSeq: String(event.seq),
+    round = { jobId: event.jobId, sessionId: null, label: null, prompt: null, executorTurnIds: [], firstSeq: String(event.seq),
       lastSeq: String(event.seq), usage: emptyUsage(true), result: null, status: "running", startedAt: null, endedAt: null };
     view.rounds.push(round);
   }
@@ -323,7 +323,7 @@ export function applyJobEvent(view, event, options = {}) {
         view.endedAt = null;
         view.startedAt ??= p.startedAt ?? event.occurredAt;
         view._resumed = Boolean(p.resumed);
-        Object.assign(round, { sessionId: p.sessionId ?? null, prompt: p.prompt ?? null, status: "running",
+        Object.assign(round, { sessionId: p.sessionId ?? null, label: p.label ?? null, prompt: p.prompt ?? null, status: "running",
           startedAt: p.startedAt ?? event.occurredAt, endedAt: null, result: null });
       } else view.startedAt = p.startedAt ?? view.startedAt ?? event.occurredAt;
       break;

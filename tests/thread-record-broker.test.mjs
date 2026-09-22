@@ -12,14 +12,14 @@ import { readHistory, readRecordHistory } from "../plugins/codex/scripts/lib/job
 import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 const BROKER = path.join(ROOT, "plugins/codex/scripts/app-server-broker.mjs");
 const TERMINAL = new Set(["job.completed", "job.failed", "job.cancelled"]);
 
-async function waitFor(predicate, description, timeoutMs = 15000) {
+async function waitFor(predicate, description, timeoutMs = BROKER_READY_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();
@@ -62,7 +62,7 @@ test("broker seam binds resumed dispatches to one shared record", async (t) => {
     await closed;
     fs.rmSync(socketDir, { recursive: true, force: true });
   });
-  assert.equal(await waitForBrokerEndpoint(endpoint, 15000), true, brokerErrors);
+  assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, brokerErrors);
   const cli = (...args) => run(process.execPath, [SCRIPT, ...args, "--cwd", repo], { cwd: repo, env });
   const start = async (prompt, options = []) => {
     const launched = cli("task", "--background", ...options, "--label", prompt, "--json", prompt);
@@ -77,7 +77,10 @@ test("broker seam binds resumed dispatches to one shared record", async (t) => {
         if (value.pid) workers.add(value.pid);
         return TERMINAL.has(`job.${value.status}`) && value.threadId ? value : null;
       } catch { return null; }
-    }, `${prompt} completion`, 10000).catch((error) => {
+      // `--background` returns as soon as the detached worker is spawned, so
+      // this waits out that worker's own startup and broker connect, not just
+      // the round.
+    }, `${prompt} completion`, BROKER_READY_MS).catch((error) => {
       const log = last?.logFile && fs.existsSync(last.logFile) ? fs.readFileSync(last.logFile, "utf8") : "";
       const records = fs.existsSync(path.join(stateDir, "thread-records"))
         ? fs.readdirSync(path.join(stateDir, "thread-records")).map((id) => ({ id,

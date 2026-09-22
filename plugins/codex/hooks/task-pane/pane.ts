@@ -38,8 +38,14 @@ function tabLabel(text: string, columns: number): string {
 // rung go first when the width runs out, then the executor, each dropped whole
 // rather than cut in half -- a task is listed to be recognized by name, and a
 // name followed by half a model name is noise.
+// A thread is named by the round that opened it. `label` follows the newest
+// round, which says what the thread is doing rather than what it is for: after
+// three rounds a row read "probe round three" and nothing on screen still said
+// what had been asked first. Neither executor offers a thread name of its own
+// -- Codex's is set by whichever client bothers to generate one, and Qoder
+// sends none -- so the opening brief's name is what there is.
 function taskLabel(position: number, data: LiveView, executor: string, room: number): string {
-  const name = `${position} ${data.label}`
+  const name = `${position} ${data.rounds?.[0]?.label ?? data.label}`
   const config = [data.model, data.effort].filter(Boolean).join(' ')
   const rows = [name, `${name}${executor}`, `${name}${executor}${config ? ` · ${config}` : ''}`]
   return clip(rows.filter(row => clip(row, room) === row).at(-1) ?? name, room)

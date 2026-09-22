@@ -9,13 +9,13 @@ import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mj
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 const BROKER = path.join(ROOT, "plugins/codex/scripts/app-server-broker.mjs");
 
-async function waitFor(predicate, description = "observation", timeoutMs = 15000) {
+async function waitFor(predicate, description = "observation", timeoutMs = BROKER_READY_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();
@@ -73,7 +73,7 @@ async function setup(t) {
     await closed;
     fs.rmSync(socketDir, { recursive: true, force: true });
   });
-  assert.equal(await waitForBrokerEndpoint(endpoint, 15000), true, brokerErrors);
+  assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, brokerErrors);
   const rpc = async (method, params = {}) => {
     const client = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
     try { return await client.request(method, params); }
