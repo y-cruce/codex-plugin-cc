@@ -506,55 +506,12 @@ async function executeReviewRun(request) {
 }
 
 
-async function executeTaskRun(request) {
-  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  if (request.executor === "codex") ensureCodexAvailable(request.cwd);
-  if (request.resumeThreadId && !request.allowOtherRepo) {
-    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId, request.executor);
-  }
-
+function taskExecution(request, result) {
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
     resumeLast: Boolean(request.resumeLast || request.resumeThreadId),
     executor: request.executor
   });
-
-  let resumeThreadId = request.resumeThreadId ?? null;
-  if (request.resumeLast) {
-    const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
-      excludeJobId: request.jobId,
-      executor: request.executor
-    });
-    if (!latestThread) {
-      throw new Error("No previous Codex task thread was found for this repository.");
-    }
-    resumeThreadId = latestThread.id;
-  }
-
-  if (!request.prompt && !resumeThreadId) {
-    throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
-  }
-
-  const result = await (request.executor === "acp" ? runAcpTurn : runAppServerTurn)(workspaceRoot, {
-    resumeThreadId,
-    prompt: request.prompt,
-    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
-    model: request.model,
-    effort: request.effort,
-    sandbox: request.sandbox ?? (request.write ? "workspace-write" : "read-only"),
-    network: Boolean(request.network),
-    onProgress: request.onProgress,
-    persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
-    resumeSessionId: resumeThreadId,
-    command: request.executorCommand,
-    args: request.executorArgs,
-    modeId: request.executorMode,
-    modelId: request.executorModel,
-    effortId: request.executorEffort,
-    title: taskMetadata.title
-  });
-
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
   const rendered = renderTaskResult(
@@ -594,8 +551,88 @@ async function executeTaskRun(request) {
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
     jobClass: "task",
-    write: Boolean(request.write)
+    write: Boolean(request.write),
+    ...(result.afterCompletion ? { afterCompletion: result.afterCompletion } : {})
   };
+}
+
+async function executeTaskRun(request) {
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  if (request.executor === "codex") ensureCodexAvailable(request.cwd);
+  if (request.resumeThreadId && !request.allowOtherRepo) {
+    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId, request.executor);
+  }
+
+  const taskMetadata = buildTaskRunMetadata({
+    prompt: request.prompt,
+    resumeLast: Boolean(request.resumeLast || request.resumeThreadId),
+    executor: request.executor
+  });
+
+  let resumeThreadId = request.resumeThreadId ?? null;
+  if (request.resumeLast) {
+    const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
+      excludeJobId: request.jobId,
+      executor: request.executor
+    });
+    if (!latestThread) {
+      throw new Error("No previous Codex task thread was found for this repository.");
+    }
+    resumeThreadId = latestThread.id;
+  }
+
+  if (!request.prompt && !resumeThreadId) {
+    throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
+  }
+
+  const queuedRoundOptions = request.executor === "acp" ? {
+    createQueuedRound: ({ input, sourceJobId, sessionId, controlEndpoint }) => {
+      const prompt = input.map((item) => item.text).join("\n");
+      const metadata = buildTaskRunMetadata({ prompt, resumeLast: true, executor: "acp" });
+      const queuedJob = { ...buildTaskJob(workspaceRoot, metadata, request.write, request.sandbox, request.network, null, "acp"),
+        ...(request.executorMode ? { executorMode: request.executorMode } : {}),
+        ...(request.executorModel ? { executorModel: request.executorModel } : {}) };
+      const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, jobId: queuedJob.id });
+      const logFile = createJobLogFile(workspaceRoot, queuedJob.id, queuedJob.title);
+      appendLogLine(logFile, `Queued behind ${sourceJobId}.`);
+      const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", pid: process.pid, logFile,
+        request: queuedRequest, executorSessionId: sessionId, controlEndpoint };
+      writeJobFile(workspaceRoot, queuedJob.id, queuedRecord);
+      upsertJob(workspaceRoot, queuedRecord);
+      return { job: queuedRecord, request: queuedRequest };
+    },
+    runQueuedRound: async (round, runner) => {
+      const { logFile, progress } = createTrackedProgress(round.job, { logFile: round.job.logFile });
+      return runTrackedJob(round.job, async () => taskExecution(round.request, await runner(progress)), { logFile });
+    },
+    failQueuedRound: async (round, error) => {
+      try {
+        await runTrackedJob(round.job, async () => { throw error; }, { logFile: round.job.logFile });
+      } catch {}
+    }
+  } : {};
+  const result = await (request.executor === "acp" ? runAcpTurn : runAppServerTurn)(workspaceRoot, {
+    resumeThreadId,
+    prompt: request.prompt,
+    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
+    model: request.model,
+    effort: request.effort,
+    sandbox: request.sandbox ?? (request.write ? "workspace-write" : "read-only"),
+    network: Boolean(request.network),
+    onProgress: request.onProgress,
+    persistThread: true,
+    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
+    resumeSessionId: resumeThreadId,
+    command: request.executorCommand,
+    args: request.executorArgs,
+    modeId: request.executorMode,
+    modelId: request.executorModel,
+    effortId: request.executorEffort,
+    title: taskMetadata.title,
+    ...queuedRoundOptions
+  });
+
+  return taskExecution(request, result);
 }
 
 function buildReviewJobMetadata(reviewName, target) {
@@ -1109,7 +1146,7 @@ async function handleStatus(argv) {
 async function handleLiveCommand(command, argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "prompt-file", "request-id", "answers-file"],
-    booleanOptions: ["json", "interrupt"]
+    booleanOptions: ["json", "interrupt", "queue"]
   });
   const cwd = resolveCommandWorkspace(options);
   if (options["answers-file"]) options["answers-file"] = path.resolve(resolveCommandCwd(options), options["answers-file"]);

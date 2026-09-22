@@ -29,6 +29,10 @@ function record(value) {
   if (process.env.ACP_FAKE_RECORDING) fs.appendFileSync(process.env.ACP_FAKE_RECORDING, `${JSON.stringify(value)}\n`);
 }
 
+async function waitForRelease(file) {
+  while (!fs.existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 const modes = { currentModeId: "default", availableModes: ["default", "acceptEdits", "auto", "dontAsk", "yolo"].map((id) => ({ id, name: id, description: null })) };
 const modelValues = ["dfmodel", "efficient", "performance"];
 
@@ -137,10 +141,16 @@ class FakeAgent {
     const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     record({ method: "session/prompt", params });
     if (text === "transport-failure") process.exit(23);
+    if (text === "hold") {
+      await waitForRelease(process.env.ACP_FAKE_RELEASE_FILE);
+      return { stopReason: "end_turn" };
+    }
     if (text === "permission") {
       const response = await this.connection.requestPermission({ sessionId: params.sessionId,
         toolCall: { toolCallId: "permission-tool", title: "Dangerous operation", kind: "execute", status: "pending" },
-        options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+        options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" },
+          { optionId: "allow-session", name: "Allow for this session", kind: "allow_always" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" }] });
       await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(response.outcome) } });
       return { stopReason: response.outcome.outcome === "cancelled" ? "cancelled" : "end_turn" };
     }

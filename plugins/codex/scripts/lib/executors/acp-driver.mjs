@@ -79,7 +79,8 @@ function findReasoningEffortOption(configOptions = []) {
 const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
 
 function permissionQuestion(entry) {
-  return { requestId: entry.requestId, turnId: entry.turnId, message: `Permission requested: ${entry.payload.tool.title}`,
+  return { requestId: entry.requestId, turnId: entry.turnId, kind: "permission",
+    message: `Permission requested: ${entry.payload.tool.title}`,
     questions: [{ id: "optionId", question: `Permission requested: ${entry.payload.tool.title}`,
       options: entry.payload.options.map((option) => ({ label: option.name, value: option.optionId })) }], expiresAt: null };
 }
@@ -149,6 +150,7 @@ class AcpControlServer {
           result = { answered: true, requestId: p.requestId };
           break;
         case "executor/steer": throw Object.assign(new Error("This executor does not support mid-turn steering."), { code: "UNSUPPORTED_CAPABILITY" });
+        case "executor/queue-turn": result = this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/interrupt-turn":
           result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000,
             replacementPrompt: p.replacementPrompt ?? null });
@@ -189,9 +191,11 @@ export class AcpExecutorJobPort {
     this.effortId = options.effortId ?? null;
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
     this.onProgress = options.onProgress ?? null;
+    this.createQueuedRound = options.createQueuedRound ?? null;
     this.queue = new ExecutorEventQueue();
     this.permissions = new Map();
     this.questions = new Map();
+    this.queuedPrompts = [];
     this.activeTurn = null;
     this.replacementPrompt = null;
     this.stderr = "";
@@ -210,15 +214,19 @@ export class AcpExecutorJobPort {
     }
   }
 
+  createAdapter(job) {
+    return new AcpEventAdapter(async (event) => {
+      this.queue.push(event);
+      await this.runtime.record(event);
+    }, { job, receiveTime: this.receiveTime });
+  }
+
   async initialize() {
     this.runtime = new JobRuntime({ threadRecords: this.threadRecords,
       executorIdentity: { kind: "acp", command: this.command, args: this.args } });
     this.owner = {};
     await this.runtime.register(this.owner, this.cwd, this.job.id);
-    this.adapter = new AcpEventAdapter(async (event) => {
-      this.queue.push(event);
-      await this.runtime.record(event);
-    }, { job: this.job, receiveTime: this.receiveTime });
+    this.adapter = this.createAdapter(this.job);
     this.proc = spawn(this.command, this.args, { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32", windowsHide: true });
     this.proc.stderr.setEncoding("utf8");
@@ -255,11 +263,26 @@ export class AcpExecutorJobPort {
 
   async sessionResult(sessionId, response) {
     this.sessionId = sessionId;
-    await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
+    const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
+    this.recordId = binding.recordId ?? this.job.id;
     this.adapter.bindSession(sessionId);
     this.modes = response.modes ?? null;
     this.configOptions = response.configOptions ?? [];
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
+  }
+
+  async startQueuedRound(entry, onProgress) {
+    if (this.closed || this.exit) throw Object.assign(new Error("ACP executor session exited before the queued round started."), {
+      code: "TRANSPORT_CLOSED", retryable: true
+    });
+    this.job = entry.round.job;
+    this.onProgress = onProgress;
+    await this.runtime.register(this.owner, this.cwd, this.job.id);
+    const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, this.sessionId, null, entry.recordId);
+    this.recordId = binding.recordId;
+    this.adapter = this.createAdapter(this.job);
+    this.adapter.bindSession(this.sessionId);
+    this.control.jobId = this.job.id;
   }
 
   async applyMode(sessionId, response, modeId) {
@@ -267,6 +290,7 @@ export class AcpExecutorJobPort {
     const modes = response.modes?.availableModes ?? [];
     if (!modes.some((mode) => mode.id === modeId)) throw Object.assign(new Error(`ACP mode is not available: ${modeId}`), { code: "INVALID_STATE" });
     await this.connection.setSessionMode({ sessionId, modeId });
+    this.modeId = modeId;
     response.modes = { ...response.modes, currentModeId: modeId };
   }
 
@@ -360,6 +384,7 @@ export class AcpExecutorJobPort {
 
   async setMode(request) {
     await this.connection.setSessionMode({ sessionId: request.sessionId, modeId: request.modeId });
+    this.modeId = request.modeId;
   }
 
   async setConfigOption(request) {
@@ -391,11 +416,44 @@ export class AcpExecutorJobPort {
     return { turnId, done: active.done };
   }
 
+  queuePrompt(request) {
+    if (!this.activeTurn || this.activeTurn.turnId !== request.turnId) {
+      throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
+    }
+    if (!Array.isArray(request.prompt) || !request.prompt.length ||
+        request.prompt.some((item) => item.type !== "text" || !item.text?.trim())) {
+      throw Object.assign(new Error("A nonempty text message is required."), { code: "INVALID_ARGUMENT" });
+    }
+    if (!this.createQueuedRound) throw Object.assign(new Error("Queued ACP rounds are unavailable."), { code: "UNSUPPORTED_CAPABILITY" });
+    if (this.queuedPrompts.length >= 100) throw Object.assign(new Error("Pending message queue is full (100 messages)."), { code: "QUEUE_FULL" });
+    const input = structuredClone(request.prompt);
+    const round = this.createQueuedRound({ input, sourceJobId: this.job.id, sessionId: this.sessionId,
+      controlEndpoint: this.controlEndpoint });
+    const entry = { id: crypto.randomUUID(), jobId: round.job.id, input, status: "accepted", queued: true,
+      recordId: this.recordId, round };
+    this.queuedPrompts.push(entry);
+    return { queued: true, messageId: entry.id, queuedJobId: entry.jobId };
+  }
+
+  takeQueuedPrompt() { return this.queuedPrompts.shift() ?? null; }
+  drainQueuedPrompts() { return this.queuedPrompts.splice(0); }
+
   requestPermission(params) {
     const requestId = `permission:${crypto.randomUUID()}`;
     const payload = normalizeAcpPermission(params, requestId);
-    void this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,
+    const emitted = this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,
       "session/request_permission");
+    if (this.modeId === "yolo") {
+      const option = payload.options.find((item) => item.kind === "allow_always") ??
+        payload.options.find((item) => item.kind === "allow_once") ??
+        payload.options.find((item) => item.kind.startsWith("allow")) ?? null;
+      const outcome = option ? { outcome: "selected", optionId: option.optionId } : { outcome: "cancelled" };
+      return emitted.then(async () => {
+        await this.adapter.emit("permission.resolved", { requestId, outcome: outcome.outcome,
+          optionId: option?.optionId ?? null }, { requestId }, { outcome }, "session/request_permission");
+        return { outcome };
+      });
+    }
     return new Promise((resolve) => this.permissions.set(requestId, { requestId, turnId: this.activeTurn?.turnId ?? null,
       payload, resolve }));
   }
@@ -487,11 +545,14 @@ export class AcpExecutorJobPort {
   takeReplacementPrompt() { const value = this.replacementPrompt; this.replacementPrompt = null; return value; }
 
   liveStatus() {
-    return { threadId: this.sessionId, turnId: this.activeTurn?.turnId ?? null, pendingMessages: [], undeliveredMessages: [],
+    const permissions = [...this.permissions.values()].map(permissionQuestion);
+    return { threadId: this.sessionId, turnId: this.activeTurn?.turnId ?? null,
+      pendingMessages: this.queuedPrompts.map((entry) => structuredClone({ id: entry.id, jobId: entry.jobId,
+        input: entry.input, status: entry.status, queued: entry.queued })), undeliveredMessages: [],
       questions: [...this.questions.values()].map((entry) => ({ requestId: entry.requestId, turnId: entry.turnId,
         message: entry.payload.message, questions: entry.payload.fields.map((field) => ({ id: field.id,
-          question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: null })),
-      permissions: [...this.permissions.values()].map(permissionQuestion), notifications: [], interrupting: Boolean(this.activeTurn?.interrupting),
+          question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: null })).concat(permissions),
+      permissions, notifications: [], interrupting: Boolean(this.activeTurn?.interrupting),
       partialChanges: [], error: null, capabilities: { midTurnSteer: false } };
   }
 

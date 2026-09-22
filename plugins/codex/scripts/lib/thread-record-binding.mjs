@@ -152,7 +152,9 @@ export function bufferProvisionalEvent(provisional, event) {
   provisional.bytes += bytes;
 }
 
-export async function bindProvisionalDispatch(provisional, threadId, { stateDir = stateDirFor(provisional.workspaceRoot) } = {}) {
+export async function bindProvisionalDispatch(provisional, threadId, {
+  stateDir = stateDirFor(provisional.workspaceRoot), expectedRecordId = null
+} = {}) {
   if (typeof threadId !== "string" || !threadId) throw new Error("threadId is required.");
   const events = beginBinding(provisional);
   const workspaceRoot = canonicalWorkspaceRoot(provisional.workspaceRoot);
@@ -161,11 +163,12 @@ export async function bindProvisionalDispatch(provisional, threadId, { stateDir 
   const lease = await acquireWriterWaiting(lockDirectory).catch((error) => resetBinding(provisional, error));
   try {
     const existing = await resolveThreadRecord(workspaceRoot, provisional.executorKey, threadId, { stateDir });
-    if (existing) {
-      const manifest = await readJson(existing.manifest);
-      if (manifest?.activeRoundId && manifest.activeRoundId !== provisional.jobId) {
-        throw bindingError("THREAD_BUSY", `THREAD_BUSY thread=${threadId} active_job=${manifest.activeRoundId}`);
-      }
+    const manifest = existing ? await readJson(existing.manifest) : null;
+    if (expectedRecordId && (!existing || existing.recordId !== expectedRecordId || !manifest)) {
+      throw bindingError("THREAD_RECORD_MISSING", `Thread record ${expectedRecordId} is no longer available`);
+    }
+    if (manifest?.activeRoundId && manifest.activeRoundId !== provisional.jobId) {
+      throw bindingError("THREAD_BUSY", `THREAD_BUSY thread=${threadId} active_job=${manifest.activeRoundId}`);
     }
     const recordId = existing?.recordId ?? provisional.jobId;
     const job = { ...structuredClone(provisional.job), recordId, roundId: provisional.jobId, threadId };

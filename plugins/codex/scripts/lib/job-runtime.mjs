@@ -191,6 +191,38 @@ export class JobRuntime {
     if (round && entry.location?.roundReceipt) await updateRoundReceipt(entry.location, round, entry.job);
   }
 
+  terminalJob(entry, event) {
+    const errorMessage = event.payload?.error?.message ?? event.payload?.reason?.message ?? null;
+    return { ...entry.job, status: event.type.slice(4), completedAt: event.payload?.completedAt ?? event.occurredAt,
+      ...(event.payload?.result !== undefined ? { result: event.payload.result } : {}),
+      ...(errorMessage ? { errorMessage } : {}) };
+  }
+
+  async finalize(entry) {
+    if (entry.ended) return false;
+    if (entry.finalizing) return entry.finalizing;
+    entry.finalizing = (async () => {
+      await entry.store.flush();
+      if (this.threadRecords) {
+        await entry.store.updateManifest({ activeRoundId: null });
+        await this.persistRound(entry);
+      } else await entry.store.updateMetadata({ job: entry.job, status: entry.job.status, completedAt: entry.job.completedAt });
+      clearTimeout(entry.viewTimer);
+      entry.viewTimer = null;
+      await this.writeView(entry);
+      if (this.threadRecords) {
+        await entry.store.close();
+        entry.store = null;
+      }
+      entry.ended = true;
+      this.onTerminal?.(entry.job);
+      this.cleanup().catch((error) => this.diagnostic(error));
+      return true;
+    })();
+    try { return await entry.finalizing; }
+    finally { entry.finalizing = null; }
+  }
+
   async noteRoundTurn(entry, turnId) {
     if (!turnId) return;
     entry.view.turnId = turnId;
@@ -303,7 +335,7 @@ export class JobRuntime {
     return { historyAvailable: true, jobId, streamId: entry.store.snapshot.streamId };
   }
 
-  async bind(socket, cwd, jobId, threadId, turnId = null) {
+  async bind(socket, cwd, jobId, threadId, turnId = null, expectedRecordId = null) {
     if (!this.threadRecords) return { bound: false, jobId };
     const entry = this.owners.get(socket) ?? [...this.jobs.values()].find((item) => item.cwd === cwd && item.job.id === jobId);
     if (!entry || entry.job.id !== jobId) throw Object.assign(new Error(`UNKNOWN_JOB ${jobId}`), { code: "UNKNOWN_JOB" });
@@ -315,15 +347,19 @@ export class JobRuntime {
     }
     entry.binding = true;
     try {
-      const binding = await bindProvisionalDispatch(entry.provisional, threadId);
+      const binding = await bindProvisionalDispatch(entry.provisional, threadId, { expectedRecordId });
       await this.openThreadEntry(entry, binding);
       await this.noteRoundTurn(entry, turnId);
       const queued = entry.bindingEvents;
       entry.bindingEvents = [];
       entry.bindingBytes = 0;
+      const terminalEvent = queued.findLast((event) => TERMINAL_EVENTS.has(event.type));
+      if (terminalEvent) entry.job = this.terminalJob(entry, terminalEvent);
       for (const event of queued) await this.append(entry, event);
-      if (queued.some((event) => TERMINAL_EVENTS.has(event.type))) entry.terminalRecorded = true;
-      if (queued.some((event) => immediateEvents.has(event.type))) await entry.store.flush();
+      if (terminalEvent) {
+        entry.terminalRecorded = true;
+        await this.finalize(entry);
+      } else if (queued.some((event) => immediateEvents.has(event.type))) await entry.store.flush();
     } finally {
       entry.binding = false;
     }
@@ -342,6 +378,7 @@ export class JobRuntime {
   async record(event) {
     const entry = [...this.jobs.values()].find((item) => item.job.id === event.jobId);
     if (!entry) return false;
+    if (entry.ended && TERMINAL_EVENTS.has(event.type)) return true;
     if (this.threadRecords && entry.binding) {
       this.queueBindingEvent(entry, event);
       return true;
@@ -351,9 +388,12 @@ export class JobRuntime {
       bufferProvisionalEvent(entry.provisional, event);
       return true;
     }
+    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) entry.job = this.terminalJob(entry, event);
     await this.append(entry, event);
-    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) entry.terminalRecorded = true;
-    if (immediateEvents.has(event.type)) await entry.store.flush();
+    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) {
+      entry.terminalRecorded = true;
+      await this.finalize(entry);
+    } else if (immediateEvents.has(event.type)) await entry.store.flush();
     return true;
   }
 
@@ -405,30 +445,18 @@ export class JobRuntime {
     if (!entry) return { recorded: false };
     const job = await fs.readFile(entry.jobFile, "utf8").then(JSON.parse).catch(() => null);
     if (!job || !terminal(job.status) || entry.ended) return { recorded: entry.ended };
-    entry.ended = true;
     entry.job = this.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
       threadId: entry.job.threadId ?? job.threadId ?? null } : job;
     if (this.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(job, `job.${job.status}`, true));
       entry.job = { ...job, recordId: binding.recordId, roundId: job.id, threadId: null };
       await this.openThreadEntry(entry, binding);
+      entry.terminalRecorded = true;
     } else if (!this.threadRecords || !entry.terminalRecorded) {
       await this.append(entry, jobEvent(entry.job, `job.${job.status}`, this.threadRecords));
+      if (this.threadRecords) entry.terminalRecorded = true;
     }
-    await entry.store.flush();
-    if (this.threadRecords) {
-      await entry.store.updateManifest({ activeRoundId: null });
-      await this.persistRound(entry);
-    } else await entry.store.updateMetadata({ job, status: job.status, completedAt: job.completedAt });
-    clearTimeout(entry.viewTimer);
-    entry.viewTimer = null;
-    await this.writeView(entry);
-    this.onTerminal?.(entry.job);
-    if (this.threadRecords) {
-      await entry.store.close();
-      entry.store = null;
-    }
-    this.cleanup().catch((error) => this.diagnostic(error));
+    await this.finalize(entry);
     return { recorded: true };
   }
 
@@ -448,26 +476,17 @@ export class JobRuntime {
   }
 
   async failOwnerExited(entry, job) {
-    entry.ended = true;
     entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
     if (this.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(entry.job, "job.failed", true));
       entry.job = { ...entry.job, recordId: binding.recordId, roundId: entry.job.id, threadId: null };
       await this.openThreadEntry(entry, binding);
-    } else await this.append(entry, jobEvent(entry.job, "job.failed", this.threadRecords));
-    await entry.store.flush();
-    if (this.threadRecords) {
-      await entry.store.updateManifest({ activeRoundId: null });
-      await this.persistRound(entry);
-    } else await entry.store.updateMetadata({ job: entry.job, status: "failed", completedAt: entry.job.completedAt });
-    clearTimeout(entry.viewTimer);
-    entry.viewTimer = null;
-    await this.writeView(entry);
-    this.onTerminal?.(entry.job);
-    if (this.threadRecords) {
-      await entry.store.close();
-      entry.store = null;
+      entry.terminalRecorded = true;
+    } else {
+      await this.append(entry, jobEvent(entry.job, "job.failed", this.threadRecords));
+      if (this.threadRecords) entry.terminalRecorded = true;
     }
+    await this.finalize(entry);
   }
 
   async follow(socket, cwd, jobId, after) {

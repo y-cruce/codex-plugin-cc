@@ -32,14 +32,68 @@ export async function runAcpTurn(cwd, options = {}) {
   const job = { id: options.onProgress?.jobId ?? options.jobId, executor: "acp", workspaceRoot: cwd,
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
-    args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
+    args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId,
+    createQueuedRound: options.createQueuedRound });
   const eventPump = (async () => {
     for await (const event of port.events()) {
       options.onExecutorEvent?.(event);
       const progress = progressForEvent(event);
-      if (progress) emitProgress(options.onProgress, progress.message, progress.phase);
+      if (progress) emitProgress(port.onProgress, progress.message, progress.phase);
     }
   })();
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await port.close();
+    await eventPump;
+  };
+  const failQueuedRounds = async (error) => {
+    for (const entry of port.drainQueuedPrompts()) await options.failQueuedRound?.(entry.round, error);
+  };
+  const runRound = async (sessionId, firstInput, onProgress) => {
+    let input = firstInput;
+    let terminal;
+    const interruptedTurns = [];
+    try {
+      do {
+        const turn = await port.startTurn({ sessionId, prompt: input });
+        emitProgress(onProgress, `Turn started (${turn.turnId}).`, "starting", { turnId: turn.turnId });
+        try {
+          terminal = await turn.done;
+        } catch (error) {
+          const pending = port.takeReplacementPrompt();
+          if (!pending || port.closed || error?.code === "TRANSPORT_CLOSED") {
+            if (pending && error instanceof Error) error.undeliveredRedirect = true;
+            throw error;
+          }
+          input = pending;
+          interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
+          emitProgress(onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
+          continue;
+        }
+        input = port.takeReplacementPrompt();
+        if (input) {
+          interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
+          emitProgress(onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
+        }
+      } while (input);
+      await port.adapter.completeJob(terminal);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const reason = { code: error?.code === "TRANSPORT_CLOSED" ? "transport_closed" : "backend_error",
+        backendCode: error?.code ?? null, retryable: error?.retryable === true,
+        message: error?.undeliveredRedirect ? `${detail} (the message sent with --interrupt was never delivered)` : detail };
+      await port.adapter.completeJob({ status: "failed", reason, finalMessages: [], usage: null });
+      throw error;
+    }
+    const message = lastAssistantMessage(terminal);
+    const reasoningSummary = terminal.finalMessages.filter((item) => item.role === "reasoning" && item.text).map((item) => item.text);
+    return { status: terminal.status === "completed" ? 0 : 1, executor: "acp", sessionId,
+      threadId: sessionId, turnId: terminal.turnId, terminal, finalMessage: message?.text ?? "",
+      finalContent: message?.content ?? [], reasoningSummary, error: terminal.status === "completed" ? null : { message: terminal.reason.message ?? terminal.reason.code },
+      stderr: port.stderr.trim(), fileChanges: [], touchedFiles: [], interruptedTurns, commandExecutions: [] };
+  };
   try {
     emitProgress(options.onProgress, options.resumeSessionId ? `Resuming ACP session ${options.resumeSessionId}.` : "Starting ACP session.", "starting",
       { executor: "acp", controlEndpoint: port.controlEndpoint });
@@ -54,55 +108,32 @@ export async function runAcpTurn(cwd, options = {}) {
     });
     const prompt = options.prompt?.trim() || options.defaultPrompt || "";
     if (!prompt) throw new Error("A prompt is required for this ACP run.");
-    let input = [{ type: "text", text: prompt }];
-    let terminal;
-    const interruptedTurns = [];
-    do {
-      const turn = await port.startTurn({ sessionId: session.sessionId, prompt: input });
-      emitProgress(options.onProgress, `Turn started (${turn.turnId}).`, "starting", { turnId: turn.turnId });
+    const firstResult = await runRound(session.sessionId, [{ type: "text", text: prompt }], options.onProgress);
+    return { ...firstResult, afterCompletion: async () => {
       try {
-        terminal = await turn.done;
-      } catch (error) {
-        // A turn can end by throwing -- the agent dropped the connection, or
-        // exited -- after a redirect already cancelled it. The correction is
-        // waiting, so carry it into another turn while the session is still
-        // usable; when it is not, say that the correction never landed rather
-        // than report a bare transport error.
-        const pending = port.takeReplacementPrompt();
-        if (!pending || port.closed || error?.code === "TRANSPORT_CLOSED") {
-          if (pending && error instanceof Error) error.undeliveredRedirect = true;
-          throw error;
+        let queued;
+        while ((queued = port.takeQueuedPrompt())) {
+          try {
+            await options.runQueuedRound(queued.round, async (onProgress) => {
+              await port.startQueuedRound(queued, onProgress);
+              emitProgress(onProgress, "Previous round completed; starting the next queued instruction.", "starting", {
+                executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId,
+                controlEndpoint: port.controlEndpoint, executorEffort: session.effortId
+              });
+              return runRound(session.sessionId, queued.input, onProgress);
+            });
+          } catch (error) {
+            await failQueuedRounds(error);
+            break;
+          }
         }
-        input = pending;
-        interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
-        emitProgress(options.onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
-        continue;
+      } finally {
+        await close();
       }
-      input = port.takeReplacementPrompt();
-      if (input) {
-        interruptedTurns.push({ turnId: turn.turnId, touchedFiles: [], workspaceStatus: null });
-        emitProgress(options.onProgress, "Turn interrupted; continuing in the same ACP session.", "redirecting");
-      }
-    } while (input);
-    await port.adapter.completeJob(terminal);
-    const message = lastAssistantMessage(terminal);
-    const reasoningSummary = terminal.finalMessages.filter((item) => item.role === "reasoning" && item.text).map((item) => item.text);
-    return { status: terminal.status === "completed" ? 0 : 1, executor: "acp", sessionId: session.sessionId,
-      threadId: session.sessionId, turnId: terminal.turnId, terminal, finalMessage: message?.text ?? "",
-      finalContent: message?.content ?? [], reasoningSummary, error: terminal.status === "completed" ? null : { message: terminal.reason.message ?? terminal.reason.code },
-      stderr: port.stderr.trim(), fileChanges: [], touchedFiles: [], interruptedTurns, commandExecutions: [] };
+    } };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    const reason = { code: error?.code === "TRANSPORT_CLOSED" ? "transport_closed" : "backend_error",
-      backendCode: error?.code ?? null, retryable: error?.retryable === true,
-      // Said in the failure itself: a job that dies holding a correction has to
-      // report that the correction never reached the agent, or the director
-      // reads a transport error and assumes the message is still queued.
-      message: error?.undeliveredRedirect ? `${detail} (the message sent with --interrupt was never delivered)` : detail };
-    await port.adapter.completeJob({ status: "failed", reason, finalMessages: [], usage: null });
+    await failQueuedRounds(error);
+    await close();
     throw error;
-  } finally {
-    await port.close();
-    await eventPump;
   }
 }

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +9,7 @@ import test from "node:test";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { applyJobEvent, createLiveView } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { historyHasTerminalEvent, JobEventStore, readHistory, readRecordHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
 import { jobIndexPath, legacyJobHistoryPaths, threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
@@ -129,6 +132,73 @@ test("round reducer keeps redirected executor turns in one dispatch round", () =
   assert.deepEqual(view.rounds[0].result, { rawOutput: "done" });
   assert.equal(view.rounds[0].firstSeq, "1");
   assert.equal(view.rounds[0].lastSeq, "7");
+});
+
+test("terminal endings release a bound record for the next round", async (t) => {
+  const endings = [
+    { name: "ACP completed", executor: "acp", status: "completed", source: "event" },
+    { name: "ACP failed", executor: "acp", status: "failed", source: "event" },
+    { name: "ACP cancelled", executor: "acp", status: "cancelled", source: "event" },
+    { name: "Codex completed", executor: "codex", status: "completed", source: "job-file" },
+    { name: "owner process exited", executor: "codex", status: "failed", source: "owner-exit" }
+  ];
+
+  for (const ending of endings) await t.test(ending.name, async (t) => {
+    isolateTestEnvironment(t);
+    const cwd = fs.realpathSync(makeTempDir());
+    const threadId = `thread-${ending.executor}-${ending.source}-${ending.status}`;
+    let pid = process.pid;
+    if (ending.source === "owner-exit") {
+      const ownerProcess = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+      await once(ownerProcess, "exit");
+      pid = ownerProcess.pid;
+    }
+    const first = { id: `task-first-${ending.source}-${ending.status}`, workspaceRoot: cwd, executor: ending.executor,
+      status: "running", startedAt: AT, createdAt: AT, pid };
+    writeJobFile(cwd, first.id, first);
+    const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: true,
+      executorIdentity: ending.executor === "acp" ? { kind: "acp", command: "qoder", args: [] } : null });
+    try {
+      const firstOwner = {};
+      await runtime.register(firstOwner, cwd, first.id);
+      const firstBinding = await runtime.bind(firstOwner, cwd, first.id, threadId, "turn-first");
+      if (ending.source === "event") {
+        await runtime.record(event(first.id, `job.${ending.status}`, "turn-first"));
+      } else if (ending.source === "job-file") {
+        writeJobFile(cwd, first.id, { ...first, status: ending.status, completedAt: AT,
+          executorSessionId: threadId, threadId, turnId: "turn-first", pid: null });
+        await runtime.finish(cwd, first.id);
+      } else {
+        await runtime.reconcile();
+      }
+
+      const firstLocation = await resolveJobHistory(cwd, first.id);
+      const firstManifest = JSON.parse(fs.readFileSync(firstLocation.manifest, "utf8"));
+      const firstView = JSON.parse(fs.readFileSync(firstLocation.liveView, "utf8"));
+      const firstReceipt = JSON.parse(fs.readFileSync(firstLocation.roundReceipt, "utf8"));
+      assert.equal(firstManifest.activeRoundId, null);
+      assert.equal(firstView.activeRoundId, null);
+      assert.equal(firstView.latestRoundId, first.id);
+      assert.equal(firstView.status, ending.status);
+      assert.ok(firstView.endedAt);
+      assert.equal(firstReceipt.status, ending.status);
+      assert.ok(firstReceipt.endedAt);
+
+      const second = { id: `task-second-${ending.source}-${ending.status}`, workspaceRoot: cwd, executor: ending.executor,
+        status: "running", startedAt: AT, createdAt: AT, pid: process.pid };
+      writeJobFile(cwd, second.id, second);
+      const secondOwner = {};
+      await runtime.register(secondOwner, cwd, second.id);
+      const secondBinding = await runtime.bind(secondOwner, cwd, second.id, threadId, "turn-second");
+      assert.equal(secondBinding.recordId, firstBinding.recordId);
+      const history = await readRecordHistory(cwd, firstBinding.recordId);
+      assert.deepEqual([...new Set(history.events.map((entry) => entry.jobId))], [first.id, second.id]);
+      const secondManifest = JSON.parse(fs.readFileSync(firstLocation.manifest, "utf8"));
+      assert.equal(secondManifest.activeRoundId, second.id);
+    } finally {
+      await runtime.close();
+    }
+  });
 });
 
 test("explicit seam-off runtime keeps the legacy path and v1 cursor", async (t) => {

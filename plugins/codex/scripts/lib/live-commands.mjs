@@ -68,15 +68,28 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
       const question = snapshot.questions.find((item) => String(item.requestId) === options["request-id"]);
       if (!question) throw new Error("No matching pending question. Refresh /codex:status.");
       const answers = JSON.parse(fs.readFileSync(path.resolve(cwd, options["answers-file"]), "utf8"));
+      if (question.kind === "permission") {
+        const selected = answers?.optionId?.answers;
+        const optionId = Array.isArray(selected) && selected.length === 1 ? selected[0] : null;
+        const offeredOptions = question.questions.find((item) => item.id === "optionId")?.options ?? [];
+        if (typeof optionId !== "string" || !offeredOptions.some((option) => option.value === optionId)) {
+          throw new Error("Answer a permission with exactly one offered option value under optionId.");
+        }
+        return client.request("executor/answer-permission", { ...params, turnId: question.turnId,
+          requestId: question.requestId, outcome: "selected", optionId });
+      }
       return client.request("executor/answer-question", { ...params, turnId: question.turnId,
         requestId: question.requestId, action: "accept", values: answers });
     }
     if (!text?.trim()) throw new Error("message requires text or --prompt-file.");
     if (!job.turnId) throw new Error("The task is still starting. Refresh /codex:status before sending a message.");
+    if (options.interrupt && options.queue) throw new Error("--interrupt and --queue are two different intents; pass one.");
     const prompt = [{ type: "text", text: text.trim() }];
     let result;
     if (options.interrupt) {
       result = await client.request("executor/interrupt-turn", { ...params, replacementPrompt: prompt });
+    } else if (options.queue) {
+      result = await client.request("executor/queue-turn", { ...params, prompt });
     } else {
       const status = await client.request("executor/status", params);
       if (!status.capabilities?.midTurnSteer) {

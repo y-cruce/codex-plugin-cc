@@ -230,6 +230,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     await finishObservedJob(job.workspaceRoot, job.id);
+    await execution.afterCompletion?.();
     return execution;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

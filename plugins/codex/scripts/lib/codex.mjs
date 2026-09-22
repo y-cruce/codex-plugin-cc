@@ -33,6 +33,7 @@
  *   commandExecutions: ThreadItem[],
  *   onProgress: ProgressReporter | null
  *   redirectInput?: UserInput[]
+ *   queuedInput?: UserInput[]
  *   interruptedWorkspaceStatus?: string
  * }} TurnCaptureState
  */
@@ -535,6 +536,7 @@ function applyTurnNotification(state, message) {
         "finalizing"
       );
       state.redirectInput = message.params.redirectInput;
+      state.queuedInput = message.params.queuedInput;
       state.interruptedWorkspaceStatus = message.params.interruptedWorkspaceStatus;
       if (message.params.controlError) state.error = { message: message.params.controlError };
       completeTurn(state, message.params.turn);
@@ -1114,11 +1116,13 @@ export async function runAppServerTurn(cwd, options = {}) {
         terminal = await turn.done;
         turnState = await turn.capture;
         fileChanges.push(...turnState.fileChanges);
-        input = turnState.redirectInput;
-        if (input) {
+        input = turnState.redirectInput ?? turnState.queuedInput;
+        if (turnState.redirectInput) {
           interruptedTurns.push({ turnId: turnState.turnId, touchedFiles: collectTouchedFiles(turnState.fileChanges),
             workspaceStatus: turnState.interruptedWorkspaceStatus });
           emitProgress(options.onProgress, "Turn interrupted; continuing in the same thread with the new instruction. Existing file changes are retained.", "redirecting");
+        } else if (turnState.queuedInput) {
+          emitProgress(options.onProgress, "Turn completed; starting the next queued instruction.", "starting");
         }
       } while (input);
 

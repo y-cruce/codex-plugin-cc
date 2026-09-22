@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { runCommand } from "./process.mjs";
 
-const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/ack-notifications"]);
+const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/queue", "broker/ack-notifications"]);
 export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
@@ -17,7 +17,7 @@ export class LiveTurnControl {
 
   state(threadId) {
     if (!this.threads.has(threadId)) {
-      this.threads.set(threadId, { threadId, turnId: null, pendingMessages: [], questions: [], notifications: [],
+      this.threads.set(threadId, { threadId, turnId: null, pendingMessages: [], queuedMessages: [], questions: [], notifications: [],
         interrupting: false, partialChanges: [], undeliveredMessages: [], error: null });
     }
     return this.threads.get(threadId);
@@ -41,8 +41,8 @@ export class LiveTurnControl {
   snapshot(threadId) {
     const state = this.threads.get(threadId);
     if (!state) throw new Error("Thread is not loaded in this broker.");
-    const { redirectInput, interruptedReport, finishInterrupt, ...snapshot } = state;
-    return snapshot;
+    const { redirectInput, interruptedReport, finishInterrupt, queuedMessages, ...snapshot } = state;
+    return { ...snapshot, pendingMessages: [...snapshot.pendingMessages, ...queuedMessages].map((entry) => structuredClone(entry)) };
   }
 
   clearQuestions(state) {
@@ -84,6 +84,10 @@ export class LiveTurnControl {
         if (state.redirectInput) p.redirectInput = state.redirectInput;
       }
       if (state.error) p.controlError = state.error;
+      if (!state.redirectInput) {
+        const queued = state.queuedMessages.shift();
+        if (queued) p.queuedInput = queued.input;
+      }
       delete state.redirectInput;
       state.undeliveredMessages = state.pendingMessages;
       state.pendingMessages = [];
@@ -165,7 +169,7 @@ export class LiveTurnControl {
       state.questions = state.questions.filter((question) => question.requestId !== p.requestId);
       return { answered: true, requestId: p.requestId };
     }
-    if (method === "turn/steer" || method === "broker/redirect") {
+    if (method === "turn/steer" || method === "broker/redirect" || method === "broker/queue") {
       if (!Array.isArray(p.input) || !p.input.length || p.input.some((item) => item.type !== "text" || !item.text?.trim())) {
         throw new Error("A nonempty text message is required.");
       }
@@ -186,6 +190,12 @@ export class LiveTurnControl {
         state.pendingMessages = state.pendingMessages.filter((message) => message !== entry);
         throw error;
       }
+    }
+    if (method === "broker/queue") {
+      if (state.queuedMessages.length >= 100) throw new Error("Pending message queue is full (100 messages).");
+      const entry = { id: crypto.randomUUID(), input: structuredClone(p.input), status: "accepted", queued: true };
+      state.queuedMessages.push(entry);
+      return { queued: true, messageId: entry.id };
     }
     state.interrupting = true;
     if (method === "broker/redirect") state.redirectInput = p.input;

@@ -52,14 +52,15 @@ function prefix(job) {
   return `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;
 }
 
-async function questionResolvedLater(event, job, location, page) {
+async function inputResolvedLater(event, job, location, page) {
   if (BigInt(event.seq) > BigInt(page.committedSeq)) return false;
   const requestId = String(event.payload.requestId);
   let after = cursorFor(cursorManifest(page, job.id), event.seq);
   while (true) {
     const future = await history(location, job.id, { after, limit: 256 });
     for (const candidate of future.events) {
-      if (["question.resolved", "question.closed"].includes(candidate.type) && String(candidate.payload.requestId) === requestId) return true;
+      if (["question.resolved", "question.closed", "permission.resolved"].includes(candidate.type) &&
+          String(candidate.payload.requestId) === requestId) return true;
       if (["job.completed", "job.failed", "job.cancelled"].includes(candidate.type)) return true;
     }
     if (future.caughtUp === true || (future.caughtUp === undefined &&
@@ -71,7 +72,7 @@ async function questionResolvedLater(event, job, location, page) {
 async function eventExit(event, job, until, location, page) {
   const p = event.payload;
   const threadId = event.identity.sessionId ?? job.executorSessionId ?? job.threadId ?? "unknown";
-  if (event.type === "question.opened") {
+  if (event.type === "question.opened" || event.type === "permission.requested") {
     if (terminal(job.status)) return null;
     const endpoint = location.fallback ? (await readObservationJson(path.join(location.stateDir, "broker.json")))?.endpoint : undefined;
     const live = job.executor || job.controlEndpoint || endpoint
@@ -79,9 +80,9 @@ async function eventExit(event, job, until, location, page) {
           threadId: event.identity.sessionId ?? job.threadId }, { brokerEndpoint: endpoint })
       : null;
     if (Array.isArray(live?.questions) && !live.questions.some((question) => String(question.requestId) === String(p.requestId))) return null;
-    if (!Array.isArray(live?.questions) && await questionResolvedLater(event, job, location, page)) return null;
+    if (!Array.isArray(live?.questions) && await inputResolvedLater(event, job, location, page)) return null;
     const first = await claimQuestion(location.stateDir, job.id, p.requestId);
-    const text = oneLine(p.message).slice(0, 200);
+    const text = oneLine(p.message ?? (event.type === "permission.requested" ? `Permission requested: ${p.tool?.title}` : "")).slice(0, 200);
     return first ? `QUESTION ${prefix(job)} request=${p.requestId} ${text}`
       : `QUESTION_PENDING ${prefix(job)} request=${p.requestId} still unanswered: ${text}`;
   }

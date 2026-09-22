@@ -433,7 +433,8 @@ export function renderJobStatusReport(job) {
       lines.push(`Pending message ${message.id} (${message.status}): ${message.input.map((item) => item.text).join("\n")}`);
     }
     for (const question of job.live.questions ?? []) {
-      lines.push(`Waiting for answer: ${question.requestId} (expires ${new Date(question.expiresAt).toISOString()})`,
+      const expires = question.expiresAt == null ? "" : ` (expires ${new Date(question.expiresAt).toISOString()})`;
+      lines.push(`Waiting for answer: ${question.requestId}${expires}`,
         JSON.stringify(question.questions, null, 2),
         `Answer: /codex:answer ${job.id} --request-id ${question.requestId} --answers-file <path>`);
     }
