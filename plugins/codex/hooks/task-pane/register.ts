@@ -336,7 +336,11 @@ async function poll($: EngineInterface, state: State) {
       }
     }
     await refreshViews($, state)
-    if (state.views.size && !state.opened) {
+    // What the pane would draw, not every view the scan loaded: a repository
+    // keeps its finished jobs for weeks, so a fresh session found four threads
+    // from a fortnight ago, opened the pane for them, and drew "nothing
+    // dispatched yet" -- the list the body works from had dropped them all.
+    if (visibleThreads(state).length && !state.opened) {
       state.opened = true
       await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
@@ -532,9 +536,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return next(e)
   })
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (e.props.hasSurvey || state.opened || !state.views.size) return next(e)
+    // Same list as the pane's own body: a session with nothing to show had the
+    // button sitting under its prompt for as long as it ran.
+    const threads = visibleThreads(state)
+    if (e.props.hasSurvey || state.opened || !threads.length) return next(e)
     const { Box, Button } = $.ui.resolve(e)
-    const running = [...state.views.values()].filter(view => !isOver(view)).length
+    const running = threads.filter(view => !isOver(view)).length
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
       label: `Codex tasks${running ? ` · ${running} running` : ''}`,
