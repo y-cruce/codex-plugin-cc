@@ -10,7 +10,7 @@ import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-d
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -29,7 +29,6 @@ async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
 async function setupPort(t, id = "acp-job", options = {}) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const job = { id, executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };
   writeJobFile(cwd, id, job);
@@ -57,7 +56,6 @@ function processAlive(pid) {
 test("ACP initialization failure closes the spawned agent", async (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const pidFile = path.join(makeTempDir(), "agent.pid");
   const job = { id: "acp-init-failure", executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };

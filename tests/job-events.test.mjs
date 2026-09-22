@@ -134,6 +134,23 @@ test("events acknowledges a note once and reports only jobs observed active", as
   assert.deepEqual(acknowledged, [{ cwd: "/repo", jobId: job.id, ids: [note.id] }]);
 });
 
+test("events reports only jobs owned by the requested Claude session", async () => {
+  const mine = { ...job, id: "mine", sessionId: "session-a" };
+  const foreign = { ...job, id: "foreign", sessionId: "session-b" };
+  const legacy = { ...job, id: "legacy" };
+  const observed = [];
+  const lines = await monitor([
+    { running: [mine, foreign, legacy] },
+    { latestFinished: { ...mine, status: "completed" }, recent: [
+      { ...foreign, status: "completed" }, { ...legacy, status: "completed" }
+    ] }
+  ], {
+    status: async (cwd, current) => { observed.push(current.id); return {}; }
+  }, { session: "session-a" });
+  assert.deepEqual(observed, ["mine", "mine"]);
+  assert.deepEqual(lines, ["DONE job=mine thread=thread-1"]);
+});
+
 for (const terminal of ["completed", "failed"]) {
   test(`events includes the job label on every event (${terminal})`, async () => {
     const labeled = { ...job, label: "answer validation" };

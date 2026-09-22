@@ -10,7 +10,7 @@ import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-d
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -29,7 +29,6 @@ async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
 async function setupPort(t, id = "acp-job", options = {}) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const job = { id, executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };
   writeJobFile(cwd, id, job);
@@ -88,7 +87,6 @@ test("ACP model selection defaults to the 1M model, and an explicit model still 
 test("ACP model selection fails visibly for unsupported config and invalid values", async (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const base = [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
     "--executor-args", JSON.stringify([AGENT]), "--json"];
   const unsupported = run(process.execPath, [...base, "--executor-model", "efficient", "basic"], {
@@ -107,7 +105,6 @@ test("ACP model selection fails visibly for unsupported config and invalid value
 test("CODEX_COMPANION_ACP_MODEL selects and persists the ACP model", (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
   const env = { ...process.env, CODEX_COMPANION_ACP_MODEL: "performance", ACP_FAKE_RECORDING: recording };
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
@@ -140,7 +137,6 @@ test("ACP reasoning effort uses the strongest compatible option exposed by the a
 test("ACP reasoning effort skips an agent without reasoning_effort and completes the task", (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
     "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "xhigh", "--json", "basic"], { cwd,
@@ -157,7 +153,6 @@ test("ACP reasoning effort skips an agent without reasoning_effort and completes
 test("ACP reasoning effort fails the task when session/set_config_option returns an error", (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
     "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "high", "--json", "basic"], { cwd,
     env: { ...process.env, ACP_FAKE_CONFIG_BEHAVIOR: "effort-error" } });
@@ -171,7 +166,6 @@ test("ACP reasoning effort fails the task when session/set_config_option returns
 test("companion persists the effective ACP reasoning effort in job metadata", (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
     "--executor-args", JSON.stringify([AGENT]), "--executor-effort", "xhigh", "--json", "basic"], { cwd,
     env: { ...process.env, ACP_FAKE_EFFORT_OPTIONS: "max,low,none" } });
@@ -185,7 +179,6 @@ test("companion persists the effective ACP reasoning effort in job metadata", (t
 test("CODEX_COMPANION_ACP_EFFORT selects and persists the ACP reasoning effort", (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const env = { ...process.env, CODEX_COMPANION_ACP_EFFORT: "high", ACP_FAKE_EFFORT_OPTIONS: "high,low,none" };
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
     "--executor-args", JSON.stringify([AGENT]), "--json", "basic"], { cwd, env });

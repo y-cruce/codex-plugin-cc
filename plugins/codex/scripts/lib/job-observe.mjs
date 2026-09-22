@@ -261,7 +261,7 @@ export async function handleObserve(argv) {
     rejectUnknownOptions: true,
     optionContext: "observe follow"
   } : {
-    valueOptions: ["cwd", "after", "limit", "until", "max-seconds"],
+    valueOptions: ["cwd", "after", "limit", "until", "max-seconds", ...(command === "threads" ? ["finished-after"] : [])],
     booleanOptions: ["json", "jsonl", "verbose", "quiet"],
     rejectUnknownOptions: true,
     optionContext: `observe ${command}`
@@ -277,9 +277,8 @@ export async function handleObserve(argv) {
           if (!selected.has(entry.job.id) || selected.get(entry.job.id).mtime < entry.mtime) selected.set(entry.job.id, entry);
         }
       }
-      // Every job in the repository, whichever session dispatched it: the pane
-      // draws them all and says which are another session's. Only what wakes
-      // the director stays scoped to the session that asked for the work.
+      // This general listing stays repository-wide for callers that need a full
+      // inventory; session ownership is applied by the event stream and pane.
       const result = await Promise.all([...selected.values()].map(async ({ job: original, stateDir }) => {
         const manifest = await metadata({ stateDir }, original.id);
         const job = terminal(manifest?.metadata?.job?.status) ? manifest.metadata.job : original;
@@ -291,10 +290,14 @@ export async function handleObserve(argv) {
       return;
     }
     if (command === "threads") {
+      const finishedAfter = options["finished-after"] === undefined ? undefined : Number(options["finished-after"]);
+      if (finishedAfter !== undefined && (!Number.isSafeInteger(finishedAfter) || finishedAfter < 0)) {
+        throw errorFor("INVALID_ARGUMENT", "--finished-after must be a non-negative epoch millisecond integer");
+      }
       const roots = process.env.CLAUDE_PLUGIN_DATA ? [resolveStateDir(cwd)] : await observationRoots(cwd);
       const selected = new Map();
       for (const stateDir of roots) {
-        for (const entry of await observationThreads(stateDir)) {
+        for (const entry of await observationThreads(stateDir, { finishedAfter })) {
           if (!selected.has(entry.thread.id) || selected.get(entry.thread.id).mtime < entry.mtime) {
             selected.set(entry.thread.id, entry);
           }

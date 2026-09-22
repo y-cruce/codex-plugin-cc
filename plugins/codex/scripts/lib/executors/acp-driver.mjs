@@ -459,7 +459,7 @@ export class AcpExecutorJobPort {
     if (this.queuedPrompts.length >= 100) throw Object.assign(new Error("Pending message queue is full (100 messages)."), { code: "QUEUE_FULL" });
     const input = structuredClone(request.prompt);
     const round = this.createQueuedRound({ input, sourceJobId: this.job.id, sessionId: this.sessionId,
-      controlEndpoint: this.controlEndpoint });
+      controlEndpoint: this.controlEndpoint, recordId: this.recordId });
     const entry = { id: crypto.randomUUID(), jobId: round.job.id, input, status: "accepted", queued: true,
       recordId: this.recordId, round };
     this.queuedPrompts.push(entry);

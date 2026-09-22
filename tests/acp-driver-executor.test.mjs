@@ -2,53 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
-import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
-import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
-import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
-
-async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("Timed out waiting for ACP state");
-}
-
-async function setupPort(t, id = "acp-job", options = {}) {
-  isolateTestEnvironment(t);
-  const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
-  const job = { id, executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
-    createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };
-  writeJobFile(cwd, id, job);
-  upsertJob(cwd, job);
-  const port = await openAcpExecutorJob({ cwd, job, command: process.execPath, args: [AGENT], env: options.env,
-    modelId: options.modelId, effortId: options.effortId });
-  t.after(() => port.close());
-  const events = [];
-  const pump = (async () => { for await (const event of port.events()) events.push(event); })();
-  t.after(() => pump);
-  const session = await port.startSession({ cwd, additionalDirectories: [], mcpServers: [], modeId: "default",
-    modelId: options.modelId, effortId: options.effortId });
-  return { cwd, job, port, events, session };
-}
-
-function readRecording(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
-}
 
 test("companion selects the ACP executor without changing the Codex default", (t) => {
   isolateTestEnvironment(t);
@@ -82,8 +43,31 @@ test("CODEX_COMPANION_EXECUTOR sets the default executor and an explicit flag st
   assert.equal(viaEnv.status, 0, viaEnv.stderr);
   assert.equal(JSON.parse(viaEnv.stdout).executor, "acp");
 
-  const viaFlag = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "codex", "--json", "basic"], { cwd, env });
-  // Codex is not installed in the test environment, so the run fails; what it
-  // must prove is that the flag, not the environment, chose the executor.
+  const viaFlag = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--json", "basic"], {
+    cwd, env: { ...env, CODEX_COMPANION_EXECUTOR: "codex" }
+  });
+  assert.equal(viaFlag.status, 0, viaFlag.stderr);
+  assert.equal(JSON.parse(viaFlag.stdout).executor, "acp");
   assert.doesNotMatch(String(viaFlag.stdout) + String(viaFlag.stderr), /ACP execution requires/);
+});
+
+test("a backgrounded ACP round stores its payload in the round receipt", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  const launch = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--background", "--json", "basic"], { cwd });
+  assert.equal(launch.status, 0, launch.stderr);
+  const jobId = JSON.parse(launch.stdout).jobId;
+  const waited = run(process.execPath, [SCRIPT, "status", jobId, "--cwd", cwd, "--wait", "--json"], { cwd });
+  assert.equal(waited.status, 0, waited.stderr);
+  // The receipt is written when the round finalizes, which happens before the
+  // runner stores the payload, so every backgrounded ACP round used to read
+  // back as "no captured result payload" while the answer sat in the job file.
+  // The foreground path writes in the other order and never showed it.
+  // The summary line alone is not enough to tell the two apart: it is the first
+  // line of the same payload, so it is printed either way.
+  const stored = run(process.execPath, [SCRIPT, "result", jobId, "--cwd", cwd], { cwd });
+  assert.equal(stored.status, 0, stored.stderr);
+  assert.doesNotMatch(stored.stdout, /No captured result payload/);
+  assert.match(stored.stdout, /Basic complete/);
 });

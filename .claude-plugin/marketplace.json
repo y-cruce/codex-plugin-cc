@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Fork of openai/codex-plugin-cc with task --thread <id> (openai/codex-plugin-cc#719), used by codex-director.",
-    "version": "1.4.6"
+    "version": "1.4.7"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.4.6",
+      "version": "1.4.7",
       "author": {
         "name": "OpenAI"
       },

@@ -30,6 +30,7 @@ type State = {
   followed: Set<string>
   unreadable: Map<string, number>
   owners: Map<string, string[]>
+  rootIds: Map<string, Set<string>>
   pending: { jobId: string; cwd: string; text: string }[]
   worker: string
   toEnd: boolean
@@ -110,7 +111,7 @@ function recordMonitors($: EngineInterface, state: State) {
 // repository has been quiet -- went unnoticed until the cap, and a job that
 // finished in that half hour woke nobody.
 async function watching($: EngineInterface, state: State, root: string): Promise<boolean> {
-  const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\.sh events --cwd ${root}`],
+  const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\.sh events --cwd ${root} --session ${state.sessionId}`],
     { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
   return Boolean(found && found.exitCode === 0 && found.stdout.trim())
 }
@@ -137,7 +138,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
     await recordMonitors($, state)
     void $.tool.call({
       tool: 'Monitor',
-      command: `bash ${state.worker} events --cwd ${root}`,
+      command: `bash ${state.worker} events --cwd ${root} --session ${state.sessionId}`,
       description: `Codex job events in ${root.split('/').at(-1) ?? root}`,
       timeout_ms: MONITOR_MS,
     }).catch((error: unknown) => {
@@ -177,11 +178,10 @@ async function discoverRoots($: EngineInterface, state: State) {
         try {
           const stat = await $.fs.stat(path)
           if (stat.mtimeMs < state.since) continue
-          // Whoever dispatched it: a repository another session is working in
-          // is a repository this pane has something to show, and the rows say
-          // whose the work is. The mtime floor above keeps old jobs out.
+          // A pane follows only work this session dispatched; sharing the
+          // repository is not ownership, and another session arms its own watch.
           const job = JSON.parse(await $.fs.read(path)) as { sessionId?: string; workspaceRoot?: string }
-          if (job.workspaceRoot) roots.add(job.workspaceRoot)
+          if (job.sessionId === state.sessionId && job.workspaceRoot) roots.add(job.workspaceRoot)
         } catch { /* a half-written or foreign job file is skipped */ }
       }
     }
@@ -213,6 +213,7 @@ async function refreshViews($: EngineInterface, state: State) {
       state.views.delete(id)
       state.paths.delete(id)
       state.mtimes.delete(id)
+      state.owners.delete(id)
       changed = true
     }
   }
@@ -225,13 +226,18 @@ async function poll($: EngineInterface, state: State) {
   try {
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     state.ticks += 1
+    const now = await $.clock.now()
     const found: { thread: Thread; cwd: string }[] = []
+    const returnedByRoot = new Map<string, Set<string>>()
     for (const root of state.roots) {
       if ((state.unreadable.get(root) ?? 0) >= GIVE_UP) continue
       try {
-        const listed = JSON.parse(await companion($, state, root, ['threads', '--json'])) as { threads: Thread[] }
+        const listed = JSON.parse(await companion($, state, root,
+          ['threads', '--json', '--finished-after', String(now - KEEP_MS)])) as { threads: Thread[] }
         state.unreadable.delete(root)
-        for (const thread of listed.threads) found.push({ thread, cwd: root })
+        const threads = listed.threads.filter(thread => thread.sessionIds.includes(state.sessionId))
+        returnedByRoot.set(root, new Set(threads.map(thread => thread.id)))
+        for (const thread of threads) found.push({ thread, cwd: root })
       } catch (error) {
         // Said once, then the root is left alone. This runs every two seconds,
         // and a repository whose companion cannot start -- a missing dependency
@@ -245,6 +251,22 @@ async function poll($: EngineInterface, state: State) {
         }
       }
     }
+    const returned = new Set(found.map(({ thread }) => thread.id))
+    let dropped = false
+    for (const [root, ids] of returnedByRoot) {
+      const previous = state.rootIds.get(root) ?? new Set<string>()
+      state.rootIds.set(root, ids)
+      for (const id of previous) {
+        if (ids.has(id) || returned.has(id) || [...state.rootIds].some(([other, owned]) => other !== root && owned.has(id))) continue
+        const existed = state.paths.has(id) || state.owners.has(id) || state.mtimes.has(id) || state.views.has(id)
+        state.paths.delete(id)
+        state.owners.delete(id)
+        state.mtimes.delete(id)
+        state.views.delete(id)
+        dropped ||= existed
+      }
+    }
+    if (dropped) $.ui.invalidate('ui.render')
     for (const { thread } of found) {
       state.paths.set(thread.id, thread.viewPath)
       state.owners.set(thread.id, thread.sessionIds)
@@ -256,7 +278,7 @@ async function poll($: EngineInterface, state: State) {
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
     state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
-    await ensureMonitors($, state, state.liveRoots, await $.clock.now())
+    await ensureMonitors($, state, state.liveRoots, now)
     for (const { thread, cwd } of found) {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
       // A job dispatched seconds ago is listed before its event history is
@@ -268,14 +290,16 @@ async function poll($: EngineInterface, state: State) {
         // existed, or before a reload rebuilt it: there is nothing to wake the
         // director for, so its terminal state is recorded without a line.
         const first = !state.ledger[job.id]
-        // Shown, never announced. A thread another session dispatched is drawn
-        // in the pane so its state can be seen, but waking this director for it
-        // would interrupt one window's work with another window's task.
+        // Keep the ownership marker defensive even though the root listing
+        // above rejects every thread that this session did not dispatch.
         const foreign = thread.sessionIds.length > 0 && !thread.sessionIds.includes(state.sessionId)
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
         const view = state.views.get(thread.id)
         if (view && Boolean(view.foreign) !== foreign) state.views.set(thread.id, { ...view, foreign })
+        if (view && job.status === 'queued' && view.status !== 'queued') {
+          state.views.set(thread.id, { ...view, status: 'queued', endedAt: null })
+        }
         // The owner process writes the ending, so a job whose owner died never
         // wrote one and its view says running for ever -- the pane kept a task
         // killed an hour ago in its tabs and counted it among the live ones.
@@ -461,7 +485,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
-    owners: new Map<string, string[]>(),
+    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(),
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
@@ -541,10 +565,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const threads = visibleThreads(state)
     if (e.props.hasSurvey || state.opened || !threads.length) return next(e)
     const { Box, Button } = $.ui.resolve(e)
-    const running = threads.filter(view => !isOver(view)).length
+    const running = threads.filter(view => ['running', 'waiting-for-answer'].includes(view.status)).length
+    const queued = threads.filter(view => view.status === 'queued').length
+    const activity = [running ? `${running} running` : '', queued ? `${queued} queued` : ''].filter(Boolean).join(' · ')
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
-      label: `Codex tasks${running ? ` · ${running} running` : ''}`,
+      label: `Codex tasks${activity ? ` · ${activity}` : ''}`,
       onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 }) },
     })] })
   })

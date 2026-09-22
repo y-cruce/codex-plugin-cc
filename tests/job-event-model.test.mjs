@@ -18,6 +18,10 @@ function harness(job = {}) {
   return { view, accept };
 }
 
+test("a reserved turn remains queued until it starts", () => {
+  assert.equal(createLiveView({ id: "job-queued", status: "queued" }).status, "queued");
+});
+
 test("normalization preserves full source and event identity without modifying it", () => {
   const message = { method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id: "item", type: "commandExecution", command: "x".repeat(500) } }, emittedAtMs: 1000 };
   const event = normalizeJobEvent(message, { id: "job", streamId: "stream" });

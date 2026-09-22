@@ -13,7 +13,7 @@ function oneLine(text) {
 }
 
 export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, questionRemindMs = DEFAULT_QUESTION_REMIND_MS,
-  exitIdleMs = 3600000, signal, threadRecords = THREAD_RECORDS_ENABLED } = {}, dependencies = {}) {
+  exitIdleMs = 3600000, signal, session, threadRecords = THREAD_RECORDS_ENABLED } = {}, dependencies = {}) {
   const snapshot = dependencies.snapshot ?? buildStatusSnapshot;
   const status = dependencies.status ?? liveStatus;
   const acknowledge = dependencies.acknowledge ?? acknowledgeNotifications;
@@ -31,7 +31,9 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   let lastActiveAt = now();
   while (!signal?.aborted) {
     const report = snapshot(cwd, { all: true, threadRecords: false });
-    for (let job of [...report.running, report.latestFinished, ...report.recent].filter(Boolean)) {
+    const jobs = [...report.running, report.latestFinished, ...report.recent]
+      .filter((job) => job && (session === undefined || job.sessionId === session));
+    for (let job of jobs) {
       if (signal?.aborted) break;
       let running = job.status === "queued" || job.status === "running";
       if (running) active.add(job.id);

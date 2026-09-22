@@ -9,9 +9,9 @@ import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mj
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -25,6 +25,17 @@ async function waitFor(predicate, description = "observation", timeoutMs = BROKE
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${description}`);
+}
+
+function listTestJobs(h) {
+  const pluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = h.env.CLAUDE_PLUGIN_DATA;
+  try {
+    return listJobs(h.repo);
+  } finally {
+    if (pluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  }
 }
 
 function cursor(output) {
@@ -41,7 +52,6 @@ async function setup(t) {
   fs.copyFileSync(new URL("live-codex-fixture.cjs", import.meta.url), path.join(bin, "codex"));
   fs.chmodSync(path.join(bin, "codex"), 0o755);
   if (process.platform === "win32") fs.writeFileSync(path.join(bin, "codex.cmd"), '@node "%~dp0codex" %*\r\n');
-  initGitRepo(repo);
   const endpoint = createBrokerEndpoint(socketDir);
   const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: path.join(repo, ".plugin-data"), CODEX_COMPANION_APP_SERVER_ENDPOINT: endpoint };
   const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
@@ -170,7 +180,7 @@ test("resuming one thread routes the next job to its own history, view, follow a
   const firstFollowed = await firstFollow.done;
   assert.equal(firstFollowed.code, 0, firstFollowed.stderr);
   assert.match(firstFollowed.stdout, new RegExp(`DONE job=${firstId}`));
-  await waitFor(() => JSON.parse(h.cli("status", firstId, "--json").stdout).job.status === "completed", "first completion");
+  await waitFor(() => listTestJobs(h).find((job) => job.id === firstId)?.status === "completed", "first completion");
   const firstTerminalHistory = await history(firstId);
   assert.equal(firstTerminalHistory.events.at(-1).type, "job.completed");
 
@@ -186,7 +196,7 @@ test("resuming one thread routes the next job to its own history, view, follow a
   const secondFollowed = await secondFollow.done;
   assert.equal(secondFollowed.code, 0, secondFollowed.stderr);
   assert.match(secondFollowed.stdout, new RegExp(`DONE job=${secondId}`));
-  await waitFor(() => JSON.parse(h.cli("status", secondId, "--json").stdout).job.status === "completed", "second completion");
+  await waitFor(() => listTestJobs(h).find((job) => job.id === secondId)?.status === "completed", "second completion");
 
   const firstHistory = await history(firstId);
   const secondHistory = await history(secondId);

@@ -11,6 +11,7 @@ import { ensureBrokerSession, saveBrokerSession, sendBrokerShutdown, waitForBrok
 import { buildEnv } from "./fake-codex-fixture.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
 import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
+import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -24,6 +25,18 @@ async function waitFor(predicate) {
   }
   throw new Error("Timed out waiting for live control.");
 }
+
+function listTestJobs(h) {
+  const pluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = h.env.CLAUDE_PLUGIN_DATA;
+  try {
+    return listJobs(h.repo);
+  } finally {
+    if (pluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  }
+}
+
 async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
   isolateTestEnvironment(t);
   const repo = makeTempDir();
@@ -74,12 +87,12 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   child.stderr.on("data", (data) => { stderr += data; });
   const done = new Promise((resolve) => child.on("exit", (code) => resolve({ code, stdout, stderr })));
   t.after(async () => { if (child.exitCode === null) child.kill(); await done; });
-  const job = await waitFor(() => {
-    const result = h.cli("status");
-    assert.equal(result.status, 0, result.stderr);
-    const snapshot = JSON.parse(result.stdout);
-    return (snapshot.threads ?? snapshot.running).find((item) => item.pid === child.pid && item.threadId && item.turnId);
-  });
+  const storedJob = await waitFor(() => listTestJobs(h)
+    .find((item) => item.pid === child.pid && item.threadId && item.turnId));
+  const result = h.cli("status");
+  assert.equal(result.status, 0, result.stderr);
+  const snapshot = JSON.parse(result.stdout);
+  const job = (snapshot.threads ?? snapshot.running).find((item) => item.id === storedJob.id);
   return { job, done, child };
 }
 

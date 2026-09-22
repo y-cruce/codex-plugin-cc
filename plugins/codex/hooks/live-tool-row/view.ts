@@ -5,13 +5,13 @@ import { markdown } from './markdown.ts'
 export { clip } from './format.ts'
 
 export type LiveView = {
-  // Dispatched by another Claude session: drawn, but never announced here.
+  // Kept as a defensive ownership marker; session-filtered polls leave it false.
   foreign?: boolean
   schemaVersion: 1
   recordId?: string
   jobId: string
   label: string
-  status: 'running' | 'waiting-for-answer' | 'completed' | 'failed' | 'cancelled'
+  status: 'queued' | 'running' | 'waiting-for-answer' | 'completed' | 'failed' | 'cancelled'
   startedAt: string
   endedAt: string | null
   threadId: string | null
@@ -51,7 +51,7 @@ export type LiveView = {
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
 }
 
-const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
+const colors = { queued: 'gray', running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
 // Well clear of the pane's own ground (rgb(42,42,42) by default), so the brief
 // reads as a slab laid on it rather than as another run of text.
 const BRIEF = 'rgb(80,80,80)'
@@ -62,6 +62,7 @@ const clock = (iso: string) => new Date(iso).toTimeString().slice(0, 5)
 // A thread is over when it has no active round. Legacy views have no round
 // fields, so their terminal state keeps the prior endedAt/status definition.
 export function isOver(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundId'>): boolean {
+  if (view.status === 'queued') return false
   if (Object.hasOwn(view, 'activeRoundId')) return view.activeRoundId === null
   return Boolean(view.endedAt) || ['completed', 'failed', 'cancelled'].includes(view.status)
 }

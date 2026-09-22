@@ -21,12 +21,12 @@ test("events rejects unknown options with its supported options and accepts lega
   const rejected = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--stall-msec", "1", "--exit-idle-ms", "1"], h);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /Unknown option --stall-msec/);
-  for (const option of ["--cwd", "--poll-ms", "--stall-ms", "--question-remind-ms", "--exit-idle-ms"]) {
+  for (const option of ["--cwd", "--poll-ms", "--stall-ms", "--question-remind-ms", "--exit-idle-ms", "--session"]) {
     assert.match(rejected.stderr, new RegExp(option));
   }
 
   const accepted = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--poll-ms", "1", "--stall-ms", "1",
-    "--question-remind-ms", "1", "--exit-idle-ms", "1"], h);
+    "--question-remind-ms", "1", "--exit-idle-ms", "1", "--session", "session-a"], h);
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.match(accepted.stdout, /^IDLE_EXIT /m);
 });

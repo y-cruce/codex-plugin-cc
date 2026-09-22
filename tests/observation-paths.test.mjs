@@ -8,8 +8,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { JobEventStore } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
 
@@ -17,7 +18,6 @@ async function setup(t, customConfig = false) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const home = makeTempDir();
-  initGitRepo(cwd);
   const config = customConfig ? path.join(home, "custom-config") : path.join(home, ".claude");
   const env = { ...process.env, HOME: home };
   delete env.CLAUDE_PLUGIN_DATA;
@@ -58,6 +58,24 @@ async function setup(t, customConfig = false) {
   });
   return { cwd, env, config, key, put, keepHistoryOnly, cli };
 }
+
+test("observationThreads applies finishedAfter only to old terminal threads", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  const stateDir = resolveStateDir(cwd);
+  const cutoff = Date.parse("2026-09-22T12:00:00.000Z");
+  const jobs = [
+    { id: "old-terminal", status: "completed", completedAt: "2026-09-22T11:00:00.000Z" },
+    { id: "recent-terminal", status: "completed", completedAt: "2026-09-22T12:00:01.000Z" },
+    { id: "old-active", status: "running", startedAt: "2026-09-21T00:00:00.000Z" }
+  ];
+  for (const job of jobs) writeJobFile(cwd, job.id, { ...job, workspaceRoot: cwd });
+
+  assert.deepEqual((await observationThreads(stateDir)).map(({ thread }) => thread.id).sort(),
+    ["old-active", "old-terminal", "recent-terminal"]);
+  assert.deepEqual((await observationThreads(stateDir, { finishedAfter: cutoff })).map(({ thread }) => thread.id).sort(),
+    ["old-active", "recent-terminal"]);
+});
 
 test("observe falls back to HOME data root, pins history/result reads, and merges newest jobs", async (t) => {
   const h = await setup(t);

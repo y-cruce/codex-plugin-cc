@@ -90,8 +90,9 @@ function printUsage() {
       "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
+      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
+      "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",
       "  node scripts/codex-companion.mjs observe replay <job-id> [--after <cursor>] [--limit <n>] --jsonl",
       "  node scripts/codex-companion.mjs observe view-path <job-id> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
@@ -586,7 +587,7 @@ async function executeTaskRun(request) {
   }
 
   const queuedRoundOptions = request.executor === "acp" ? {
-    createQueuedRound: ({ input, sourceJobId, sessionId, controlEndpoint }) => {
+    createQueuedRound: ({ input, sourceJobId, sessionId, controlEndpoint, recordId }) => {
       const prompt = input.map((item) => item.text).join("\n");
       const metadata = buildTaskRunMetadata({ prompt, resumeLast: true, executor: "acp" });
       const queuedJob = { ...buildTaskJob(workspaceRoot, metadata, request.write, request.sandbox, request.network, null, "acp"),
@@ -595,7 +596,7 @@ async function executeTaskRun(request) {
       const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, jobId: queuedJob.id });
       const logFile = createJobLogFile(workspaceRoot, queuedJob.id, queuedJob.title);
       appendLogLine(logFile, `Queued behind ${sourceJobId}.`);
-      const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", pid: process.pid, logFile,
+      const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", pid: process.pid, logFile, recordId,
         request: queuedRequest, executorSessionId: sessionId, controlEndpoint };
       writeJobFile(workspaceRoot, queuedJob.id, queuedRecord);
       upsertJob(workspaceRoot, queuedRecord);
@@ -1062,7 +1063,7 @@ async function handleTaskWorker(argv) {
 
 async function handleEvents(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms"],
+    valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms", "session"],
     rejectUnknownOptions: true,
     optionContext: "events"
   });
@@ -1082,7 +1083,8 @@ async function handleEvents(argv) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), questionRemindMs, exitIdleMs, signal: controller.signal });
+    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), questionRemindMs,
+      exitIdleMs, signal: controller.signal, session: options.session });
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
@@ -1170,7 +1172,13 @@ async function handleResult(argv) {
     ? resolveThreadResultJob(cwd, String(options.thread))
     : resolveResultJob(cwd, reference);
   const context = await readRoundContext(workspaceRoot, job.id);
-  const storedJob = context.layout === "thread-record" ? context.receipt.job : readStoredJob(workspaceRoot, job.id);
+  const receiptJob = context.layout === "thread-record" ? context.receipt.job : null;
+  // A receipt written before its round's payload was stored carries neither,
+  // and the job file is where the answer landed. Rounds recorded that way are
+  // still on disk, so the fall back is what makes them readable again.
+  const storedJob = receiptJob && (receiptJob.result || receiptJob.rendered)
+    ? receiptJob
+    : readStoredJob(workspaceRoot, job.id) ?? receiptJob;
   const payload = {
     job,
     storedJob

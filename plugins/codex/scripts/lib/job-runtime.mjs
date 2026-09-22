@@ -444,9 +444,20 @@ export class JobRuntime {
     const entry = [...this.jobs.values()].find((item) => item.job.id === jobId && item.cwd === cwd);
     if (!entry) return { recorded: false };
     const job = await fs.readFile(entry.jobFile, "utf8").then(JSON.parse).catch(() => null);
-    if (!job || !terminal(job.status) || entry.ended) return { recorded: entry.ended };
+    if (!job || !terminal(job.status)) return { recorded: entry.ended };
     entry.job = this.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
       threadId: entry.job.threadId ?? job.threadId ?? null } : job;
+    // A round finalizes on its executor's terminal event, and only afterwards
+    // does the runner write `result` and `rendered` into the job file -- so the
+    // receipt this leaves behind holds a job captured mid-flight. Returning
+    // here left it that way for good, and `result`, which reads the receipt,
+    // answered "no captured result payload" for every ACP round while the
+    // answer sat in the job file. Codex never showed it: its terminal event
+    // carries the payload, so its receipt is right the first time.
+    if (entry.ended) {
+      if (this.threadRecords) await this.persistRound(entry);
+      return { recorded: true };
+    }
     if (this.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(job, `job.${job.status}`, true));
       entry.job = { ...job, recordId: binding.recordId, roundId: job.id, threadId: null };

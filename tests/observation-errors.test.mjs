@@ -15,14 +15,13 @@ import { resolveJobFile, writeJobFile, upsertJob } from "../plugins/codex/script
 import { renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
 import { handleObserve } from "../plugins/codex/scripts/lib/job-observe.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
 
 function fixture(t, status = "completed") {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const job = { id: "task-errors", label: "error contract", kind: "task", jobClass: "task", workspaceRoot: cwd,
     status, startedAt: "2026-09-15T00:00:00.000Z", createdAt: "2026-09-15T00:00:00.000Z", threadId: "thread-errors", turnId: "turn-errors" };
   writeJobFile(cwd, job.id, job);

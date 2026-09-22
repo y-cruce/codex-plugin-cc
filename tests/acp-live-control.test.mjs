@@ -10,8 +10,9 @@ import { readRecordHistory } from "../plugins/codex/scripts/lib/job-event-store.
 import { readRoundContext } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { liveStatus, sendLiveCommand } from "../plugins/codex/scripts/lib/live-commands.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
-import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
+import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -41,7 +42,6 @@ function recordingPrompts(file) {
 function startTask(t, mode = "default") {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  initGitRepo(cwd);
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
   const releaseFile = path.join(makeTempDir(), "acp-release");
   const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile };
@@ -89,12 +89,16 @@ const cases = [
       const pending = (await liveStatus(h.cwd, job)).pendingMessages;
       assert.deepEqual(pending.map((entry) => [entry.jobId, entry.input[0].text, entry.queued]),
         [[accepted.queuedJobId, "queued-next", true]]);
+      const original = await readRoundContext(h.cwd, job.id);
+      assert.equal(readStoredJob(h.cwd, accepted.queuedJobId).recordId, original.recordId);
+      const reserved = await observationThreads(resolveStateDir(h.cwd));
+      assert.equal(reserved.some(({ thread }) => thread.id === accepted.queuedJobId), false);
+      assert.equal(reserved.some(({ thread }) => thread.id === original.recordId), true);
       h.release();
       const result = await waitForExit(h);
       assert.equal(result.code, 0, result.stderr);
       assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-next"]);
 
-      const original = await readRoundContext(h.cwd, job.id);
       const continuation = await readRoundContext(h.cwd, accepted.queuedJobId);
       assert.equal(continuation.recordId, original.recordId);
       const history = await readRecordHistory(h.cwd, original.recordId);
@@ -153,11 +157,14 @@ const cases = [
       assert.equal(queued.status, 0, queued.stderr);
       const queuedJobId = JSON.parse(queued.stdout).queuedJobId;
       h.release();
-      const permission = await waitFor(() => {
-        const status = h.cli("status", queuedJobId);
-        if (status.status !== 0) return null;
-        return JSON.parse(status.stdout).job.live?.questions?.find((item) => item.kind === "permission") ?? null;
+      let queuedJob;
+      const permission = await waitFor(async () => {
+        queuedJob = listJobs(h.cwd).find((entry) => entry.id === queuedJobId);
+        if (!queuedJob) return null;
+        return (await liveStatus(h.cwd, queuedJob)).questions?.find((item) => item.kind === "permission") ?? null;
       });
+      const status = h.cli("status", queuedJobId);
+      assert.equal(status.status, 0, status.stderr);
       assert.ok(permission.requestId.startsWith("permission:"));
       assert.ok(permission.questions[0].options.some((option) => option.value === "allow"));
       const stale = h.cli("message", job.id, "stale-old-round");

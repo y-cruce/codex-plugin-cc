@@ -179,7 +179,7 @@ export function createLiveView(job, options = {}) {
     schemaVersion: 1,
     jobId: job.id ?? job.jobId,
     label: job.label ?? job.title ?? job.kindLabel ?? job.id ?? job.jobId,
-    status: job.status === "queued" ? "running" : job.status ?? "running",
+    status: job.status ?? "running",
     startedAt: job.startedAt ?? job.createdAt ?? null,
     endedAt: job.completedAt ?? null,
     threadId: job.executorSessionId ?? job.threadId ?? null,

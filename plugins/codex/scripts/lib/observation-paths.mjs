@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { resolveJobHistoryAtStateDir } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
+import { threadRecordPaths } from "./thread-records.mjs";
 
 export async function readObservationJson(file) {
   try { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -58,10 +59,13 @@ export async function observationJobs(stateDir) {
   return [...jobs.values()];
 }
 
-export async function observationThreads(stateDir) {
+export async function observationThreads(stateDir, { finishedAfter } = /** @type {{ finishedAfter?: number }} */ ({})) {
   const threads = new Map();
   for (const entry of await observationJobs(stateDir)) {
-    const history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
+    let history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
+    const associatedQueued = history.layout === "legacy" && entry.job.status === "queued" &&
+      typeof entry.job.recordId === "string" && entry.job.recordId;
+    if (associatedQueued) history = threadRecordPaths(stateDir, entry.job.recordId);
     const view = await readObservationJson(history.liveView);
     if (history.layout === "legacy") {
       const job = view ?? entry.job;
@@ -87,7 +91,18 @@ export async function observationThreads(stateDir) {
       }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
       continue;
     }
-    if (threads.has(history.recordId)) continue;
+    const existing = threads.get(history.recordId);
+    if (existing) {
+      if (associatedQueued && entry.job.sessionId && !existing.thread.sessionIds.includes(entry.job.sessionId)) {
+        existing.thread.sessionIds.push(entry.job.sessionId);
+      }
+      if (associatedQueued && existing.thread.activeRoundId === null) {
+        existing.thread.status = "queued";
+        existing.thread.endedAt = null;
+      }
+      existing.mtime = Math.max(existing.mtime, entry.mtime);
+      continue;
+    }
     const manifest = await readObservationJson(history.manifest);
     if (!view || !manifest) continue;
     const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId;
@@ -96,22 +111,27 @@ export async function observationThreads(stateDir) {
       recordId: history.recordId,
       jobId,
       label: view.label ?? null,
-      status: view.status,
+      status: associatedQueued && view.activeRoundId == null ? "queued" : view.status,
       startedAt: view.startedAt ?? null,
-      endedAt: view.endedAt ?? null,
+      endedAt: associatedQueued && view.activeRoundId == null ? null : view.endedAt ?? null,
       threadId: view.threadId ?? manifest.threadId ?? null,
       activeRoundId: view.activeRoundId ?? null,
       latestRoundId: view.latestRoundId ?? jobId,
-      sessionIds: [...new Set((view.rounds ?? []).map((round) => round.sessionId).filter(Boolean))],
+      sessionIds: [...new Set([
+        ...(view.rounds ?? []).map((round) => round.sessionId).filter(Boolean),
+        ...(associatedQueued && entry.job.sessionId ? [entry.job.sessionId] : [])
+      ])],
       viewPath: history.liveView,
       historyAvailable: !manifest.tombstone,
       layout: "thread-record"
     }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
   }
-  return [...threads.values()];
+  return [...threads.values()].filter(({ thread }) => finishedAfter === undefined || thread.activeRoundId !== null ||
+    !validEndedAt(thread.endedAt) || Date.parse(thread.endedAt) > finishedAfter);
 }
 
 const terminalStatus = (status) => ["completed", "failed", "cancelled"].includes(status);
+const validEndedAt = (endedAt) => typeof endedAt === "string" && Number.isFinite(Date.parse(endedAt));
 
 async function observationMtime(file) {
   try { return (await fs.stat(file)).mtimeMs; }

@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -23,6 +24,17 @@ async function waitFor(predicate, description = "observation", timeoutMs = BROKE
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${description}`);
+}
+
+function listTestJobs(h) {
+  const pluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = h.env.CLAUDE_PLUGIN_DATA;
+  try {
+    return listJobs(h.repo);
+  } finally {
+    if (pluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  }
 }
 
 function cursor(output) {
@@ -39,7 +51,6 @@ async function setup(t) {
   fs.copyFileSync(new URL("live-codex-fixture.cjs", import.meta.url), path.join(bin, "codex"));
   fs.chmodSync(path.join(bin, "codex"), 0o755);
   if (process.platform === "win32") fs.writeFileSync(path.join(bin, "codex.cmd"), '@node "%~dp0codex" %*\r\n');
-  initGitRepo(repo);
   const endpoint = createBrokerEndpoint(socketDir);
   const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: path.join(repo, ".plugin-data"), CODEX_COMPANION_APP_SERVER_ENDPOINT: endpoint };
   const broker = spawn(process.execPath, [BROKER, "serve", "--endpoint", endpoint, "--cwd", repo,
@@ -131,7 +142,7 @@ test("QUESTION exits with cursor and successful answers appear before terminal o
   fs.writeFileSync(answersFile, JSON.stringify({ source: { answers: ["latest"] } }));
   const answered = h.cli("answer", jobId, "--request-id", "question-1", "--answers-file", answersFile, "--json");
   assert.equal(answered.status, 0, answered.stderr);
-  await waitFor(() => JSON.parse(h.cli("status", jobId, "--json").stdout).job.status === "completed", "completed answer job");
+  await waitFor(() => listTestJobs(h).find((job) => job.id === jobId)?.status === "completed", "completed answer job");
   const result = h.cli("result", jobId);
   assert.equal(result.status, 0, result.stderr);
   const stale = await h.child("observe", "follow", jobId).done;

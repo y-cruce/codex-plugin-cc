@@ -4,6 +4,7 @@ import { isOver, liveTree } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 
 const DOT: Record<string, string> = {
+  queued: 'gray',
   running: 'cyan',
   'waiting-for-answer': 'magenta',
   completed: 'green',

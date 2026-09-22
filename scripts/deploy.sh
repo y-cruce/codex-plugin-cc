@@ -58,6 +58,22 @@ git push -q origin codex-director
 echo "── install"
 claude plugin update codex@y-cruce-codex
 
+# Claude Code runs `npm ci --ignore-scripts` for the plugin's dependencies and
+# downgrades a failure to a debug warning, so an update that reports success can
+# still leave a cache with no node_modules. The ACP driver imports its SDK at the
+# top, so the next qoder dispatch dies on a missing package while the release
+# looks clean. Check the copy it just installed, repair it, and prove it loads.
+CACHE="${CLAUDE_HOME:-$HOME/.claude}/plugins/cache/y-cruce-codex/codex/$VERSION"
+if [ ! -d "$CACHE" ]; then
+  echo "no installed copy at $CACHE" >&2
+  exit 1
+fi
+if [ ! -f "$CACHE/node_modules/.package-lock.json" ]; then
+  echo "   dependencies missing; installing them into $CACHE"
+  (cd "$CACHE" && npm ci --ignore-scripts)
+fi
+node --input-type=module -e "await import('file://$CACHE/scripts/lib/executors/acp-driver.mjs')"
+
 echo
 echo "$(git log --oneline -1)"
 echo "Restart Claude Code to pick up $VERSION."
