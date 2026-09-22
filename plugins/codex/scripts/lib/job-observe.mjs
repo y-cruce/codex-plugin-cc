@@ -201,8 +201,12 @@ export async function follow(location, job, options, dependencies = {}) {
   let stalled;
   let heartbeat;
   const interrupted = () => { finished = true; client?.close(); resolveDone(); };
+  // Ctrl-C is not "throw away what you read": whoever stops a follow wants to
+  // carry on from where it got to, and the cursor is what `--after` takes. A
+  // SIGTERM is a kill and still leaves immediately.
+  const stopped = () => { if (!finished) enqueue(() => finish(`INTERRUPTED ${prefix(job)} thread=${lastThread ?? "unknown"}`)); };
   process.on("SIGTERM", interrupted);
-  process.on("SIGINT", interrupted);
+  process.on("SIGINT", stopped);
   const outputError = (error) => { finished = true; client?.close(); rejectDone(error); };
   process.stdout.on("error", outputError);
   try {
@@ -247,7 +251,7 @@ export async function follow(location, job, options, dependencies = {}) {
     clearInterval(stalled);
     clearInterval(heartbeat);
     process.off("SIGTERM", interrupted);
-    process.off("SIGINT", interrupted);
+    process.off("SIGINT", stopped);
     process.stdout.off("error", outputError);
     client?.close();
   }

@@ -127,7 +127,11 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const viewPath = located.stdout.trim();
   assert.equal(path.isAbsolute(viewPath), true);
   const readView = () => fs.existsSync(viewPath) ? JSON.parse(fs.readFileSync(viewPath, "utf8")) : null;
-  const followed = h.child("observe", "follow", jobId, "--max-seconds", "10");
+  // The window is a backstop, not the test's pace. At ten seconds the setup
+  // below -- attaching, a `status` process, the steer -- ate most of it on a
+  // loaded machine and the fixture's last event landed after it had expired,
+  // so the test failed for being slow rather than for being wrong.
+  const followed = h.child("observe", "follow", jobId, "--max-seconds", "60");
   await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "attached follow");
   const metadata = JSON.parse(h.cli("status", jobId, "--json").stdout).job;
   await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId, input: [{ type: "text", text: "observation-live" }] });
@@ -141,6 +145,8 @@ test("observe discovery, committed replay, live projection and follow resume", a
     return view?.lastMessage?.text === "live incremental conclusion" ? view : null;
   }, "folded message delta");
   assert.equal(completeView.tail.filter((row) => row.text.includes("live incremental")).length, 1);
+  await waitFor(() => followed.output().includes("live incremental conclusion") || null, "follow printed the folded message");
+  followed.process.kill("SIGINT");
   const result = await followed.done;
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /echo observation-/);
