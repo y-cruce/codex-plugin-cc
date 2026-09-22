@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import test from "node:test";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { JobEventStore, cleanupHistory, readHistory, resolveHistoryDir, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
-import { upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-event-store-"));
@@ -449,4 +450,38 @@ test("cleanup tolerates temporary projection rename races and legacy view-only d
     assert.deepEqual(result.removed, []);
     assert.equal(raced, true);
   } finally { fs.stat = originalStat; }
+});
+
+test("cleanup removes a legacy history whose round is safely in a record, and keeps every other case", async (t) => {
+  const cwd = await fixture(t);
+  const stateDir = resolveStateDir(cwd);
+  // A round observed before it bound leaves this behind, saying "running" for
+  // ever. It may only go once the round is in the record and the job is over.
+  const plant = async (jobId, { recordId, receipt = true, status = "completed" } = {}) => {
+    await fs.mkdir(path.join(stateDir, "job-history", jobId), { recursive: true });
+    await fs.writeFile(path.join(stateDir, "job-history", jobId, "live-view.json"),
+      JSON.stringify({ schemaVersion: 1, jobId, status: "running", endedAt: null }));
+    await fs.mkdir(path.join(stateDir, "job-index"), { recursive: true });
+    await fs.writeFile(path.join(stateDir, "job-index", `${jobId}.json`),
+      JSON.stringify({ schemaVersion: 1, jobId, roundId: jobId, recordId }));
+    if (receipt) {
+      await fs.mkdir(path.join(stateDir, "thread-records", recordId, "rounds"), { recursive: true });
+      await fs.writeFile(path.join(stateDir, "thread-records", recordId, "rounds", `${jobId}.json`), JSON.stringify({ job: { id: jobId } }));
+    }
+    if (status) {
+      await fs.mkdir(path.join(stateDir, "jobs"), { recursive: true });
+      await fs.writeFile(path.join(stateDir, "jobs", `${jobId}.json`), JSON.stringify({ id: jobId, status }));
+    }
+  };
+  await plant("task-superseded", { recordId: "rec-one" });
+  await plant("task-still-running", { recordId: "rec-two", status: "running" });
+  await plant("task-no-receipt", { recordId: "rec-three", receipt: false });
+  await plant("task-own-record", { recordId: "task-own-record" });
+
+  const cleaned = await cleanupHistory(cwd);
+  assert.deepEqual(cleaned.removedLegacy, ["task-superseded"]);
+  for (const [jobId, expected] of [["task-superseded", false], ["task-still-running", true],
+    ["task-no-receipt", true], ["task-own-record", true]]) {
+    assert.equal(fsSync.existsSync(path.join(stateDir, "job-history", jobId)), expected, jobId);
+  }
 });

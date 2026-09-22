@@ -6,7 +6,7 @@ import { assertCanonicalEventDraft } from "./executor-events.mjs";
 import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 import { resolveJobHistory, resolveLegacyJobHistory, stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
-import { historyCursorVersion, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
+import { historyCursorVersion, jobIndexPath, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
 
 const ACTIVE_STORES = new Map();
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
@@ -565,17 +565,50 @@ async function retireHistory(directory, current, now) {
   await atomicJson(path.join(directory, "manifest.json"), tombstone);
 }
 
+// A round observed before it bound to its thread leaves a legacy history behind,
+// and the binding moves the round into the record without taking it away. What
+// is left never updates again -- it says "running" for ever -- so the pane drew
+// a finished thread twice until it learned to drop keys a listing stopped
+// returning. Removing it needs the round to be safely in the record and the job
+// to be over: a round still being written is the one case where the legacy
+// history is the live one.
+async function supersededByRecord(stateDir, jobId, directory) {
+  if (ACTIVE_STORES.has(directory)) return false;
+  let index;
+  try { index = JSON.parse(await fs.readFile(jobIndexPath(stateDir, jobId), "utf8")); }
+  catch (error) { if (["ENOENT", "INVALID_ARGUMENT"].includes(error.code)) return false; throw error; }
+  if (index?.schemaVersion !== 1 || !index.recordId || index.recordId === jobId) return false;
+  const receipt = threadRecordPaths(stateDir, index.recordId, jobId).roundReceipt;
+  try { await fs.stat(receipt); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  try {
+    const job = JSON.parse(await fs.readFile(path.join(stateDir, "jobs", `${jobId}.json`), "utf8"));
+    return TERMINAL.has(job.status);
+  } catch (error) {
+    // No job record left is the state a pruned job ends in, and the receipt
+    // above already says the round was kept.
+    if (error.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
 export async function cleanupHistory(cwd, { maxTotalBytes = 20 * 1024 ** 3, retentionDays = 30, now = Date.now() } = {}) {
   const root = path.dirname(resolveStateDir(cwd));
   const histories = [];
+  const removedLegacy = [];
   let workspaces;
-  try { workspaces = await fs.readdir(root, { withFileTypes: true }); } catch (error) { if (error.code === "ENOENT") return { removed: [], bytes: 0 }; throw error; }
+  try { workspaces = await fs.readdir(root, { withFileTypes: true }); } catch (error) { if (error.code === "ENOENT") return { removed: [], removedLegacy: [], bytes: 0 }; throw error; }
   for (const workspace of workspaces.filter((entry) => entry.isDirectory())) {
     const parent = path.join(root, workspace.name, "job-history");
     let jobs;
     try { jobs = await fs.readdir(parent, { withFileTypes: true }); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    const stateDir = path.join(root, workspace.name);
     for (const job of jobs.filter((entry) => entry.isDirectory())) {
       const directory = path.join(parent, job.name);
+      if (await supersededByRecord(stateDir, job.name, directory)) {
+        await fs.rm(directory, { recursive: true, force: true });
+        removedLegacy.push(job.name);
+        continue;
+      }
       try {
         const manifest = await loadManifest(directory);
         histories.push({ directory, manifest, bytes: await directoryBytes(directory) });
@@ -627,5 +660,5 @@ export async function cleanupHistory(cwd, { maxTotalBytes = 20 * 1024 ** 3, rete
     const saved = await store.pruneToBytes(Math.max(0, entry.bytes - (bytes - maxTotalBytes)));
     bytes -= saved;
   }
-  return { removed, bytes, overBudget: bytes > maxTotalBytes };
+  return { removed, removedLegacy, bytes, overBudget: bytes > maxTotalBytes };
 }
