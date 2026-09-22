@@ -155,7 +155,12 @@ test("observe discovery, committed replay, live projection and follow resume", a
   const savedCursor = cursor(result.stdout);
   const accepted = h.cli("message", jobId, "keep working", "--json");
   assert.equal(accepted.status, 0, accepted.stderr);
-  const resumed = h.child("observe", "follow", jobId, "--after", savedCursor, "--max-seconds", "2");
+  const resumed = h.child("observe", "follow", jobId, "--after", savedCursor, "--max-seconds", "60");
+  // The line below is the last thing this follow has to see. Anything the
+  // negative assertions guard against would be replayed before it, not after,
+  // so stopping here still catches a regression.
+  await waitFor(() => resumed.output().includes("director → message: keep working") || null, "resumed follow printed the message");
+  resumed.process.kill("SIGINT");
   const resumedResult = await resumed.done;
   assert.equal(resumedResult.code, 0, resumedResult.stderr);
   assert.match(resumedResult.stdout, /director → message: keep working/);
