@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { JobEventStore, readHistory, readRecordHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
 import { createCanonicalEvent } from "./executor-events.mjs";
-import { createLiveView, applyJobEvent } from "./job-event-model.mjs";
+import { createLiveView, applyJobEvent, jobConfig } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
 import { stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
@@ -470,9 +470,20 @@ export class JobRuntime {
         if (job && terminal(job.status)) await this.finish(entry.cwd, entry.job.id);
         else if (job && ownerProcessAlive(job.pid) === false) {
           await this.failOwnerExited(entry, job);
-        }
+        } else if (job) this.syncConfig(entry, job);
       }
     } finally { this.reconciling = false; }
+  }
+
+  // An ACP session settles the reasoning effort with its agent after the view
+  // was made, so the record knows the rung that took effect before the view
+  // does: the tick reads that record already, and the pane was showing the
+  // requested rung until the agent answered for it.
+  syncConfig(entry, job) {
+    const config = jobConfig(job);
+    if (config.model === (entry.view.model ?? null) && config.effort === (entry.view.effort ?? null)) return;
+    Object.assign(entry.view, config);
+    this.scheduleView(entry);
   }
 
   async failOwnerExited(entry, job) {
