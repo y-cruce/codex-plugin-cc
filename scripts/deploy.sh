@@ -70,7 +70,11 @@ if [ ! -d "$CACHE" ]; then
 fi
 if [ ! -f "$CACHE/node_modules/.package-lock.json" ]; then
   echo "   dependencies missing; installing them into $CACHE"
-  (cd "$CACHE" && npm ci --ignore-scripts)
+  # `allow-scripts` in a user's ~/.npmrc makes every project-scoped install fail
+  # with EALLOWSCRIPTS, which is what Claude Code's own `npm ci` hits and
+  # swallows. Clearing it for this one command is enough; the empty environment
+  # variable outranks the file.
+  (cd "$CACHE" && npm_config_allow_scripts= npm ci --ignore-scripts)
 fi
 node --input-type=module -e "await import('file://$CACHE/scripts/lib/executors/acp-driver.mjs')"
 
