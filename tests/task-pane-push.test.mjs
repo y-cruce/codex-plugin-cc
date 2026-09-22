@@ -67,20 +67,22 @@ test("task pane renders one thread row with both rounds in trace order", () => {
     schemaVersion: 1, recordId: "task-old", jobId: "task-new", label: "newest", threadId: "thread-1",
     startedAt: "2026-09-21T01:00:00Z", endedAt: "2026-09-21T02:00:00Z", turnId: "turn-new",
     activeRoundId: null, latestRoundId: "task-new", status: "completed", executor: { kind: "codex", label: "Codex" },
-    activeCommands: [], lastMessage: null, files: [], pendingQuestion: null, plan: null, subAgents: [], prompt: null,
+    activeCommands: [], lastMessage: { kind: "assistant", text: "the answer", at: "2026-09-21T02:00:00Z" }, files: [], pendingQuestion: null, plan: null, subAgents: [], prompt: null,
     usage: { inputTokens: 3, outputTokens: 3, cachedInputTokens: 0, complete: true },
     history: { committedSeq: "4", continuity: "complete" },
     rounds: [
-      { jobId: "task-old", sessionId: "session", prompt: "old", executorTurnIds: ["turn-old"], firstSeq: "1", lastSeq: "2",
+      { jobId: "task-old", sessionId: "session", prompt: "round one brief", executorTurnIds: ["turn-old"], firstSeq: "1", lastSeq: "2",
         usage: { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, complete: true }, result: null, status: "completed",
         startedAt: "2026-09-21T01:00:00Z", endedAt: "2026-09-21T01:30:00Z" },
-      { jobId: "task-new", sessionId: "session", prompt: "new", executorTurnIds: ["turn-new"], firstSeq: "3", lastSeq: "4",
+      { jobId: "task-new", sessionId: "session", prompt: "round two brief", executorTurnIds: ["turn-new"], firstSeq: "3", lastSeq: "4",
         usage: { inputTokens: 2, outputTokens: 2, cachedInputTokens: 0, complete: true }, result: null, status: "completed",
         startedAt: "2026-09-21T01:30:00Z", endedAt: "2026-09-21T02:00:00Z" },
     ],
     tail: [
       { seq: "2", at: "2026-09-21T01:30:00Z", type: "director.notified", text: "first round trace" },
+      { seq: "2", at: "2026-09-21T01:30:00Z", type: "job.completed", text: "Job completed" },
       { seq: "4", at: "2026-09-21T02:00:00Z", type: "director.notified", text: "second round trace" },
+      { seq: "4", at: "2026-09-21T02:00:00Z", type: "message.delta", text: "the answer", from: "0" },
     ],
   };
   const tree = paneBody(ui, [data], 100, 20, Date.parse(data.endedAt), null, () => {});
@@ -94,4 +96,17 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
   assert.equal(nodes.find((node) => node.type === "Button").props.key, "codex_tab_task-old");
   assert.ok(text.indexOf("first round trace") < text.indexOf("second round trace"), text);
+  // Each round's brief opens that round, and the round boundary is the brief
+  // rather than a terminal row that says what the heading already says.
+  assert.ok(text.indexOf("round one brief") < text.indexOf("first round trace"), text);
+  assert.ok(text.indexOf("first round trace") < text.indexOf("round two brief"), text);
+  assert.ok(text.indexOf("round two brief") < text.indexOf("second round trace"), text);
+  assert.equal(text.includes("Job completed"), false, text);
+  // Each round closes with its own foot, between its last row and the next brief.
+  const foot = "✻ completed · 30m0s";
+  assert.ok(text.indexOf("first round trace") < text.indexOf(foot), text);
+  assert.ok(text.indexOf(foot) < text.indexOf("round two brief"), text);
+  // Dropping the terminal row makes the last message the row nothing follows,
+  // which is what the "still writing" ellipsis used to key off.
+  assert.equal(text.includes("\u2026"), false, text);
 });

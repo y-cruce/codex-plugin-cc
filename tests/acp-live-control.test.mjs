@@ -17,7 +17,11 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 
-async function waitFor(predicate, timeoutMs = 10000) {
+// Every wait here is on a real companion subprocess and a real agent, and the
+// budget has to cover them on a box running the rest of the suite beside them,
+// not the second and a half they take with the file to themselves. Ten seconds
+// was under three times the solo cost and failed whenever the suite was busy.
+async function waitFor(predicate, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();
@@ -59,7 +63,7 @@ function startTask(t, mode = "default") {
   return { cwd, env, child, done, cli, recording, runningJob, release };
 }
 
-async function waitForExit(task, timeoutMs = 10000) {
+async function waitForExit(task, timeoutMs = 45000) {
   let timer;
   try {
     return await Promise.race([task.done, new Promise((_, reject) => {

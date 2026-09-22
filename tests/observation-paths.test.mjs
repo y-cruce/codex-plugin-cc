@@ -103,6 +103,15 @@ test("observe resolves history-only jobs across data roots", async (t) => {
   assert.equal(threads.code, 0, threads.stderr);
   assert.equal(JSON.parse(threads.stdout).threads.find((thread) => thread.id === entry.job.id).layout, "legacy");
 
+  // A job whose owner is killed never writes its terminal status to the view,
+  // so the row stayed "running" for the rest of the session.
+  const viewFile = path.join(entry.stateDir, "job-history", entry.job.id, "live-view.json");
+  fs.writeFileSync(viewFile, `${JSON.stringify({ ...JSON.parse(fs.readFileSync(viewFile, "utf8")), status: "running" })}\n`);
+  const stale = await h.cli(["threads", "--json"]);
+  const row = JSON.parse(stale.stdout).threads.find((thread) => thread.id === entry.job.id);
+  assert.equal(row.status, "completed");
+  assert.equal(row.activeRoundId, null);
+
   const view = await h.cli(["view-path", entry.job.id]);
   assert.equal(view.code, 0, view.stderr);
   assert.equal(view.stdout.trim(), path.join(entry.stateDir, "job-history", entry.job.id, "live-view.json"));

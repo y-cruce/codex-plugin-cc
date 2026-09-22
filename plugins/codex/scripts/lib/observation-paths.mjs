@@ -65,16 +65,20 @@ export async function observationThreads(stateDir) {
     const view = await readObservationJson(history.liveView);
     if (history.layout === "legacy") {
       const job = view ?? entry.job;
+      // A view is only as fresh as the last write its owner managed, so a job
+      // whose owner died mid-flight leaves "running" in it for good. The job
+      // record is written on the way out, so a terminal one overrides the view.
+      const status = terminalStatus(entry.job.status) ? entry.job.status : job.status;
       threads.set(entry.job.id, { thread: {
         id: entry.job.id,
         recordId: entry.job.id,
         jobId: entry.job.id,
         label: job.label ?? null,
-        status: job.status,
+        status,
         startedAt: job.startedAt ?? null,
         endedAt: job.endedAt ?? entry.job.completedAt ?? null,
         threadId: job.threadId ?? entry.job.threadId ?? null,
-        activeRoundId: terminalStatus(job.status) ? null : entry.job.id,
+        activeRoundId: terminalStatus(status) ? null : entry.job.id,
         latestRoundId: entry.job.id,
         sessionIds: entry.job.sessionId ? [entry.job.sessionId] : [],
         viewPath: history.liveView,

@@ -5,7 +5,7 @@ import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
-  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string }
+  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean }
 type Receipt = { cursor?: string; terminal?: string }
 type Ledger = Record<string, Receipt>
 type State = {
@@ -284,7 +284,11 @@ async function poll($: EngineInterface, state: State) {
           state.views.set(thread.id, { ...view, status: job.status as LiveView['status'], activeRoundId: null,
             endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
         }
-        {
+        // A legacy job predates the event store, and one that died before its
+        // first event never opened one: no history is the answer, not a failure
+        // worth retrying. Replaying it until the give-up count spends five
+        // processes a poll and then reports a permanent fact as an error line.
+        if (thread.historyAvailable !== false) {
           // Read during a director turn as well. A turn can run for half an
           // hour, and a pane that stops reading for it shows a task frozen at
           // whatever it was doing when the turn began, then jumps.

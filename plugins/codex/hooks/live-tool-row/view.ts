@@ -45,6 +45,12 @@ export type LiveView = {
 }
 
 const colors = { running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
+// Well clear of the pane's own ground (rgb(42,42,42) by default), so the brief
+// reads as a slab laid on it rather than as another run of text.
+const BRIEF = 'rgb(80,80,80)'
+// A trace read hours later needs the time a round finished, not only how long
+// it took; the date is what the row above it already places.
+const clock = (iso: string) => new Date(iso).toTimeString().slice(0, 5)
 
 // A thread is over when it has no active round. Legacy views have no round
 // fields, so their terminal state keeps the prior endedAt/status definition.
@@ -182,10 +188,17 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     separate(block)
     lines.push(Text({ ...props, wrap: 'wrap', children: clean(text) }))
   }
+  // In a thread the brief sits between rounds, where the agent's own messages
+  // carry the same '›' and dim text made it the quietest thing on screen. A
+  // slab a shade off the pane's ground separates what was asked from what came
+  // back, and the text on it reads at full strength. A transcript row has no
+  // ground of its own to sit on, so there it keeps the dim run of text.
   const prompt = (text: string) => {
     separate(true)
-    lines.push(...markdown(ui, text.length > 1200 ? `${text.slice(0, 1199)}…` : text,
-      { dimColor: true }, '› ', columns))
+    const body = markdown(ui, text.length > 1200 ? `${text.slice(0, 1199)}…` : text,
+      fullTrace ? {} : { dimColor: true }, '› ', columns)
+    if (fullTrace) lines.push(Box({ flexDirection: 'column', width: columns, backgroundColor: BRIEF, children: body }))
+    else lines.push(...body)
   }
   const files = () => {
     for (const file of data.files.slice(0, 3)) {
@@ -210,7 +223,13 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // A full trace starts with what the agent was asked, so a reader who scrolls
   // to the top finds the brief rather than the first thing the agent did. It is
   // Markdown, like the answer that comes back, and long enough to need a cut.
-  if (fullTrace && data.prompt) prompt(data.prompt)
+  // A thread runs across rounds and data.prompt is the newest round's, which at
+  // the head would open the trace with the question asked last: the first
+  // round's brief opens it, and every round after it is drawn further down,
+  // where that round begins.
+  const rounds = fullTrace ? (data.rounds ?? []).filter(round => round.prompt) : []
+  const opening = rounds.length ? rounds[0]!.prompt : data.prompt
+  if (fullTrace && opening) prompt(opening)
   if (data.pendingQuestion) {
     prose(`? ${data.pendingQuestion.text}`, { color: 'magenta', bold: true })
     lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(waiting(data.pendingQuestion.openedAt, data.pendingQuestion.expiresAt, now), columns) }))
@@ -226,6 +245,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (event.agent || event.agentThreadId || event.type === 'agent.activity') return false
     if (event.text.startsWith('⇢ sub-agent ')) return false
     if (event.type === 'job.started') return false
+    // The heading already says the thread completed, and across rounds the row
+    // only breaks the trace where one question ends and the next begins. A
+    // failure or a cancellation still carries its reason, so those stay.
+    if (event.type === 'job.completed') return false
     if (event.type === 'question.closed') return false
     // An agent's thinking is not what the reader is watching for, and one that
     // streams raw thought rather than a summary buries the trace under it: the
@@ -245,12 +268,29 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const grouped: LiveView['tail'] = []
   const summary = (agent: { text: string; detail: string | null }) =>
     ({ seq: '', at: '', type: 'agent.summary', text: agent.text, ...(agent.detail ? { output: agent.detail } : {}) })
+  // What the director asked for a round belongs where that round begins, and
+  // how the round ended where it stops: without them the rounds run together
+  // as one unbroken answer. The first brief already opens the trace above, and
+  // a round still going has no foot to draw. The ending sorts one past the
+  // round's last event so it lands before the next round's brief.
+  const marks: LiveView['tail'] = []
+  rounds.forEach((round, index) => {
+    if (index) marks.push({ seq: round.firstSeq, at: round.startedAt ?? '', type: 'prompt', text: round.prompt! })
+    if (!round.endedAt) return
+    const counted = round.usage.inputTokens > 0 || round.usage.outputTokens > 0 || round.usage.cachedInputTokens > 0
+    const spent = Date.parse(round.endedAt) - Date.parse(round.startedAt ?? round.endedAt)
+    const counts = counted ? ` · ↑${tokens(round.usage.inputTokens)} ↓${tokens(round.usage.outputTokens)} tokens` : ''
+    marks.push({ seq: `${BigInt(round.lastSeq) + 1n}`, at: round.endedAt, type: 'round.ended',
+      text: `✻ ${round.status} · ${duration(spent)}${counts} · ${clock(round.endedAt)}` })
+  })
   for (const agent of agents.filter(agent => agent.index < 0)) grouped.push(summary(agent))
   data.tail.forEach((event, index) => {
+    while (marks.length && event.seq && BigInt(event.seq) >= BigInt(marks[0]!.seq)) grouped.push(marks.shift()!)
     for (const agent of agents.filter(agent => agent.index === index)) grouped.push(summary(agent))
     if (tail.includes(event)) grouped.push(event)
   })
   for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push(summary(agent))
+  grouped.push(...marks)
   if (grouped.length && !hasContent) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
@@ -272,6 +312,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     }
     if (fullTrace && type === 'prompt') {
       prompt(event.text)
+      return
+    }
+    if (type === 'round.ended') {
+      add(event.text, { dimColor: true })
       return
     }
     if (type.startsWith('command')) {
@@ -306,8 +350,12 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       separate(true)
       // The "still writing" marker only belongs on a row nothing has followed:
       // below a tool the message has visibly paused, and the ellipsis there
-      // reads as the end of the trace rather than the end of that row.
-      lines.push(...markdown(ui, text, props, `${prefix} `, columns, index === newest && index === grouped.length - 1 && type.endsWith('.delta')))
+      // reads as the end of the trace rather than the end of that row. A
+      // thread with no active round is not writing anything, whatever its last
+      // row is -- dropping the terminal event left the marker on a finished
+      // trace, because the message had become the row nothing followed.
+      lines.push(...markdown(ui, text, props, `${prefix} `, columns,
+        index === newest && index === grouped.length - 1 && type.endsWith('.delta') && !isOver(data)))
     } else if (type.startsWith('tool.')) add(`● ${toolTitle(text, columns)}`, props)
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
