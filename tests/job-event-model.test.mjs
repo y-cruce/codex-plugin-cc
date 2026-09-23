@@ -242,11 +242,11 @@ test("a file change keeps one row that its completion redraws in place", () => {
 
   const edited = [{ path: "/repo/biz/a.ts", kind: "add", additions: 2, deletions: 0 }];
   accept("fileChange.started", "tool-1", "in_progress", edited);
-  assert.deepEqual(view.tail.map((row) => row.text), ["Files in_progress: add /repo/biz/a.ts (+2 −0)"]);
+  assert.deepEqual(view.tail.map((row) => row.text), ["Write(/repo/biz/a.ts) +2 −0"]);
   // A change that has only begun is not yet a file the pane reports.
   assert.deepEqual(view.files, []);
   accept("fileChange.completed", "tool-1", "completed", edited);
-  assert.deepEqual(view.tail.map((row) => row.text), ["Files completed: add /repo/biz/a.ts (+2 −0)"]);
+  assert.deepEqual(view.tail.map((row) => row.text), ["Write(/repo/biz/a.ts) +2 −0"]);
   assert.equal(view.tail[0].seq, "2");
   assert.equal(view.tail[0].positionSeq, "1");
   assert.deepEqual(view.files, [{ path: "/repo/biz/a.ts", kind: "add", additions: 2, deletions: 0 }]);
@@ -256,8 +256,8 @@ test("a file change keeps one row that its completion redraws in place", () => {
   accept("fileChange.started", "tool-2", "in_progress", rewritten);
   accept("fileChange.completed", "tool-2", "failed", rewritten);
   assert.deepEqual(view.tail.map((row) => row.text), [
-    "Files completed: add /repo/biz/a.ts (+2 −0)",
-    "Files failed: update /repo/b.ts (+1 −1)"
+    "Write(/repo/biz/a.ts) +2 −0",
+    "Update(/repo/b.ts) +1 −1 · failed"
   ]);
 });
 

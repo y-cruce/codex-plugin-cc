@@ -578,6 +578,17 @@ describe('live row polish', () => {
     assert.equal(rowsOf(tree).find(node => textOf(node).startsWith('…')), undefined);
     assert.equal(rowsOf(tree).find(node => textOf(node) === 'body').props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '✎ body'));
+    // A long path gives way from the left, so the file name and counts stay.
+    data.tail = [{ seq: 'f', type: 'fileChange.completed', text: '', status: 'completed',
+      files: [{ path: `/${'deep/'.repeat(40)}order-space/Main.java`, kind: 'update', additions: 12, deletions: 3 }] }]
+    const file = rowsOf(liveTree($.ui.resolve(row()), data, 60, 0, 48)).find(node => textOf(node).startsWith('● Update('))
+    assert.match(textOf(file), /^● Update\(….*order-space\/Main\.java\) \+12 −3$/)
+    assert.equal(file.children[0].props.color, 'green')
+    // Edits in a row fold into one entry; a switch between shell and edits leaves a gap.
+    const edit = (seq, path, status = 'completed') => ({ seq, type: 'fileChange.completed', text: '', status, files: [{ path, kind: 'update', additions: 2, deletions: 1 }] })
+    data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
+    const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
+    assert.deepEqual(rendered.slice(rendered.indexOf('● $ ls')), ['● $ ls', ' ', '● Edited 2 files +4 −2 · failed', '  ⎿  a.ts, b.ts'])
   });
   test('puts the waiting question first and warns only when running without progress over 120 seconds', ($, on) => {
     world($, on);

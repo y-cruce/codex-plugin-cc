@@ -526,7 +526,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     return result
   })
-  // `/codex:tasks` opens the pane and switches it; answering without next()
+  // `/codex:tasks` opens and closes the pane and switches its task; answering without next()
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
@@ -538,6 +538,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // The pane opens whether or not anything is running: it is where tasks are
     // watched, and asking for it before dispatching one is a fair thing to do.
     const wanted = e.args.trim()
+    // Bare, the command is the pane's switch: it closes a pane that is open.
+    if (!wanted && state.opened) {
+      state.opened = false
+      await $.ui.close({ id: PANE })
+      return { text: 'Codex tasks · closed' }
+    }
     if (wanted && threads.length) {
       const index = Number(wanted)
       const match = Number.isInteger(index) && index >= 1 && index <= threads.length

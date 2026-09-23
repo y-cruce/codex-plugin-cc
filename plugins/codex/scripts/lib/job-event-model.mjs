@@ -68,6 +68,10 @@ function eventAgent(event, view) {
   return known ? { id, path: known.path, parentId: null } : null;
 }
 
+// Named the way Claude Code names its own file tools, so a row reads as the
+// edit it was: `Update(src/a.ts) +3 −1`.
+export const FILE_VERBS = { add: "Write", update: "Update", delete: "Delete", move: "Move" };
+
 export function renderJobEvent(event, { verbose = false, tail = false } = {}) {
   const text = renderEventText(event, { verbose, tail });
   if (text == null || !event.agent) return text;
@@ -103,7 +107,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       break;
     }
     case "fileChange.started": case "fileChange.patch.updated": case "fileChange.completed":
-      text = `Files ${p.status ?? event.type.split(".").at(-1)}: ${(p.files ?? []).map((file) => `${file.kind} ${file.path}${file.additions == null ? "" : ` (+${file.additions} −${file.deletions})`}`).join(", ")}`;
+      text = `${(p.files ?? []).map((file) => `${FILE_VERBS[file.kind] ?? "Edit"}(${file.path})${file.additions == null ? "" : ` +${file.additions} −${file.deletions}`}`).join(", ")}${p.status === "failed" ? " · failed" : ""}`;
       break;
     case "usage.updated": {
       if (!verbose) return null;
@@ -245,6 +249,10 @@ function updateTail(view, event, text, key = null) {
   // cannot tell where the command ends and the output begins.
   const output = key ? view._items[key]?.outputPreview : null;
   if (output && event.type.startsWith("command.")) row.output = output;
+  if (event.type.startsWith("fileChange.")) {
+    row.files = (event.payload.files ?? []).map(({ path, kind, additions, deletions }) => ({ path, kind, additions, deletions }));
+    row.status = event.payload.status;
+  }
   if (event.type === "command.completed") {
     row.exitCode = typeof event.payload.exitCode === "number" ? event.payload.exitCode : null;
     row.durationMs = typeof event.payload.durationMs === "number" ? event.payload.durationMs : null;

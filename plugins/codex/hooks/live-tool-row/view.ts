@@ -48,7 +48,8 @@ export type LiveView = {
   }[]
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
-  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string }[]
+  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
+    files?: { path: string; kind: string; additions: number | null; deletions: number | null }[]; status?: string; failed?: boolean }[]
 }
 
 const colors = { queued: 'gray', running: 'cyan', 'waiting-for-answer': 'magenta', completed: 'green', failed: 'red', cancelled: 'gray' }
@@ -67,6 +68,8 @@ export function isOver(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundI
   return Boolean(view.endedAt) || ['completed', 'failed', 'cancelled'].includes(view.status)
 }
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
+const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
+const FILE_VERBS: Record<string, string> = { add: 'Write', update: 'Update', delete: 'Delete', move: 'Move' }
 
 // Group before applying the display limit; persisted positions survive tail
 // replacement and summaries remain visible after their source rows expire.
@@ -295,7 +298,15 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   data.tail.forEach((event, index) => {
     while (marks.length && event.seq && BigInt(event.seq) >= BigInt(marks[0]!.seq)) grouped.push(marks.shift()!)
     for (const agent of agents.filter(agent => agent.index === index)) grouped.push(summary(agent))
-    if (tail.includes(event)) grouped.push(event)
+    if (!tail.includes(event)) return
+    // Edits in a row fold into one entry the way Claude Code folds its own:
+    // a run of patches is one piece of work, and a row per patch pushed the
+    // commands around it off the pane. A file patched twice counts once.
+    const last = grouped.at(-1)
+    if (isFileRow(event) && last && isFileRow(last)) {
+      grouped[grouped.length - 1] = { ...event, failed: last.failed || last.status === 'failed',
+        files: [...last.files!.filter(file => !event.files!.some(next => next.path === file.path)), ...event.files!] }
+    } else grouped.push(event)
   })
   for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push(summary(agent))
   grouped.push(...marks)
@@ -307,8 +318,18 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // In a full trace, lastMessage replaces the newest 300-character preview from
   // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
+  // Shell commands and file edits are different kinds of work: a change from
+  // one run to the other gets a blank row, so the eye finds where each begins.
+  let run: 'bash' | 'file' | null = null
+  const switchTo = (kind: 'bash' | 'file') => {
+    if (run && run !== kind && !previousBlock) lines.push(Text({ children: ' ' }))
+    separate(false)
+    run = kind
+  }
   grouped.forEach((event, index) => {
     const type = typeOf(event)
+    const prior = run
+    run = null
     if (type === 'agent.summary') {
       add(event.text, { dimColor: true })
       if (event.output) add(`    ${event.output}`, { dimColor: true })
@@ -327,7 +348,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       return
     }
     if (type.startsWith('command')) {
-      separate(false)
+      run = prior
+      switchTo('bash')
       const completed = type === 'command.completed'
       const color = completed ? event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
       const suffix = completed && event.durationMs != null ? ` · ${duration(event.durationMs)}` : ''
@@ -338,8 +360,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       const [first, ...rest] = clean(event.text).replace(/^\$\s*/, '').split(/\n| ⏎ /)
       const command = rest.some(part => part.trim()) ? `${first!.trimEnd()} …` : first!
       lines.push(Text({ wrap: 'truncate-middle', children: [
-        Text({ color, children: completed ? '● $ ' : '$ ' }),
-        Text({ children: command + suffix }),
+        Text({ color, children: completed ? '● ' : '' }),
+        Text({ dimColor: true, children: '$ ' }),
+        Text({ children: command }),
+        Text({ dimColor: true, children: suffix }),
       ] }))
       // Failing output is worth a row per line: run together it reads as one
       // stretch of noise, and the cut leaves a separator dangling at the end.
@@ -347,6 +371,45 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
         for (const line of clean(event.output ?? '').split('\n').map(part => part.trim()).filter(Boolean).slice(0, 3)) {
           lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `  ${line}` }))
         }
+      }
+      return
+    }
+    // A file edit reads the way Claude Code draws its own: the tool and the
+    // file first, the line counts after, and the dot says how it went. The
+    // path gives way from the left, so the file name is what stays.
+    if (isFileRow(event)) {
+      run = prior
+      switchTo('file')
+      const failed = event.failed || event.status === 'failed'
+      const color = event.status === 'failed' ? 'red' : event.status === 'completed' ? 'green' : 'gray'
+      const files = event.files!
+      if (files.length > 1) {
+        const known = files.filter(file => file.additions != null)
+        const added = known.reduce((sum, file) => sum + file.additions!, 0)
+        const removed = known.reduce((sum, file) => sum + (file.deletions ?? 0), 0)
+        lines.push(Text({ wrap: 'truncate-end', children: [
+          Text({ color, children: '● ' }),
+          Text({ children: event.status === 'completed' || event.status === 'failed' ? 'Edited ' : 'Editing ' }),
+          Text({ bold: true, children: String(files.length) }),
+          Text({ children: ' files' }),
+          ...(known.length ? [Text({ color: 'green', children: ` +${added}` }), Text({ color: 'red', children: ` −${removed}` })] : []),
+          ...(failed ? [Text({ color: 'red', children: ' · failed' })] : []),
+        ] }))
+        const names = files.map(file => file.path.split('/').at(-1)).reverse().join(', ')
+        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(`  ⎿  ${names}`, columns) }))
+        return
+      }
+      for (const file of files) {
+        const verb = FILE_VERBS[file.kind] ?? 'Edit'
+        const counts = file.additions == null ? [] : [` +${file.additions}`, ` −${file.deletions ?? 0}`]
+        const room = columns - 4 - verb.length - counts.join('').length - (event.status === 'failed' ? 9 : 0)
+        lines.push(Text({ wrap: 'truncate-end', children: [
+          Text({ color, children: '● ' }),
+          Text({ bold: true, children: verb }),
+          Text({ children: `(${shortPath(file.path, Math.max(12, room))})` }),
+          ...(counts.length ? [Text({ color: 'green', children: counts[0] }), Text({ color: 'red', children: counts[1] })] : []),
+          ...(event.status === 'failed' ? [Text({ color: 'red', children: ' · failed' })] : []),
+        ] }))
       }
       return
     }

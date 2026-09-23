@@ -1,5 +1,5 @@
 ---
-description: Open the Codex tasks pane, or switch it to another task
+description: Open or close the Codex tasks pane, or switch it to another task
 argument-hint: '[number | part of a task name]'
 disable-model-invocation: true
 ---
