@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
+import { loadAcpDriver } from "../plugins/codex/scripts/lib/acp.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
@@ -218,4 +219,36 @@ test("ACP transport failure rejects the active turn", async (t) => {
   const h = await setupPort(t, "acp-transport");
   const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "transport-failure" }] });
   await assert.rejects(turn.done, (error) => error.code === "TRANSPORT_CLOSED");
+});
+
+test("a copy missing the ACP SDK installs it and loads the driver, and nothing else triggers an install", async () => {
+  // Claude Code reports a plugin install as a success when its `npm ci` fails,
+  // so a copy can reach its first Qoder turn without the SDK.
+  const missing = (name) => Object.assign(new Error(`Cannot find package '${name}' imported from acp-driver.mjs`),
+    { code: "ERR_MODULE_NOT_FOUND" });
+  const cases = [
+    ["SDK missing", missing("@agentclientprotocol/sdk"), null, { installs: 1, imports: 2, loaded: true }],
+    ["zod missing", missing("zod"), null, { installs: 1, imports: 2, loaded: true }],
+    ["another package missing", missing("left-pad"), null, { installs: 0, imports: 1, error: /left-pad/ }],
+    ["driver itself broken", new SyntaxError("Unexpected token"), null, { installs: 0, imports: 1, error: /Unexpected token/ }],
+    ["install fails", missing("@agentclientprotocol/sdk"), new Error("npm exit 1"), { installs: 1, imports: 1, error: /npm exit 1/ }],
+  ];
+  for (const [name, firstError, installError, expected] of cases) {
+    const imports = [];
+    const roots = [];
+    const attempt = loadAcpDriver({
+      importDriver: async (href) => {
+        imports.push(href);
+        if (imports.length === 1) throw firstError;
+        return { openAcpExecutorJob: "driver" };
+      },
+      install: async (root) => { roots.push(root); if (installError) throw installError; },
+    });
+    if (expected.error) await assert.rejects(attempt, expected.error, name);
+    else assert.equal((await attempt).openAcpExecutorJob, "driver", name);
+    assert.equal(roots.length, expected.installs, name);
+    assert.equal(imports.length, expected.imports, name);
+    if (roots.length) assert.ok(fs.existsSync(path.join(roots[0], "package.json")), `${name}: installs into the plugin root`);
+    if (imports.length === 2) assert.match(imports[1], /acp-driver\.mjs\?installed=\d+$/, name);
+  }
 });

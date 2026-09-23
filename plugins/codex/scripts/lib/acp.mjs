@@ -1,9 +1,87 @@
 // Imported when a turn actually runs, not when the module loads: the driver
-// needs `@agentclientprotocol/sdk`, and a plugin is distributed without its
-// dependencies, so a top-level import failed every companion call on an
-// installed copy -- `observe list` included, which has nothing to do with ACP.
+// needs `@agentclientprotocol/sdk`, and an installed copy can be missing it,
+// so a top-level import failed every companion call on such a copy --
+// `observe list` included, which has nothing to do with ACP.
+
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { renderJobEvent } from "./job-event-model.mjs";
+
+const PLUGIN_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const DRIVER = new URL("./executors/acp-driver.mjs", import.meta.url).href;
+const LOCK_STALE_MS = 5 * 60 * 1000;
+const INSTALL_TIMEOUT_MS = 3 * 60 * 1000;
+
+// Claude Code installs a plugin's dependencies with `npm ci --ignore-scripts`
+// and reports the install as a success when that fails. It failed every time
+// the install ran under `npm run`, which exports npm_config_allow_scripts and
+// makes npm refuse a project install -- and a copy without the SDK cannot run a
+// Qoder turn at all. Qoder needs the network to do anything, so wherever it can
+// run npm can fetch: a copy installs what it is missing before its first turn.
+export function missingDependency(error) {
+  return error?.code === "ERR_MODULE_NOT_FOUND" &&
+    /Cannot find package '(@agentclientprotocol\/sdk|zod)'/.test(String(error.message));
+}
+
+export async function loadAcpDriver({ importDriver = (href) => import(href), install = installDependencies, onProgress } = {}) {
+  try { return await importDriver(DRIVER); }
+  catch (error) { if (!missingDependency(error)) throw error; }
+  await install(PLUGIN_ROOT, onProgress);
+  // A fresh URL: whether a failed import is remembered for its URL has not
+  // held the same across the Node versions this plugin supports.
+  return importDriver(`${DRIVER}?installed=${Date.now()}`);
+}
+
+async function installed(root) {
+  try { await fs.access(path.join(root, "node_modules", ".package-lock.json")); return true; }
+  catch { return false; }
+}
+
+// Two turns dispatched together both find the SDK missing. One installs and
+// the other waits for it, rather than two `npm ci` runs each deleting the
+// node_modules the other is writing.
+async function acquireInstallLock(lock) {
+  while (true) {
+    try { await fs.mkdir(lock); return; }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    const since = await fs.stat(lock).then((stat) => stat.mtimeMs, () => Date.now());
+    if (Date.now() - since > LOCK_STALE_MS) await fs.rm(lock, { recursive: true, force: true });
+    else await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+export async function installDependencies(root, onProgress) {
+  const lock = path.join(root, ".dependencies.lock");
+  await acquireInstallLock(lock);
+  try {
+    if (await installed(root)) return;
+    onProgress?.("Installing the plugin's ACP dependencies before the first Qoder turn");
+    const env = { ...process.env };
+    delete env.npm_config_allow_scripts;
+    delete env.NPM_CONFIG_ALLOW_SCRIPTS;
+    const windows = process.platform === "win32";
+    const { code, output } = await new Promise((resolve) => {
+      const child = spawn(windows ? "npm.cmd" : "npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        { cwd: root, env, shell: windows, stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      child.stdout.on("data", (chunk) => { output += chunk; });
+      child.stderr.on("data", (chunk) => { output += chunk; });
+      const timer = setTimeout(() => child.kill(), INSTALL_TIMEOUT_MS);
+      child.on("error", (error) => { clearTimeout(timer); resolve({ code: null, output: error.message }); });
+      child.on("close", (exit) => { clearTimeout(timer); resolve({ code: exit, output }); });
+    });
+    if (code !== 0) {
+      const tail = output.trim().split("\n").slice(-4).join(" | ");
+      throw new Error(`Qoder needs @agentclientprotocol/sdk, which this copy of the plugin (${root}) is missing, ` +
+        `and installing it failed (npm exit ${code}): ${tail}. Run \`npm ci --ignore-scripts\` in that directory.`);
+    }
+  } finally {
+    await fs.rm(lock, { recursive: true, force: true });
+  }
+}
 
 function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (onProgress) onProgress({ message, phase, ...extra });
@@ -28,7 +106,9 @@ function lastAssistantMessage(terminal) {
 }
 
 export async function runAcpTurn(cwd, options = {}) {
-  const { openAcpExecutorJob } = await import("./executors/acp-driver.mjs");
+  const { openAcpExecutorJob } = await loadAcpDriver({
+    onProgress: (message) => emitProgress(options.onProgress, message, "starting")
+  });
   const job = { id: options.onProgress?.jobId ?? options.jobId, executor: "acp", workspaceRoot: cwd,
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
