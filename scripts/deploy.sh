@@ -23,6 +23,15 @@ VERSION=$(node -p "const [a,b,c]=require('./package.json').version.split('.'); [
 # The session injects these, and the state-directory tests misread them.
 RUN="env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_TRANSCRIPT_PATH -u CLAUDECODE"
 
+# `npm run deploy` exports the user's npm config to this script as npm_config_*
+# variables. An `allow-scripts` entry is fine in ~/.npmrc -- a global install of
+# Claude Code needs it -- but coming in through the environment it reads as the
+# command-line flag, which npm refuses in a project-scoped install with
+# EALLOWSCRIPTS. The `npm ci` that `claude plugin update` runs in the plugin's
+# cache inherited it, failed, and was swallowed as a debug warning, so every
+# release made through this script landed with no node_modules.
+unset npm_config_allow_scripts
+
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 # codex-director is what the marketplace serves. Fast-forward only: a diverged
 # branch means someone released from elsewhere, and overwriting that is not
@@ -70,11 +79,7 @@ if [ ! -d "$CACHE" ]; then
 fi
 if [ ! -f "$CACHE/node_modules/.package-lock.json" ]; then
   echo "   dependencies missing; installing them into $CACHE"
-  # `allow-scripts` in a user's ~/.npmrc makes every project-scoped install fail
-  # with EALLOWSCRIPTS, which is what Claude Code's own `npm ci` hits and
-  # swallows. Clearing it for this one command is enough; the empty environment
-  # variable outranks the file.
-  (cd "$CACHE" && npm_config_allow_scripts= npm ci --ignore-scripts)
+  (cd "$CACHE" && npm ci --ignore-scripts)
 fi
 node --input-type=module -e "await import('file://$CACHE/scripts/lib/executors/acp-driver.mjs')"
 
