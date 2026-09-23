@@ -105,6 +105,15 @@ function lastAssistantMessage(terminal) {
   return [...terminal.finalMessages].reverse().find((message) => message.role === "assistant") ?? null;
 }
 
+function terminalError(terminal) {
+  const reason = terminal.reason ?? {};
+  return Object.assign(new Error(reason.message ?? reason.code ?? `ACP round ended ${terminal.status}.`), {
+    code: reason.code ?? terminal.status,
+    backendCode: reason.backendCode ?? null,
+    retryable: reason.retryable === true
+  });
+}
+
 export async function runAcpTurn(cwd, options = {}) {
   const { openAcpExecutorJob } = await loadAcpDriver({
     onProgress: (message) => emitProgress(options.onProgress, message, "starting")
@@ -129,7 +138,9 @@ export async function runAcpTurn(cwd, options = {}) {
     await eventPump;
   };
   const failQueuedRounds = async (error) => {
-    for (const entry of port.drainQueuedPrompts()) await options.failQueuedRound?.(entry.round, error);
+    for (const entry of port.drainQueuedPrompts()) {
+      await options.failQueuedRound?.(entry.round, error, () => port.bindQueuedRound(entry));
+    }
   };
   const runRound = async (sessionId, firstInput, onProgress) => {
     let input = firstInput;
@@ -191,10 +202,16 @@ export async function runAcpTurn(cwd, options = {}) {
     const firstResult = await runRound(session.sessionId, [{ type: "text", text: prompt }], options.onProgress);
     return { ...firstResult, afterCompletion: async () => {
       try {
-        let queued;
-        while ((queued = port.takeQueuedPrompt())) {
+        let previous = firstResult;
+        while (true) {
+          if (previous.terminal.status !== "completed") {
+            await failQueuedRounds(terminalError(previous.terminal));
+            break;
+          }
+          const queued = port.takeQueuedPrompt();
+          if (!queued) break;
           try {
-            await options.runQueuedRound(queued.round, async (onProgress) => {
+            previous = await options.runQueuedRound(queued.round, async (onProgress) => {
               await port.startQueuedRound(queued, onProgress);
               emitProgress(onProgress, "Previous round completed; starting the next queued instruction.", "starting", {
                 executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId,

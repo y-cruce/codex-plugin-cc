@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { readRecordHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { readRoundContext } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { liveStatus, sendLiveCommand } from "../plugins/codex/scripts/lib/live-commands.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
@@ -39,7 +40,7 @@ function recordingPrompts(file) {
     .map((entry) => entry.params.prompt.map((block) => block.text).join("\n"));
 }
 
-function startTask(t, mode = "default") {
+function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold") {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
@@ -47,7 +48,7 @@ function startTask(t, mode = "default") {
   const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile };
   const child = spawn(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
     "--executor-command", process.execPath, "--executor-args", JSON.stringify([AGENT]),
-    "--executor-mode", mode, "--json", mode === "yolo" ? "permission" : "hold"], { cwd, env });
+    "--executor-mode", mode, "--json", prompt], { cwd, env });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -106,6 +107,79 @@ const cases = [
         [job.id, "job.started"], [job.id, "job.completed"],
         [accepted.queuedJobId, "job.started"], [accepted.queuedJobId, "job.completed"]
       ]);
+    }
+  },
+  {
+    name: "a queued round fails in its thread when its predecessor fails",
+    run: async (t) => {
+      const h = startTask(t, "default", "cancel-late");
+      const job = await waitFor(h.runningJob);
+      const original = await readRoundContext(h.cwd, job.id);
+      const queued = h.cli("message", job.id, "--queue", "basic");
+      assert.equal(queued.status, 0, queued.stderr);
+      const queuedJobId = JSON.parse(queued.stdout).queuedJobId;
+      const interrupted = h.cli("message", job.id, "--interrupt", "stop:refusal");
+      assert.equal(interrupted.status, 0, interrupted.stderr);
+      const processResult = await waitForExit(h);
+      assert.equal(processResult.code, 1, processResult.stderr);
+      assert.deepEqual(recordingPrompts(h.recording), ["cancel-late", "stop:refusal"]);
+
+      const stored = readStoredJob(h.cwd, queuedJobId);
+      assert.equal(stored.status, "failed");
+      assert.equal(stored.errorMessage, "refusal");
+      const context = await readRoundContext(h.cwd, queuedJobId);
+      assert.equal(context.layout, "thread-record");
+      assert.equal(context.recordId, original.recordId);
+      assert.equal(context.receipt.status, "failed");
+      assert.equal(context.receipt.job.status, "failed");
+      assert.equal(context.receipt.job.errorMessage, "refusal");
+      const history = await readRecordHistory(h.cwd, original.recordId);
+      const queuedEvents = history.events.filter((event) => event.jobId === queuedJobId);
+      assert.deepEqual(queuedEvents.map((event) => event.type), ["job.started", "job.failed"]);
+      assert.equal(queuedEvents.at(-1).payload.error.message, "refusal");
+
+      const result = h.cli("result", queuedJobId);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).storedJob.errorMessage, "refusal");
+      const status = h.cli("status", queuedJobId);
+      assert.equal(status.status, 0, status.stderr);
+      const statusJob = JSON.parse(status.stdout).job;
+      assert.equal(statusJob.status, "failed");
+      assert.equal(statusJob.recordId, original.recordId);
+      assert.equal(statusJob.activeRoundId, null);
+
+      const observed = h.cli("observe", "threads");
+      assert.equal(observed.status, 0, observed.stderr);
+      const threads = JSON.parse(observed.stdout).threads;
+      assert.equal(threads.length, 1);
+      assert.equal(threads[0].recordId, original.recordId);
+      assert.equal(threads[0].jobId, queuedJobId);
+      assert.equal(threads[0].latestRoundId, queuedJobId);
+      assert.equal(threads[0].status, "failed");
+      assert.equal(threads[0].historyAvailable, true);
+
+      const followed = run(process.execPath, [SCRIPT, "observe", "follow", queuedJobId, "--cwd", h.cwd, "--quiet"],
+        { cwd: h.cwd, env: h.env });
+      assert.equal(followed.status, 0, followed.stderr);
+      assert.match(followed.stdout, new RegExp(`^FAILED job=${queuedJobId} .* refusal$`, "m"));
+
+      const view = JSON.parse(fs.readFileSync(threads[0].viewPath, "utf8"));
+      assert.deepEqual(view.rounds.map((round) => [round.jobId, round.status]),
+        [[job.id, "failed"], [queuedJobId, "failed"]]);
+      const element = (type) => ({ children, ...props }) => ({ type, props, children: Array.isArray(children) ? children : [children ?? ""] });
+      const ui = { Box: element("Box"), Text: element("Text"), Code: element("Code"), Button: element("Button") };
+      const pane = paneBody(ui, [view], 100, 20, Date.parse(view.endedAt), null, () => {});
+      const nodes = [];
+      const visit = (value) => {
+        if (typeof value === "string") return value;
+        nodes.push(value);
+        return (value.children ?? []).map(visit).join("\n");
+      };
+      const text = visit(pane);
+      assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
+      assert.equal(nodes.find((node) => node.type === "Button").props.key, `codex_tab_${original.recordId}`);
+      assert.match(text, /basic/);
+      assert.match(text, /failed/);
     }
   },
   {

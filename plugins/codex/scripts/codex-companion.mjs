@@ -606,9 +606,12 @@ async function executeTaskRun(request) {
       const { logFile, progress } = createTrackedProgress(round.job, { logFile: round.job.logFile });
       return runTrackedJob(round.job, async () => taskExecution(round.request, await runner(progress)), { logFile });
     },
-    failQueuedRound: async (round, error) => {
+    failQueuedRound: async (round, error, bindQueuedRound) => {
       try {
-        await runTrackedJob(round.job, async () => { throw error; }, { logFile: round.job.logFile });
+        await runTrackedJob(round.job, async () => {
+          await bindQueuedRound();
+          throw error;
+        }, { logFile: round.job.logFile });
       } catch {}
     }
   } : {};

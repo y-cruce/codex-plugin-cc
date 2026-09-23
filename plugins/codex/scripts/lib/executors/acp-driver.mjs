@@ -278,15 +278,19 @@ export class AcpExecutorJobPort {
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
   }
 
+  async bindQueuedRound(entry) {
+    this.job = entry.round.job;
+    await this.runtime.register(this.owner, this.cwd, this.job.id);
+    const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, this.sessionId, null, entry.recordId);
+    this.recordId = binding.recordId;
+  }
+
   async startQueuedRound(entry, onProgress) {
     if (this.closed || this.exit) throw Object.assign(new Error("ACP executor session exited before the queued round started."), {
       code: "TRANSPORT_CLOSED", retryable: true
     });
-    this.job = entry.round.job;
     this.onProgress = onProgress;
-    await this.runtime.register(this.owner, this.cwd, this.job.id);
-    const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, this.sessionId, null, entry.recordId);
-    this.recordId = binding.recordId;
+    await this.bindQueuedRound(entry);
     this.adapter = this.createAdapter(this.job);
     this.adapter.bindSession(this.sessionId);
     this.control.jobId = this.job.id;
