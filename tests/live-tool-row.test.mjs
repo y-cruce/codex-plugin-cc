@@ -589,6 +589,20 @@ describe('live row polish', () => {
     data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
     assert.deepEqual(rendered.slice(rendered.indexOf('● $ ls')), ['● $ ls', ' ', '● Edited 2 files +4 −2 · failed', '  ⎿  a.ts, b.ts'])
+    // Commands in a row fold too; a failing one keeps its own row and output.
+    const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
+    data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-6),
+      ['● Ran 2 shell commands · 2s', '  ⎿  $ pwd', '● $ false · 1s', '  boom', '● Ran 2 shell commands · 2s', '  ⎿  $ id'])
+    // Given a press, a fold's words are a button that opens it into its rows.
+    const open = new Set();
+    const ui = $.ui.resolve(row());
+    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: key => open.has(key), toggle: key => open.add(key) };
+    const find = (node, key) => node?.props?.key === key ? node : (node?.children ?? []).map(child => find(child, key)).find(Boolean);
+    find(liveTree(ui, data, 80, 0, 48, undefined, undefined, false, fold), 'codex_fold_1').props.onPress();
+    const opened = rowsOf(liveTree(ui, data, 80, 0, 48, undefined, undefined, false, fold)).map(textOf);
+    assert.ok(opened.includes('    ● $ ls · 1s') && opened.includes('    ● $ pwd · 1s'));
+    assert.ok(opened.includes('  ⎿  $ id'), 'the other fold stays closed');
   });
   test('puts the waiting question first and warns only when running without progress over 120 seconds', ($, on) => {
     world($, on);
@@ -810,18 +824,20 @@ describe('Markdown and prompt footer', () => {
   test('splits command output onto a dim row only for a failed completion', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
-    data.tail = [0, 2, null].map(exitCode => ({ type: 'command.completed', text: '$ echo hello', output: 'first\nsecond\nthird', exitCode, durationMs: 1200 }));
+    data.tail = [null, 2, 0].map(exitCode => ({ type: 'command.completed', text: '$ echo hello', output: 'first\nsecond\nthird', exitCode, durationMs: 1200 }));
     data.tail.push({ type: 'command.started', text: '$ started', output: 'hidden', exitCode: 2 });
     // A heredoc's body is not worth a row of glyphs: the row says it was cut.
+    // The last three fold, and the fold names the newest command.
     data.tail.push({ type: 'command.completed', text: "$ apply_patch <<'PATCH' ⏎ *** Begin Patch ⏎ PATCH", exitCode: 0, durationMs: 1200 });
     const tree = liveTree($.ui.resolve(row()), data, 40, 0);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '● $ echo hello · 1.2s', '$ started', "● $ apply_patch <<'PATCH' … · 1.2s"]);
-    assert.deepEqual(commands.slice(0, 3).map(node => node.children[0].props.color), ['green', 'red', 'gray']);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', '● $ echo hello · 1.2s', "  ⎿  $ apply_patch <<'PATCH' …"]);
+    assert.deepEqual(commands.slice(0, 2).map(node => node.children[0].props.color), ['gray', 'red']);
+    assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands · 2.4s'));
     // Every break in the output gets its own row, whether it arrived as the
     // folding glyph or as a newline: joined back together the failure reads as
     // one run of noise, and the cut leaves the separator dangling.
-    const outputs = rowsOf(tree).filter(node => textOf(node).startsWith('  '));
+    const outputs = rowsOf(tree).filter(node => textOf(node).startsWith('  ') && !textOf(node).includes('⎿'));
     assert.deepEqual(outputs.map(textOf), ['  first', '  second', '  third']);
     assert.equal(outputs[0].props.dimColor, true);
     assert.equal(outputs[0].props.wrap, 'truncate-end');

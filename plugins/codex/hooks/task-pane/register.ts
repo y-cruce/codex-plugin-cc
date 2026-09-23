@@ -27,6 +27,8 @@ type State = {
   polling: boolean
   opened: boolean
   selected: string | null
+  // Folds in the trace the reader opened, by thread and fold.
+  expanded: Set<string>
   followed: Set<string>
   unreadable: Map<string, number>
   owners: Map<string, string[]>
@@ -487,7 +489,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(),
     views: new Map<string, LiveView>(), ledger: {},
-    ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null,
+    ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
     liveRoots: new Set<string>(),
@@ -619,8 +621,17 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.toEnd = true
       $.ui.invalidate('ui.render')
     }
+    const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]
+    const foldId = (key: string) => `${shown?.recordId ?? shown?.jobId}:${key}`
+    const fold = {
+      isOpen: (key: string) => state.expanded.has(foldId(key)),
+      toggle: (key: string) => {
+        if (!state.expanded.delete(foldId(key))) state.expanded.add(foldId(key))
+        $.ui.invalidate('ui.render')
+      },
+    }
     const tree = paneBody($.ui.resolve(e), threads, Math.max(20, e.props.bodyColumns),
-      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background)
+      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background, fold)
     // The status line is the tree's last row and the engine scrolls the whole
     // tree, so a trace that grows carries the status off the bottom of the
     // window. `end` keeps up with a tree that grows until something else moves

@@ -1,7 +1,7 @@
 import type { Elements } from 'claude-code'
 import { clip } from '../live-tool-row/format.ts'
 import { isOver, liveTree } from '../live-tool-row/view.ts'
-import type { LiveView } from '../live-tool-row/view.ts'
+import type { Fold, LiveView } from '../live-tool-row/view.ts'
 
 const DOT: Record<string, string> = {
   queued: 'gray',
@@ -61,6 +61,7 @@ export function paneBody(
   selected: string | null,
   onSelect: (recordId: string) => void,
   background?: string,
+  fold?: Omit<Fold, 'Button'>,
 ) {
   const { Box, Text, Button } = ui
   const width = Math.max(24, columns)
@@ -122,7 +123,7 @@ export function paneBody(
   // showing to the foot of the pane rather than the mid grey the engine paints
   // under an element that stops early.
   return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
-    Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true)] }),
+    Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true, fold && { ...fold, Button })] }),
     // A blank row, not a margin: a margin belongs to no element, so the mid grey
     // the engine paints under the pane is what shows through it.
     Text({ children: ' ' }),
