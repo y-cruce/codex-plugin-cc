@@ -331,6 +331,12 @@ export async function main(runtimeOptions = {}) {
           const job = jobs.jobForSocket(socket);
           if (message.params?.threadId && job) await codexEvents.bindSession(message.params.threadId, job);
           try {
+            // A resumed thread is known before its turn starts. Binding after the
+            // response left the turn's first events in a 256-event buffer while the
+            // record was opened, and a fast burst overflowed it and was dropped.
+            if (job && jobs.threadRecords && message.method === "turn/start" && message.params?.threadId) {
+              await jobs.bind(socket, job.workspaceRoot ?? cwd, job.id, message.params.threadId);
+            }
             const result = await appClient.request(message.method, message.params ?? {});
             const responseThreadId = result.thread?.id ?? result.reviewThreadId ??
               (message.method === "turn/start" ? message.params?.threadId : null);
