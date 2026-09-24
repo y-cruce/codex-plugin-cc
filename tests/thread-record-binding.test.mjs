@@ -97,6 +97,10 @@ test("a later round appends in the existing record sequence", async (t) => {
     ["2", first.jobId],
     ["3", second.jobId]
   ]);
+  // A round's page starts at its own first event: the rounds before it are
+  // skipped, not scanned against the limit a page at a time.
+  const page = await readHistory(workspaceRoot, second.jobId, { stateDir, limit: 1 });
+  assert.deepEqual(page.events.map((entry) => entry.seq), ["3"]);
 });
 
 test("provisional events flush in arrival order", async (t) => {

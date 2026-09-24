@@ -187,7 +187,15 @@ export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
 
 export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDir } = {}) {
   const location = await resolveJobHistory(cwd, jobId, { stateDir });
-  return readHistoryLocation(location, { after, limit, roundId: location.layout === "thread-record" ? jobId : null });
+  if (location.layout !== "thread-record") return readHistoryLocation(location, { after, limit, roundId: null });
+  // A thread record holds every round of the thread, and a later round's events
+  // start where its receipt says. Scanned from the record's start, a round
+  // resumed after 6000 events of the one before it spent two minutes paging
+  // through them, and the pane's 20 s poll never got past them.
+  let firstSeq = null;
+  try { firstSeq = JSON.parse(await fs.readFile(location.roundReceipt, "utf8")).firstSeq ?? null; }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  return readHistoryLocation(location, { after, limit, roundId: jobId, firstSeq });
 }
 
 export async function readRecordHistory(cwd, recordId, { after, limit = Infinity, stateDir } = {}) {
@@ -195,13 +203,19 @@ export async function readRecordHistory(cwd, recordId, { after, limit = Infinity
   return readHistoryLocation(threadRecordPaths(root, recordId), { after, limit, roundId: null });
 }
 
-async function readHistoryLocation(location, { after, limit, roundId }) {
+async function readHistoryLocation(location, { after, limit, roundId, firstSeq = null }) {
   const directory = location.directory;
   // Retention publishes its new manifest before deleting old segments. Retry a
   // read crossing that boundary so callers receive CURSOR_EXPIRED, not ENOENT.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const manifest = await loadManifest(directory);
-    const afterSeq = parseCursor(manifest, after);
+    let afterSeq = parseCursor(manifest, after);
+    if (firstSeq !== null) {
+      // Capped at the committed seq: the receipt can name a seq not yet flushed,
+      // and a cursor past the committed history is refused on the next read.
+      const floor = BigInt(firstSeq) - 1n < BigInt(manifest.committedSeq) ? BigInt(firstSeq) - 1n : BigInt(manifest.committedSeq);
+      if (afterSeq < floor) afterSeq = floor;
+    }
     if (!(limit === Infinity || (Number.isInteger(limit) && limit > 0))) throw historyError("INVALID_LIMIT", "limit must be a positive integer");
     const events = [];
     let scannedSeq = afterSeq;
@@ -210,7 +224,9 @@ async function readHistoryLocation(location, { after, limit, roundId }) {
       let full = false;
       for (const segment of manifest.segments) {
         if (BigInt(segment.lastSeq) <= afterSeq) continue;
-        for (const event of await readSegment(directory, segment, afterSeq)) {
+        // Only as many events as the page still needs are parsed: the rest of a
+        // segment is tens of megabytes, checksummed and parsed on every page.
+        for (const event of await readSegment(directory, segment, afterSeq, limit - scanned)) {
           if (BigInt(event.seq) > BigInt(manifest.committedSeq)) break;
           scannedSeq = BigInt(event.seq);
           scanned += 1;
