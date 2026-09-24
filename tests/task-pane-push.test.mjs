@@ -182,4 +182,15 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   // Dropping the terminal row makes the last message the row nothing follows,
   // which is what the "still writing" ellipsis used to key off.
   assert.equal(text.includes("\u2026"), false, text);
+  // Tab keeps its place in the pane as a count of buttons, so the task rows
+  // come first in the tree: folds coming and going must not move them.
+  const withFold = { ...data, tail: [...data.tail, { seq: "5", at: data.endedAt, type: "command.completed", text: "$ ls", exitCode: 0 }] };
+  const keys = [];
+  const collect = (value) => {
+    if (typeof value === "string") return;
+    if (value.type === "Button") keys.push(value.props.key);
+    (value.children ?? []).forEach(collect);
+  };
+  collect(paneBody(ui, [withFold], 100, 20, Date.parse(data.endedAt), null, () => {}, undefined, { isOpen: () => false, toggle: () => {} }));
+  assert.deepEqual(keys.map((key) => key.split("_")[1]), ["tab", "fold"]);
 });

@@ -122,14 +122,20 @@ export function paneBody(
   // The trace takes the height that is going: a shorter one leaves the ground
   // showing to the foot of the pane rather than the mid grey the engine paints
   // under an element that stops early.
-  return Box({ flexDirection: 'column', backgroundColor: background, width: columns, minHeight: rows, children: [
-    Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true, fold && { ...fold, Button })] }),
-    // A blank row, not a margin: a margin belongs to no element, so the mid grey
-    // the engine paints under the pane is what shows through it.
-    Text({ children: ' ' }),
-    ...list,
+  // Tab walks the pane's buttons in tree order and keeps its place as a count,
+  // not as an element. With the trace first, a fold coming or going above the
+  // list moved that count onto another button without a move being made:
+  // switching to a task whose trace has more folds left the ring on a fold.
+  // The list goes first in the tree and column-reverse draws it at the foot,
+  // so its rows keep their places whatever the trace does.
+  return Box({ flexDirection: 'column-reverse', backgroundColor: background, width: columns, minHeight: rows, children: [
     // The list would otherwise sit against the pane's bottom edge, which the
     // engine draws in its own grey.
     Text({ children: ' ' }),
+    Box({ flexDirection: 'column', children: list }),
+    // A blank row, not a margin: a margin belongs to no element, so the mid grey
+    // the engine paints under the pane is what shows through it.
+    Text({ children: ' ' }),
+    Box({ flexGrow: 1, children: [liveTree(ui, trimmed, width, now, body, undefined, TAIL, true, fold && { ...fold, Button })] }),
   ] })
 }

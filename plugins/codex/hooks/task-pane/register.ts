@@ -27,8 +27,8 @@ type State = {
   polling: boolean
   opened: boolean
   selected: string | null
-  // The element the pane's focus ring was last put on, to tell Shift+Tab off
-  // the first task from Tab coming round to the top of the pane.
+  // The element the pane's focus ring was last put on, to tell Tab off the
+  // last task from Shift+Tab coming round from the pane's close mark.
   ring: string | undefined
   // Folds in the trace the reader opened, by thread and fold.
   expanded: Set<string>
@@ -614,15 +614,16 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // Tab walks the list at the pane's foot and a task is chosen by landing on
   // its row, with no press to follow. The ring takes every button in the pane,
   // and each fold in the trace is one: a trace with a dozen folds put a dozen
-  // stops between two tasks. A move onto a fold goes on to a task instead --
-  // the last when it came backwards off the first, the first otherwise. The
+  // stops between two tasks. The list is first in the ring (see paneBody), so a
+  // move onto a fold goes on to a task instead -- the first when it came on
+  // off the last, the last when it came back from the close mark. The
   // arrows are the engine's scroll keys while the pane has rows to scroll, so
   // they move the trace, not the ring.
   on('ui.focus', ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const tabs = visibleThreads(state).map(view => `codex_tab_${view.recordId ?? view.jobId}`)
     const element = e.element?.startsWith('codex_fold_') && tabs.length
-      ? state.ring === tabs[0] ? tabs.at(-1)! : tabs[0]!
+      ? state.ring === tabs.at(-1) ? tabs[0]! : tabs.at(-1)!
       : e.element
     state.ring = element
     const recordId = /^codex_tab_(.+)$/.exec(element ?? '')?.[1]
