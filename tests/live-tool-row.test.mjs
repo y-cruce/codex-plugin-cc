@@ -197,9 +197,8 @@ describe('live ToolUse row', () => {
     ];
     const tree = liveTree($.ui.resolve(row()), data, 40, 0, undefined, undefined, 200);
     const rows = rowsOf(tree).map(node => ({ text: textOf(node), wrap: node.props?.wrap }));
-    const command = rows.find(r => r.text.startsWith('● $ xxx'));
-    assert.equal(command.wrap, 'truncate-middle');
-    assert.ok(command.text.endsWith('· 1.2s')); 
+    const command = rows.find(r => r.text === '● Ran 1 shell command');
+    assert.equal(command.wrap, 'truncate-end');
     const message = rows.find(r => r.text.startsWith('›'));
     assert.equal(message.wrap, 'wrap');
     assert.equal(message.text, '› first line\nsecond line that is quite a bit longer than forty columns end');
@@ -316,7 +315,7 @@ describe('live row polish', () => {
     assert.equal(textOf(answer), '→ answer delivered');
     assert.equal(answer.props.color, 'cyan');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
-    assert.match(textOf(tree), /● regular tool started\n● regular tool completed/);
+    assert.match(textOf(tree), /● Calling 2 tools…\n  ⎿  regular tool completed/);
     assert.equal(nodes.filter(node => node.props.color === 'magenta').length, 1);
   });
   test('collapses a finished tool onto one row titled by the work itself', ($, on) => {
@@ -328,12 +327,9 @@ describe('live row polish', () => {
       { type: 'tool.started', text: 'Write started: /repo/src/pending.ts' },
     ];
     const text = textOf(liveTree($.ui.resolve(row()), data, 120, 0, 40));
-    // The completion carries the row, so the start of the same tool is dropped; a
-    // tool still running keeps its own row.
-    assert.equal(text.match(/main\.ts/g).length, 1);
-    assert.match(text, /● \S*main\.ts/);
-    assert.match(text, /● \S*pending\.ts/);
-    assert.doesNotMatch(text, /Read started|Read completed|Write started/);
+    assert.match(text, /● Reading 1 file, calling 1 tool…/);
+    assert.match(text, /  ⎿  \/repo\/src\/pending\.ts/);
+    assert.doesNotMatch(text, /main\.ts|Read started|Read completed|Write started/);
   });
   test('formats tokens, durations, paths and waiting without controls', () => {
     assert.equal(tokens(82400), '82.4k');
@@ -524,9 +520,9 @@ describe('live row polish', () => {
       { seq: "99", positionSeq: "1", at: data.startedAt, type: "command.completed", text: "$ parent before" },
       { seq: "3", positionSeq: "3", at: data.startedAt, type: "message.completed", text: "parent after" },
     ];
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running", "    working", " ", "› parent after"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", "⇢ review · running", "    working", " ", "› parent after"]);
     data.tail.pop();
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● $ parent before", "⇢ review · running", "    working"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", "⇢ review · running", "    working"]);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null }];
     data.tail = [
       { seq: "9", at: data.startedAt, type: "command.completed", agent: "review", text: "[review] $ latest completion" },
@@ -568,8 +564,9 @@ describe('live row polish', () => {
     data.tail.push(...['message.completed', 'reasoning.completed', 'question.opened', 'director.notified', 'source.error', 'fileChange.completed', 'control.message.updated'].map(type => ({ type, text: 'body' })));
     const tree = liveTree($.ui.resolve(row()), data, 120, 0, 48);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(node => node.children[0].props.color), ['green', 'red', 'gray']);
-    assert.ok(commands.every(node => textOf(node) === '● $ echo hello · 1.2s'));
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s']);
+    assert.equal(commands[0].children[0].props.color, 'red');
+    assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
     for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['→', 'cyan', false]]) {
       const node = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
       assert.equal(node.props.color, color); assert.equal(node.props.dimColor, dim);
@@ -578,22 +575,20 @@ describe('live row polish', () => {
     assert.equal(rowsOf(tree).find(node => textOf(node).startsWith('…')), undefined);
     assert.equal(rowsOf(tree).find(node => textOf(node) === 'body').props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '✎ body'));
-    // A long path gives way from the left, so the file name and counts stay.
+    // A single edit also has a summary; opening it keeps the original file row.
     data.tail = [{ seq: 'f', type: 'fileChange.completed', text: '', status: 'completed',
       files: [{ path: `/${'deep/'.repeat(40)}order-space/Main.java`, kind: 'update', additions: 12, deletions: 3 }] }]
-    const file = rowsOf(liveTree($.ui.resolve(row()), data, 60, 0, 48)).find(node => textOf(node).startsWith('● Update('))
-    assert.match(textOf(file), /^● Update\(….*order-space\/Main\.java\) \+12 −3$/)
-    assert.equal(file.children[0].props.color, 'green')
-    // Edits in a row fold into one entry; a switch between shell and edits leaves a gap.
+    assert.ok(rowsOf(liveTree($.ui.resolve(row()), data, 60, 0, 48)).some(node => textOf(node) === '● Editing 1 file +12 -3…'))
+    // Files patched twice count once, and shell work shares the same fold.
     const edit = (seq, path, status = 'completed') => ({ seq, type: 'fileChange.completed', text: '', status, files: [{ path, kind: 'update', additions: 2, deletions: 1 }] })
     data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
-    assert.deepEqual(rendered.slice(rendered.indexOf('● $ ls')), ['● $ ls', ' ', '● Edited 2 files +4 −2 · failed', '  ⎿  a.ts, b.ts'])
+    assert.deepEqual(rendered.slice(-2), ['● Editing 2 files +4 -2, running 1 shell command · failed…', '  ⎿  a.ts'])
     // Commands in a row fold too; a failing one keeps its own row and output.
     const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
     data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-6),
-      ['● Ran 2 shell commands · 2s', '  ⎿  $ pwd', '● $ false · 1s', '  boom', '● Ran 2 shell commands · 2s', '  ⎿  $ id'])
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-5),
+      ['● Ran 2 shell commands', '● $ false · 1s', '  boom', '● Running 2 shell commands…', '  ⎿  $ id'])
     // Given a press, a fold's words are a button that opens it into its rows.
     const open = new Set();
     const ui = $.ui.resolve(row());
@@ -603,6 +598,42 @@ describe('live row polish', () => {
     const opened = rowsOf(liveTree(ui, data, 80, 0, 48, undefined, undefined, false, fold)).map(textOf);
     assert.ok(opened.includes('    ● $ ls · 1s') && opened.includes('    ● $ pwd · 1s'));
     assert.ok(opened.includes('  ⎿  $ id'), 'the other fold stays closed');
+  });
+  test('folds mixed work in fixed clause order and opens the original rows', ($, on) => {
+    world($, on);
+    const ui = $.ui.resolve(row());
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const at = data.startedAt;
+    const work = [
+      { seq: '1', at, type: 'command.completed', text: '$ pwd', exitCode: 0, durationMs: 1000 },
+      { seq: '2', at, type: 'fileChange.completed', text: '', status: 'completed', files: [{ path: '/r/a.ts', kind: 'update', additions: 2, deletions: 0 }] },
+      { seq: '3', at, type: 'tool.completed', text: 'Grep completed: needle' },
+      { seq: '4', at, type: 'tool.completed', text: 'Read completed: /r/b.ts' },
+      { seq: '5', at, type: 'tool.completed', text: 'fetch completed: https://example.test' },
+    ];
+    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: key => key === '1', toggle: () => {} };
+    const cases = [
+      { tail: [...work, { seq: '6', at, type: 'command.completed', text: '$ false', exitCode: 1, output: 'boom' }], now: Date.parse(at),
+        head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', '● $ false', '  boom'] },
+      { tail: [...work, { seq: '6', at, type: 'tool.completed', text: 'Read failed: /r/fail.ts', status: 'failed', output: 'denied' }], now: Date.parse(at),
+        head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', '● /r/fail.ts', '  denied'] },
+      { tail: work, now: Date.parse(at) + 12000,
+        head: '● Editing 1 file +2, searching for 1 pattern, reading 1 file, calling 1 tool, running 1 shell command · 12s…',
+        closed: ['● Editing 1 file +2, searching for 1 pattern, reading 1 file, calling 1 tool, running 1 shell command · 12s…', '  ⎿  https://example.test'] },
+    ];
+    for (const { tail, now, head, closed } of cases) {
+      data.tail = tail;
+      const draw = controls => rowsOf(liveTree(ui, data, 120, now, 48, undefined, undefined, false, controls)).map(textOf);
+      assert.deepEqual(draw().slice(-closed.length), closed);
+      const opened = draw(fold);
+      const headIndex = opened.findIndex(line => line.includes(head.slice(2).split(' · ')[0]));
+      assert.ok(headIndex >= 0, JSON.stringify(opened));
+      if (head.includes(' · 12s…')) assert.match(opened[headIndex], / · 12s…/);
+      assert.deepEqual(opened.slice(headIndex + 1, headIndex + 6),
+        ['    ● $ pwd · 1s', '    ● Update(/r/a.ts) +2 −0', '    ● needle', '    ● /r/b.ts', '    ● https://example.test']);
+    }
   });
   test('puts the waiting question first and warns only when running without progress over 120 seconds', ($, on) => {
     world($, on);
@@ -831,9 +862,10 @@ describe('Markdown and prompt footer', () => {
     data.tail.push({ type: 'command.completed', text: "$ apply_patch <<'PATCH' ⏎ *** Begin Patch ⏎ PATCH", exitCode: 0, durationMs: 1200 });
     const tree = liveTree($.ui.resolve(row()), data, 40, 0);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', '● $ echo hello · 1.2s', "  ⎿  $ apply_patch <<'PATCH' …"]);
-    assert.deepEqual(commands.slice(0, 2).map(node => node.children[0].props.color), ['gray', 'red']);
-    assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands · 2.4s'));
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', "  ⎿  $ apply_patch <<'PATCH' …"]);
+    assert.equal(commands[0].children[0].props.color, 'red');
+    assert.ok(rowsOf(tree).some(node => textOf(node) === '● Ran 1 shell command'));
+    assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands…'));
     // Every break in the output gets its own row, whether it arrived as the
     // folding glyph or as a newline: joined back together the failure reads as
     // one run of noise, and the cut leaves the separator dangling.
@@ -841,7 +873,7 @@ describe('Markdown and prompt footer', () => {
     assert.deepEqual(outputs.map(textOf), ['  first', '  second', '  third']);
     assert.equal(outputs[0].props.dimColor, true);
     assert.equal(outputs[0].props.wrap, 'truncate-end');
-    assert.equal(rowsOf(tree)[rowsOf(tree).indexOf(commands[1]) + 1], outputs[0]);
+    assert.equal(rowsOf(tree)[rowsOf(tree).indexOf(commands[0]) + 1], outputs[0]);
     assert.doesNotMatch(textOf(tree), /hidden/);
   });
 });
@@ -957,7 +989,7 @@ describe('transcript block spacing', () => {
     const original = JSON.stringify(data);
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt), 48)).map(textOf);
     assert.deepEqual(rendered.slice(1), [
-      ' ', 'Warning: timeout clamped', '● $ git status',
+      ' ', 'Warning: timeout clamped', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
       ' ', '● $ rg requestId · 0.4s', '⇢ review · running', '    $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
@@ -976,19 +1008,19 @@ describe('transcript block spacing', () => {
     for (const type of ['message.completed', 'question.opened', 'director.notified', 'control.message.updated']) {
       data.tail = [{ type: 'command.started', text: '$ before' }, { type, text: 'body' }, { type: 'command.started', text: '$ after' }];
       const lines = render();
-      assert.deepEqual(lines.slice(0, 3), [' ', '$ before', ' ']);
+      assert.deepEqual(lines.slice(0, 3), [' ', '● Ran 1 shell command', ' ']);
       assert.ok(lines[3].endsWith('body'));
-      assert.deepEqual(lines.slice(4), [' ', '$ after']);
+      assert.deepEqual(lines.slice(4), [' ', '● Running 1 shell command…', '  ⎿  $ after']);
       data.tail = [{ type, text: 'body' }];
       assert.equal(render().length, 2, 'only the existing header gap surrounds a lone block');
     }
     data.pendingQuestion = { requestId: 'q', text: 'Which source?\nChoose one.', openedAt: data.startedAt, expiresAt: null };
     data.tail = [{ type: 'command.started', text: '$ after' }, { type: 'source.warning', text: 'Warning: note' }];
-    assert.deepEqual(render(), ['? Which source?\nChoose one.', 'waiting 0s', ' ', '$ after', 'Warning: note']);
+    assert.deepEqual(render(), ['? Which source?\nChoose one.', 'waiting 0s', ' ', '● Ran 1 shell command', 'Warning: note']);
     data.pendingQuestion = null;
     data.activeCommands = fixture().activeCommands;
     data.files = fixture().files;
-    assert.deepEqual(render(), ['$ npm test · 0s', '✎ main.ts (+3 −1)', '$ after', 'Warning: note']);
+    assert.deepEqual(render(), ['$ npm test · 0s', '✎ main.ts (+3 −1)', '● Ran 1 shell command', 'Warning: note']);
   });
   test('separates result prose from files and agents without leading or trailing gaps', ($, on) => {
     world($, on);

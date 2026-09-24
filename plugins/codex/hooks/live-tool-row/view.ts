@@ -50,7 +50,7 @@ export type LiveView = {
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
   tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
     files?: { path: string; kind: string; additions: number | null; deletions: number | null }[]; status?: string; failed?: boolean
-    commands?: LiveView['tail']; foldKey?: string }[]
+    items?: LiveView['tail']; foldKey?: string }[]
 }
 type TailRow = LiveView['tail'][number]
 // What a caller that takes presses lends the trace so a fold can open.
@@ -77,6 +77,14 @@ const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.p
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
   || (event.type === 'command.completed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
+const isToolRow = (event: TailRow) => event.type === 'tool.started' || event.type === 'tool.completed'
+const failedTool = (event: TailRow) => event.status === 'failed' || /^\S+ failed:/.test(event.text)
+const workKind = (event: TailRow) => {
+  if (isQuietCommand(event)) return 'command'
+  if (isFileRow(event)) return 'edit'
+  const name = event.text.split(/\s/, 1)[0]!.toLowerCase()
+  return name.startsWith('read') ? 'read' : /^(grep|glob|search|find)/.test(name) ? 'search' : /^(list|ls)$/.test(name) ? 'list' : 'tool'
+}
 const FILE_VERBS: Record<string, string> = { add: 'Write', update: 'Update', delete: 'Delete', move: 'Move' }
 
 // Group before applying the display limit; persisted positions survive tail
@@ -307,17 +315,12 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     while (marks.length && event.seq && BigInt(event.seq) >= BigInt(marks[0]!.seq)) grouped.push(marks.shift()!)
     for (const agent of agents.filter(agent => agent.index === index)) grouped.push(summary(agent))
     if (!tail.includes(event)) return
-    // Edits in a row fold into one entry the way Claude Code folds its own:
-    // a run of patches is one piece of work, and a row per patch pushed the
-    // commands around it off the pane. A file patched twice counts once.
+    const work = isQuietCommand(event) || isFileRow(event) || (isToolRow(event) && !failedTool(event))
     const last = grouped.at(-1)
-    if (isFileRow(event) && last && isFileRow(last)) {
-      grouped[grouped.length - 1] = { ...event, foldKey: last.foldKey ?? last.positionSeq ?? last.seq, failed: last.failed || last.status === 'failed',
-        files: [...last.files!.filter(file => !event.files!.some(next => next.path === file.path)), ...event.files!] }
-    } else if (isQuietCommand(event) && last && (isQuietCommand(last) || last.type === 'command.group')) {
-      // Commands in a row fold the same way, into `Ran N shell commands`.
-      grouped[grouped.length - 1] = { ...event, type: 'command.group', text: '', foldKey: last.foldKey ?? last.positionSeq ?? last.seq,
-        commands: [...(last.commands ?? [last]), event] }
+    if (work) {
+      if (last?.type === 'work.group') grouped[grouped.length - 1] = { ...event, type: 'work.group', text: '', foldKey: last.foldKey,
+        items: [...last.items!, event] }
+      else grouped.push({ ...event, type: 'work.group', text: '', foldKey: event.positionSeq ?? event.seq, items: [event] })
     } else grouped.push(event)
   })
   for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push(summary(agent))
@@ -330,8 +333,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // In a full trace, lastMessage replaces the newest 300-character preview from
   // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
-  // Shell commands and file edits are different kinds of work: a change from
-  // one run to the other gets a blank row, so the eye finds where each begins.
   let run: 'bash' | 'file' | null = null
   const switchTo = (kind: 'bash' | 'file') => {
     if (run && run !== kind && !previousBlock) lines.push(Text({ children: ' ' }))
@@ -376,19 +377,26 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       ...(failed ? [Text({ color: 'red', children: ' · failed' })] : []),
     ] }))
   }
+  const toolRow = (event: TailRow, indent = '') => {
+    const failed = failedTool(event)
+    add(`${indent}● ${toolTitle(event.text, columns)}`, { color: failed ? 'red' : undefined, dimColor: !failed })
+    if (failed && event.output) for (const line of clean(event.output).split('\n').map(part => part.trim()).filter(Boolean).slice(0, 3)) {
+      lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `${indent}  ${line}` }))
+    }
+  }
   // A fold's first row. Where the caller can take a press (the tasks pane),
   // the words are a button that opens the fold into its rows and closes it
   // again; elsewhere the row is plain text. Answers whether it is open.
-  const foldHead = (key: string, color: string, label: string, rest: ReturnType<typeof Text>[]) => {
-    const dot = Text({ color, children: '● ' })
+  const foldHead = (key: string, color: string, label: string, rest: ReturnType<typeof Text>[], dim = false, styled?: ReturnType<typeof Text>[]) => {
+    const dot = Text({ color: dim ? undefined : color, dimColor: dim, children: '● ' })
     if (!fold) {
-      lines.push(Text({ wrap: 'truncate-end', children: [dot, Text({ children: label }), ...rest] }))
+      lines.push(Text({ dimColor: dim, wrap: 'truncate-end', children: [dot, ...(styled ?? [Text({ children: label })]), ...rest] }))
       return false
     }
     const open = fold.isOpen(key)
     lines.push(Box({ flexDirection: 'row', children: [
       dot,
-      fold.Button({ key: `codex_fold_${key}`, plain: true, label, onPress: () => fold.toggle(key) }),
+      fold.Button({ key: `codex_fold_${key}`, plain: true, label, dimColor: dim, onPress: () => fold.toggle(key) }),
       Text({ wrap: 'truncate-end', children: [...rest, Text({ dimColor: true, children: open ? ' ▾' : ' ▸' })] }),
     ] }))
     return open
@@ -414,50 +422,57 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       add(event.text, { dimColor: true })
       return
     }
-    if (type === 'command.group') {
+    if (type === 'work.group') {
       run = prior
-      switchTo('bash')
-      const commands = event.commands!
-      const running = commands.some(command => command.type === 'command.started')
-      const spent = commands.reduce((sum, command) => sum + (command.durationMs ?? 0), 0)
-      const open = foldHead(event.foldKey!, running ? 'gray' : 'green', `${running ? 'Running' : 'Ran'} ${commands.length} shell commands`,
-        [Text({ dimColor: true, children: spent ? ` · ${duration(spent)}` : '' })])
-      if (open) commands.forEach(command => commandRow(command, '    '))
-      else lines.push(Text({ dimColor: true, wrap: 'truncate-middle', children: `  ⎿  $ ${commandText(commands.at(-1)!.text)}` }))
+      const items = event.items!
+      switchTo(items.some(isQuietCommand) ? 'bash' : 'file')
+      const commands = items.filter(isQuietCommand)
+      const edits = items.filter(isFileRow)
+      const files = edits.flatMap(item => item.files!).reduce<NonNullable<TailRow['files']>>((seen, file) =>
+        [...seen.filter(previous => previous.path !== file.path), file], [])
+      const failed = edits.some(item => item.status === 'failed')
+      const active = index === grouped.length - 1 && !isOver(data)
+      const known = files.filter(file => file.additions != null)
+      const added = known.reduce((sum, file) => sum + file.additions!, 0)
+      const removed = known.reduce((sum, file) => sum + (file.deletions ?? 0), 0)
+      const counts = `${added ? ` +${added}` : ''}${removed ? ` -${removed}` : ''}`
+      const clauses = (['edit', 'search', 'read', 'list', 'tool', 'command'] as const).flatMap(kind => {
+        const count = kind === 'command' ? commands.length : kind === 'edit' ? files.length : items.filter(item => workKind(item) === kind).length
+        if (!count) return []
+        const verbs = { edit: ['editing', 'edited'], search: ['searching for', 'searched for'], read: ['reading', 'read'],
+          list: ['listing', 'listed'], tool: ['calling', 'called'], command: ['running', 'ran'] }
+        const noun = kind === 'command' ? 'shell command' : kind === 'edit' || kind === 'read' ? 'file' : kind === 'search' ? 'pattern' : kind === 'list' ? 'directory' : 'tool'
+        const plural = kind === 'list' ? 'directories' : `${noun}s`
+        return [`${verbs[kind][active ? 0 : 1]} ${count} ${count === 1 ? noun : plural}${kind === 'edit' ? counts : ''}`]
+      })
+      const label = clauses.map((clause, i) => i ? clause : clause[0]!.toUpperCase() + clause.slice(1)).join(', ')
+      const elapsedMs = now - Date.parse(items[0]!.at)
+      const countAt = counts ? label.indexOf(counts) : -1
+      const styled = countAt < 0 ? undefined : [
+        Text({ children: label.slice(0, countAt) }),
+        ...(added ? [Text({ color: 'green', children: ` +${added}` })] : []),
+        ...(removed ? [Text({ color: 'red', children: ` -${removed}` })] : []),
+        Text({ children: label.slice(countAt + counts.length) }),
+      ]
+      const open = foldHead(event.foldKey!, active ? 'gray' : 'green', label,
+        [Text({ dimColor: true, children: `${failed ? ' · failed' : ''}${active ? `${Number.isFinite(elapsedMs) && elapsedMs >= 2000 ? ` · ${duration(elapsedMs)}` : ''}…` : ''}` })], !active, styled)
+      if (open) for (const item of items) {
+        if (isQuietCommand(item)) commandRow(item, '    ')
+        else if (isFileRow(item)) for (const file of item.files!) fileRow(file, item.status === 'failed' ? 'red' : item.status === 'completed' ? 'green' : 'gray', item.status === 'failed', '    ')
+        else toolRow(item, '    ')
+      }
+      else if (active) {
+        const newest = items.at(-1)!
+        const detail = isQuietCommand(newest) ? `$ ${commandText(newest.text)}` : isFileRow(newest)
+          ? newest.files!.map(file => file.path.split('/').at(-1)).reverse().join(', ') : toolTitle(newest.text, columns)
+        lines.push(Text({ dimColor: true, wrap: 'truncate-middle', children: clip(`  ⎿  ${detail}`, columns) }))
+      }
       return
     }
     if (type.startsWith('command')) {
       run = prior
       switchTo('bash')
       commandRow(event)
-      return
-    }
-    // A file edit reads the way Claude Code draws its own: the tool and the
-    // file first, the line counts after, and the dot says how it went. The
-    // path gives way from the left, so the file name is what stays.
-    if (isFileRow(event)) {
-      run = prior
-      switchTo('file')
-      const failed = event.failed || event.status === 'failed'
-      const color = event.status === 'failed' ? 'red' : event.status === 'completed' ? 'green' : 'gray'
-      const files = event.files!
-      if (files.length > 1) {
-        const known = files.filter(file => file.additions != null)
-        const added = known.reduce((sum, file) => sum + file.additions!, 0)
-        const removed = known.reduce((sum, file) => sum + (file.deletions ?? 0), 0)
-        const open = foldHead(event.foldKey!, color,
-          `${event.status === 'completed' || event.status === 'failed' ? 'Edited' : 'Editing'} ${files.length} files`, [
-            ...(known.length ? [Text({ color: 'green', children: ` +${added}` }), Text({ color: 'red', children: ` −${removed}` })] : []),
-            ...(failed ? [Text({ color: 'red', children: ' · failed' })] : []),
-          ])
-        if (open) files.forEach(file => fileRow(file, color, false, '    '))
-        else {
-          const names = files.map(file => file.path.split('/').at(-1)).reverse().join(', ')
-          lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(`  ⎿  ${names}`, columns) }))
-        }
-        return
-      }
-      for (const file of files) fileRow(file, color, event.status === 'failed')
       return
     }
     const prefix = type.startsWith('message') ? '›' : type.startsWith('reasoning') ? '…' : type.startsWith('question') ? '?' : (type.startsWith('director') || type.startsWith('control.message')) ? '→' : type.startsWith('file') ? '✎' : ''
@@ -474,7 +489,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       // trace, because the message had become the row nothing followed.
       lines.push(...markdown(ui, text, props, `${prefix} `, columns,
         index === newest && index === grouped.length - 1 && type.endsWith('.delta') && !isOver(data)))
-    } else if (type.startsWith('tool.')) add(`● ${toolTitle(text, columns)}`, props)
+    } else if (type.startsWith('tool.')) toolRow(event)
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
   })
