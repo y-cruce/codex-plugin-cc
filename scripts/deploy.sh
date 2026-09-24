@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Release the plugin: verify, bump, commit, push both branches, reinstall.
+# Release the plugin: build, bump, commit, push both branches, reinstall.
 #
 #   npm run deploy -- <message-file>
 #
 # Every release is the next patch. Stops at the first failure and leaves the
-# tree as it was found, so a failed build or suite never half-releases. Run it
-# from anywhere; it works on the repository it lives in.
+# tree as it was found, so a failed build never half-releases. The suite is not
+# run here: it runs once after a change is finished, and a slow process spawn
+# on this machine should not hold a release. Run it from anywhere; it works on
+# the repository it lives in.
 set -euo pipefail
 
 MESSAGE=${1:-}
@@ -42,13 +44,9 @@ if ! git merge-base --is-ancestor origin/codex-director HEAD; then
   exit 1
 fi
 
-# Build first: it is the only place the hooks are type-checked, and it is cheap
-# next to the suite.
+# The build is the only place the hooks are type-checked.
 echo "── build"
 $RUN npm run --silent build
-
-echo "── test"
-$RUN npm test
 
 echo "── version $VERSION"
 $RUN npm run --silent bump-version -- "$VERSION"
