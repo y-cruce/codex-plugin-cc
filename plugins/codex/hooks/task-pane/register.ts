@@ -195,11 +195,14 @@ async function discoverRoots($: EngineInterface, state: State) {
 // stat per tick keeps the pane current without starting a process.
 async function refreshViews($: EngineInterface, state: State) {
   let changed = false
+  const sessionId = state.sessionId
   for (const [id, path] of state.paths) {
     try {
       const stat = await $.fs.stat(path)
+      if (sessionId !== state.sessionId) return
       if (stat.mtimeMs === state.mtimes.get(id)) continue
       const view = JSON.parse(await $.fs.read(path)) as LiveView
+      if (sessionId !== state.sessionId) return
       if (view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
       const owners = state.owners.get(id) ?? (view.rounds ?? []).map(round => round.sessionId).filter((sessionId): sessionId is string => Boolean(sessionId))
       const foreign = owners.length > 0 && !owners.includes(state.sessionId)
@@ -207,6 +210,7 @@ async function refreshViews($: EngineInterface, state: State) {
       state.views.set(id, { ...view, foreign })
       changed = true
     } catch {
+      if (sessionId !== state.sessionId) return
       // A view whose file is gone is a job that was pruned, and the comment
       // here used to say so while nothing acted on it: the task stayed in the
       // tabs for the rest of the session. A path that fails only this once is
@@ -222,10 +226,46 @@ async function refreshViews($: EngineInterface, state: State) {
   if (changed) $.ui.invalidate('ui.render')
 }
 
+async function bindSession($: EngineInterface, state: State, sessionId: string) {
+  state.sessionId = sessionId
+  state.key = `${$.plugin.name}:tasks:${sessionId}`
+  state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
+  state.roots = new Set([state.cwd])
+  state.paths.clear()
+  state.mtimes.clear()
+  state.views.clear()
+  state.owners.clear()
+  state.rootIds.clear()
+  state.pending = []
+  state.unreadable.clear()
+  state.liveRoots.clear()
+  state.selected = null
+  state.expanded.clear()
+  state.clock = ''
+  state.ticks = 0
+  const now = await $.clock.now()
+  const sinceKey = `${state.key}:since`
+  const stored = await $.store.get(sinceKey)
+  state.since = typeof stored === 'number' ? stored : now - 60_000
+  if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
+  // A reload or /clear may leave an earlier session's watches running.
+  state.monitors.clear()
+  const armed = await $.store.get(`${state.key}:monitors`)
+  for (const [root, at] of Object.entries((armed ?? {}) as Record<string, number>)) {
+    if (now - at < MONITOR_MS) state.monitors.set(root, { armedAt: at })
+  }
+  $.ui.invalidate('ui.render')
+}
+
 async function poll($: EngineInterface, state: State) {
   if (state.polling || !state.script) return
   state.polling = true
   try {
+    const sessionId = await $.session.id()
+    if (sessionId !== state.sessionId) {
+      state.cwd = await $.session.cwd()
+      await bindSession($, state, sessionId)
+    }
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     state.ticks += 1
     const now = await $.clock.now()
@@ -416,9 +456,6 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     if (!(await $.session.surfaces()).length) return
     state.push = push
     state.cwd = await $.session.cwd()
-    state.sessionId = await $.session.id()
-    state.key = `${$.plugin.name}:tasks:${state.sessionId}`
-    state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
     const home = await $.env.get('HOME')
     if (!home) return
     state.home = home
@@ -438,18 +475,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     // A module reload re-runs this, so the scan floor must be when the session
     // began, not when the module last loaded: otherwise every job dispatched
     // before the reload drops out of the pane.
-    const now = await $.clock.now()
-    const sinceKey = `${state.key}:since`
-    const stored = await $.store.get(sinceKey)
-    state.since = typeof stored === 'number' ? stored : now - 60_000
-    if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
-    // A reload builds a fresh state while the monitors the last one armed are
-    // still running: without this the module arms a second set and every event
-    // wakes the director twice. An entry older than the host's cap is gone.
-    const armed = await $.store.get(`${state.key}:monitors`)
-    for (const [root, at] of Object.entries((armed ?? {}) as Record<string, number>)) {
-      if (now - at < MONITOR_MS) state.monitors.set(root, { armedAt: at })
-    }
+    await bindSession($, state, await $.session.id())
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state) })
     // The heading's clock moves on its own, and nothing else asks for the redraw

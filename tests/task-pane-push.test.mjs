@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pushLine, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
+import { pushLine, registerTaskPane, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
 
@@ -8,6 +8,77 @@ const view = {
   pendingQuestion: { requestId: "0", text: "是否允许修改测试文件？", openedAt: "", expiresAt: null },
   lastMessage: { kind: "assistant", text: "四条都修好了", at: "" },
 };
+
+test("task pane follows the new session after clear on the first Bash dispatch", async () => {
+  const hooks = new Map();
+  const timers = [];
+  const observed = [];
+  const monitors = [];
+  const opened = [];
+  const stored = new Map();
+  const now = 1_000_000;
+  let sessionId = "session-a";
+  let jobs = ["a.json"];
+  const job = (id) => JSON.stringify({ sessionId: `session-${id}`, workspaceRoot: `/work/${id}` });
+  const live = (id) => JSON.stringify({
+    schemaVersion: 1, recordId: `job-${id}`, jobId: `job-${id}`, label: `job ${id}`,
+    status: "running", startedAt: new Date(now).toISOString(), endedAt: null,
+    activeRoundId: `job-${id}`, latestRoundId: `job-${id}`, rounds: [], tail: [],
+  });
+  const engine = {
+    plugin: { name: "codex" },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work/main", id: async () => sessionId },
+    env: { get: async () => "/home/test" },
+    clock: { now: async () => now, every: (ms, fn) => timers.push([ms, fn]) },
+    store: { get: async (key) => stored.get(key), set: async (key, value) => { stored.set(key, value); } },
+    fs: {
+      list: async (path) => path === "/home/test/.claude/plugins/data" ? [{ kind: "dir", name: "codex" }]
+        : path === "/home/test/.claude/plugins/data/codex/state" ? [{ kind: "dir", name: "main" }]
+        : path.endsWith("/jobs") ? jobs.map((name) => ({ name })) : [],
+      stat: async () => ({ mtimeMs: now }),
+      read: async (path) => path.endsWith(".json") ? job(path.endsWith("a.json") ? "a" : "b")
+        : live(path.endsWith("/a") ? "a" : "b"),
+    },
+    process: { run: async (args, options) => {
+      if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs\n", stderr: "" };
+      if (args[0] === "pgrep") return { exitCode: 1, stdout: "", stderr: "" };
+      observed.push({ cwd: options.cwd, sessionId: options.env.CODEX_COMPANION_SESSION_ID });
+      const id = options.cwd.slice(-1);
+      return { exitCode: 0, stdout: JSON.stringify({ threads: options.cwd === `/work/${id}` && options.env.CODEX_COMPANION_SESSION_ID === `session-${id}`
+        ? [{ id: `job-${id}`, recordId: `job-${id}`, jobId: `job-${id}`, label: `job ${id}`,
+          status: "running", sessionIds: [`session-${id}`], viewPath: `/view/${id}`, historyAvailable: false }] : [] }), stderr: "" };
+    } },
+    tool: { call: async (request) => { monitors.push(request); } },
+    ui: { open: async (request) => { opened.push(request); }, invalidate: () => {}, log: () => {}, toast: () => {} },
+  };
+  const on = (event, options, callback) => hooks.set(event, callback ?? options);
+  const until = async (predicate) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (predicate()) return;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.fail("task pane poll did not finish");
+  };
+  registerTaskPane(on);
+  await hooks.get("session.start")(engine, { isInteractive: true }, async () => {});
+  await until(() => stored.has("codex:tasks:session-a"));
+  assert.ok(monitors.some((request) => request.command.includes("--session session-a")));
+
+  sessionId = "session-b";
+  jobs = ["a.json", "b.json"];
+  observed.length = 0;
+  await hooks.get("tool.call")(engine, { command: "bash dispatch.sh" }, async () => {});
+  await until(() => stored.has("codex:tasks:session-b"));
+
+  assert.equal(timers.length, 3);
+  assert.equal(stored.get("codex:tasks:session-b:since"), now - 60_000);
+  assert.ok(observed.some((call) => call.cwd === "/work/b" && call.sessionId === "session-b"));
+  assert.equal(observed.some((call) => call.cwd === "/work/a"), false);
+  assert.ok(monitors.some((request) => request.command.includes("events --cwd /work/b --session session-b")));
+  assert.match((await hooks.get("command.run")(engine, { command: "tasks", args: "a" }, async () => {})).text,
+    /No task matches/);
+  assert.equal(opened.at(-1)?.id, "codex_tasks");
+});
 
 test("a push line survives an event with no body of its own", () => {
   // question.opened and job.* arrive with text null: the regression that dropped
