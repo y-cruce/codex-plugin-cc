@@ -27,6 +27,9 @@ type State = {
   polling: boolean
   opened: boolean
   selected: string | null
+  // The element the pane's focus ring was last put on, to tell Shift+Tab off
+  // the first task from Tab coming round to the top of the pane.
+  ring: string | undefined
   // Folds in the trace the reader opened, by thread and fold.
   expanded: Set<string>
   followed: Set<string>
@@ -515,7 +518,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(),
     views: new Map<string, LiveView>(), ledger: {},
-    ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null, expanded: new Set<string>(),
+    ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
     liveRoots: new Set<string>(),
@@ -609,17 +612,26 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     })] })
   })
   // Tab walks the list at the pane's foot and a task is chosen by landing on
-  // its row, with no press to follow. The arrows are the engine's scroll keys
-  // while the pane has rows to scroll, so they move the trace, not the ring.
+  // its row, with no press to follow. The ring takes every button in the pane,
+  // and each fold in the trace is one: a trace with a dozen folds put a dozen
+  // stops between two tasks. A move onto a fold goes on to a task instead --
+  // the last when it came backwards off the first, the first otherwise. The
+  // arrows are the engine's scroll keys while the pane has rows to scroll, so
+  // they move the trace, not the ring.
   on('ui.focus', ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const recordId = /^codex_tab_(.+)$/.exec(String(e.element ?? ''))?.[1]
+    const tabs = visibleThreads(state).map(view => `codex_tab_${view.recordId ?? view.jobId}`)
+    const element = e.element?.startsWith('codex_fold_') && tabs.length
+      ? state.ring === tabs[0] ? tabs.at(-1)! : tabs[0]!
+      : e.element
+    state.ring = element
+    const recordId = /^codex_tab_(.+)$/.exec(element ?? '')?.[1]
     if (recordId && recordId !== state.selected) {
       state.selected = recordId
       state.toEnd = true
       $.ui.invalidate('ui.render')
     }
-    return next(e)
+    return next({ ...e, element })
   })
   // Where the window sits is a render prop; how tall the tree is is not, so
   // whether the window is at the end can only be answered here, where the move
@@ -641,7 +653,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.toEnd = true
     }
     const select = (recordId: string) => {
-      state.selected = state.selected === recordId ? null : recordId
+      state.selected = recordId
+      // A click leaves the ring where Tab last put it, so the next Tab went on
+      // from a task other than the one on screen, or landed on it and changed
+      // nothing. The ring follows the click.
+      state.ring = `codex_tab_${recordId}`
+      void $.ui.focus({ requestId: PANE, key: state.ring }).catch(() => {})
       // A thread is switched to in order to see what it is doing now, and its
       // trace is drawn whole, so the window starts at the end of it.
       state.toEnd = true
