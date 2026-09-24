@@ -247,6 +247,13 @@ test("task --background persists a trimmed, capped label in JSON and text launch
     }
     assert.match(launchPayload.jobId, /^task-/);
 
+    await waitFor(() => {
+      const file = path.join(resolveStateDir(repo), "jobs", `${launchPayload.jobId}.json`);
+      if (!fs.existsSync(file)) return false;
+      const job = JSON.parse(fs.readFileSync(file, "utf8"));
+      return job.threadId && job.turnId;
+    });
+
     const waitedStatus = run(
       "node",
       [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],

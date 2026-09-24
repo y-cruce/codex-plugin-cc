@@ -183,9 +183,9 @@ test("resuming one thread routes the next job to its own history, view, follow a
   const h = await setup(t);
   const history = (jobId) => readHistory(h.repo, jobId, { stateDir: h.stateDir });
   const firstId = await h.start("hold observation", "first observation");
+  const firstRunning = JSON.parse(h.cli("status", firstId, "--json").stdout).job;
   const firstFollow = h.child("observe", "follow", firstId, "--max-seconds", "10");
   await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "first follow");
-  const firstRunning = JSON.parse(h.cli("status", firstId, "--json").stdout).job;
   await h.rpc("turn/steer", { threadId: firstRunning.threadId, expectedTurnId: firstRunning.turnId,
     input: [{ type: "text", text: "finish" }] });
   const firstFollowed = await firstFollow.done;
