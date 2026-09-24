@@ -162,7 +162,7 @@ describe('live ToolUse row', () => {
     for (const columns of [1, 2, 9, 40, 120]) {
       const tree = liveTree($.ui.resolve(row()), data, columns, Date.parse(data.startedAt) + 1000);
       const lines = textOf(tree).split('\n');
-      assert.equal(rowsOf(tree).length, 16);
+      assert.equal(rowsOf(tree).length, 24);
       // Independently count conservative code-point cells; combining marks
       // have zero physical width, emoji/CJK two. No raw controls can survive.
       // Prose rows wrap instead of being cut, so only truncated rows are measured.
@@ -513,16 +513,16 @@ describe('live row polish', () => {
     ];
     data.tail = [{ seq: "1", at: data.startedAt, type: "message.completed", agent: "review", agentThreadId: "b", text: "[review] hidden detail" }];
     const original = JSON.stringify(data);
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · done", "    first result", "⇢ review · failed", "    second result"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["⇢ review · done", "    first result", " ", "⇢ review · failed", "    second result"]);
     assert.equal(JSON.stringify(data), original);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null, startedSeq: "2", lastActivity: "working" }];
     data.tail = [
       { seq: "99", positionSeq: "1", at: data.startedAt, type: "command.completed", text: "$ parent before" },
       { seq: "3", positionSeq: "3", at: data.startedAt, type: "message.completed", text: "parent after" },
     ];
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", "⇢ review · running", "    working", " ", "› parent after"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", " ", "⇢ review · running", "    working", " ", "› parent after"]);
     data.tail.pop();
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", "⇢ review · running", "    working"]);
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 120, 0)).slice(2).map(textOf), ["● Ran 1 shell command", " ", "⇢ review · running", "    working"]);
     data.subAgents = [{ threadId: "a", path: "review", status: "started", endedAt: null }];
     data.tail = [
       { seq: "9", at: data.startedAt, type: "command.completed", agent: "review", text: "[review] $ latest completion" },
@@ -587,8 +587,8 @@ describe('live row polish', () => {
     // Commands in a row fold too; a failing one keeps its own row and output.
     const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
     data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-5),
-      ['● Ran 2 shell commands', '● $ false · 1s', '  boom', '● Running 2 shell commands…', '  ⎿  $ id'])
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-7),
+      ['● Ran 2 shell commands', ' ', '● $ false · 1s', '  boom', ' ', '● Running 2 shell commands…', '  ⎿  $ id'])
     // Given a press, a fold's words are a button that opens it into its rows.
     const open = new Set();
     const ui = $.ui.resolve(row());
@@ -615,10 +615,10 @@ describe('live row polish', () => {
     const cases = [
       { tail: [...work, { seq: '6', at, type: 'command.completed', text: '$ false', exitCode: 1, output: 'boom' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
-        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', '● $ false', '  boom'] },
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● $ false', '  boom'] },
       { tail: [...work, { seq: '6', at, type: 'tool.completed', text: 'Read failed: /r/fail.ts', status: 'failed', output: 'denied' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
-        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', '● /r/fail.ts', '  denied'] },
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● /r/fail.ts', '  denied'] },
       { tail: work, now: Date.parse(at) + 12000,
         head: '● Editing 1 file +2, searching for 1 pattern, reading 1 file, calling 1 tool, running 1 shell command · 12s…',
         closed: ['● Editing 1 file +2, searching for 1 pattern, reading 1 file, calling 1 tool, running 1 shell command · 12s…', '  ⎿  https://example.test'] },
@@ -952,8 +952,8 @@ describe('table layout, body indent and startup noise', () => {
     data.tail = [{ type: 'job.started', text: 'Job started' }, { type: 'source.warning', text: 'warning' }, { type: 'source.warning', text: 'distinct warning' }, ...Array.from({ length: 15 }, () => ({ type: 'source.warning', text: 'warning' }))];
     const original = JSON.stringify(data);
     const tree = liveTree($.ui.resolve(row()), data, 100, 0);
-    assert.deepEqual(rowsOf(tree).slice(1).map(textOf), [' ', 'warning', 'distinct warning']);
-    assert.ok(rowsOf(tree).slice(2).every(node => node.props.dimColor));
+    assert.deepEqual(rowsOf(tree).slice(1).map(textOf), [' ', 'warning', ' ', 'distinct warning']);
+    assert.ok(rowsOf(tree).slice(2).filter(node => textOf(node) !== ' ').every(node => node.props.dimColor));
     assert.equal(JSON.stringify(data), original);
     data.tail = [{ type: 'job.started', text: 'Job started' }];
     assert.equal(rowsOf(liveTree($.ui.resolve(row()), data, 100, 0)).length, 1);
@@ -970,7 +970,7 @@ describe('table layout, body indent and startup noise', () => {
 });
 
 describe('transcript block spacing', () => {
-  test('spaces mixed blocks without separating compact rows or changing the entry budget', ($, on) => {
+  test('separates every entry with one blank row without changing the entry budget', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
     data.subAgents = [{ threadId: 'child', path: 'review', status: 'started', endedAt: null, startedSeq: '5', lastActivity: '$ inspect' }];
@@ -989,9 +989,9 @@ describe('transcript block spacing', () => {
     const original = JSON.stringify(data);
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 120, Date.parse(data.startedAt), 48)).map(textOf);
     assert.deepEqual(rendered.slice(1), [
-      ' ', 'Warning: timeout clamped', '● Ran 1 shell command',
+      ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0.4s', '⇢ review · running', '    $ inspect', '● $ validate', '  validation failed', '→ answer delivered',
+      ' ', '● $ rg requestId · 0.4s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '→ answer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',
@@ -1016,11 +1016,11 @@ describe('transcript block spacing', () => {
     }
     data.pendingQuestion = { requestId: 'q', text: 'Which source?\nChoose one.', openedAt: data.startedAt, expiresAt: null };
     data.tail = [{ type: 'command.started', text: '$ after' }, { type: 'source.warning', text: 'Warning: note' }];
-    assert.deepEqual(render(), ['? Which source?\nChoose one.', 'waiting 0s', ' ', '● Ran 1 shell command', 'Warning: note']);
+    assert.deepEqual(render(), ['? Which source?\nChoose one.', 'waiting 0s', ' ', '● Ran 1 shell command', ' ', 'Warning: note']);
     data.pendingQuestion = null;
     data.activeCommands = fixture().activeCommands;
     data.files = fixture().files;
-    assert.deepEqual(render(), ['$ npm test · 0s', '✎ main.ts (+3 −1)', '● Ran 1 shell command', 'Warning: note']);
+    assert.deepEqual(render(), ['$ npm test · 0s', '✎ main.ts (+3 −1)', ' ', '● Ran 1 shell command', ' ', 'Warning: note']);
   });
   test('separates result prose from files and agents without leading or trailing gaps', ($, on) => {
     world($, on);

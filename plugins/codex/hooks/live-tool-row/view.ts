@@ -202,8 +202,13 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   }
   let previousBlock = false
   let hasContent = false
+  // Set as each entry of the trace begins: entries stand a blank row apart the
+  // way Claude Code's own tool rows do, while the rows an entry carries -- a
+  // fold's items, a failed command's output -- stay against it.
+  let entry = false
   const separate = (block: boolean) => {
-    if (hasContent && (block || previousBlock)) lines.push(Text({ children: ' ' }))
+    if (hasContent && (entry || block || previousBlock)) lines.push(Text({ children: ' ' }))
+    entry = false
     previousBlock = block
     hasContent = true
   }
@@ -333,12 +338,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   // In a full trace, lastMessage replaces the newest 300-character preview from
   // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
-  let run: 'bash' | 'file' | null = null
-  const switchTo = (kind: 'bash' | 'file') => {
-    if (run && run !== kind && !previousBlock) lines.push(Text({ children: ' ' }))
-    separate(false)
-    run = kind
-  }
   // A heredoc command carries its own newlines, so the command is one row
   // whatever it contains and the output comes from its own field. What
   // follows the first line is a patch body or a script: spelling its breaks
@@ -403,8 +402,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   }
   grouped.forEach((event, index) => {
     const type = typeOf(event)
-    const prior = run
-    run = null
+    entry = true
     if (type === 'agent.summary') {
       add(event.text, { dimColor: true })
       if (event.output) add(`    ${event.output}`, { dimColor: true })
@@ -423,9 +421,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       return
     }
     if (type === 'work.group') {
-      run = prior
       const items = event.items!
-      switchTo(items.some(isQuietCommand) ? 'bash' : 'file')
+      separate(false)
       const commands = items.filter(isQuietCommand)
       const edits = items.filter(isFileRow)
       const files = edits.flatMap(item => item.files!).reduce<NonNullable<TailRow['files']>>((seen, file) =>
@@ -470,8 +467,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
       return
     }
     if (type.startsWith('command')) {
-      run = prior
-      switchTo('bash')
+      separate(false)
       commandRow(event)
       return
     }
