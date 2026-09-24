@@ -6,6 +6,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 // How long a lock file may stay empty before it counts as a dead writer's.
@@ -22,6 +23,8 @@ function connectToEndpoint(endpoint) {
   const target = parseBrokerEndpoint(endpoint);
   return net.createConnection({ path: target.path });
 }
+
+const BROKER_START_MS = 120000;
 
 export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   const start = Date.now();
@@ -115,7 +118,7 @@ async function isBrokerEndpointReady(endpoint) {
 export async function ensureBrokerSession(cwd, options = {}) {
   const lockFile = path.join(resolveStateDir(cwd), "broker.lock");
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + BROKER_START_MS;
   while (true) {
     try {
       const fd = fs.openSync(lockFile, "wx");
@@ -194,21 +197,23 @@ async function ensureLockedBrokerSession(cwd, options) {
   });
 
   // Starting the broker means spawning node, which spawns codex app-server,
-  // which then binds. On an idle machine that is a second or two, and ten
-  // seconds looked like room to spare -- but the wait is not CPU the caller
-  // controls, and on a loaded box it runs past ten and the broker is torn down
-  // and reported as absent ("a shared broker is required"), which reads as a
-  // broken install rather than a busy machine. The startup lock above already
-  // waits thirty seconds for the same broker; this matches it.
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 30000);
+  // which then binds: a second or two as a rule. But a new node process can sit
+  // at _dyld_start, before its first instruction and with no CPU in use, for
+  // tens of seconds -- past 45 s has been seen -- and a wait that runs out tears
+  // the broker down and reports it absent ("a shared broker is required"),
+  // which reads as a broken install. The startup lock above waits as long for
+  // the same broker.
+  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? BROKER_START_MS);
   if (!ready) {
+    // The process was started here and is given up on here: left running, it
+    // binds late to a directory already removed and lingers until its idle exit.
     teardownBrokerSession({
       endpoint,
       pidFile,
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
+      killProcess: options.killProcess ?? terminateProcessTree
     });
     return null;
   }
