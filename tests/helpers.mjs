@@ -9,14 +9,14 @@ import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoi
 const tempDirs = new Set();
 let testPluginDataDirs = null;
 
-// How long a test waits for a real broker to bind. Starting one spawns node,
-// which spawns codex app-server, which then binds: a second or two on an idle
-// machine. The wait is not CPU the test controls, so on a loaded box it runs
-// far past that, and every file that started its own broker used to carry its
-// own tight literal -- a release run failed a different one of them each time.
-// Generous on purpose: it only costs this long when something is actually
-// broken, and nothing is gained by failing a busy machine faster.
-export const BROKER_READY_MS = 45000;
+// How long a test waits for a real broker to bind, or for a background worker
+// to get going. Each is a fresh node process, and on this machine one can sit
+// at _dyld_start, before its first instruction and with no CPU in use, for tens
+// of seconds: 45 s was passed in a run of the suite. Every file that started its
+// own broker used to carry its own tight literal, and a run failed a different
+// one of them each time. Generous on purpose: it only costs this long when
+// something is actually broken.
+export const BROKER_READY_MS = 120000;
 
 export function makeTempDir(prefix = "codex-plugin-test-") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

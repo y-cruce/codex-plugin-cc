@@ -102,7 +102,7 @@ async function setup(t) {
       catch { return false; }
       if (job.pid) workerPids.add(job.pid);
       return job.threadId && job.turnId ? job : false;
-    }, "running registered job", 30000);
+    }, "running registered job");
     return jobId;
   };
   return { repo, env, endpoint, broker, closed, cli, child, rpc, start };
