@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 import { clip, elapsed } from '../live-tool-row/format.ts'
-import { isOver } from '../live-tool-row/view.ts'
+import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
@@ -490,7 +490,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
       if (!state.opened) return
       const now = await $.clock.now()
       const clock = [...state.views.values()].filter(view => !isOver(view))
-        .map(view => elapsed(view.startedAt, now)).join(' ')
+        .map(view => elapsed(latestRound(view)?.startedAt ?? view.startedAt, now)).join(' ')
       if (!clock || clock === state.clock) return
       state.clock = clock
       $.ui.invalidate('ui.render')

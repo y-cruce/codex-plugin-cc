@@ -366,6 +366,18 @@ describe('live row polish', () => {
     assert.match(text, /^\$ Build project · 0s$/m);
     assert.equal(statusText([data], Date.parse(data.startedAt)), 'Qoder · 1 running · fixture task 0s $ Build project');
   });
+  test('times and counts only the newest round in a thread header', ($, on) => {
+    world($, on);
+    const data = fixture();
+    const round = (jobId, startedAt, inputTokens, outputTokens) => ({ jobId, sessionId: null, prompt: null, executorTurnIds: [], firstSeq: '1', lastSeq: '1',
+      usage: { inputTokens, outputTokens, cachedInputTokens: 0, complete: true }, result: null, status: 'running', startedAt, endedAt: null });
+    Object.assign(data, { usage: { inputTokens: 9000, outputTokens: 900, cachedInputTokens: 0, complete: true }, activeRoundId: 'job-2', latestRoundId: 'job-2',
+      rounds: [round('job-1', data.startedAt, 7000, 700), round('job-2', '2026-09-15T01:57:00Z', 2000, 200)] });
+    const now = Date.parse('2026-09-15T02:00:00Z');
+    const text = textOf(liveTree($.ui.resolve(row()), data, 120, now));
+    assert.match(text, /^● Codex · fixture task · running · 3m · ↑2k ↓200 tokens /m);
+    assert.equal(statusText([data], now), 'Codex · 1 running · fixture task 3m $ npm test');
+  });
   test('renders a completed card once, preserves original output, and falls back on interruption/error', async ($, on) => {
     const { state, clock } = world($, on);
     const data = { ...fixture(), status: 'completed', endedAt: '2026-09-15T00:01:02Z' };

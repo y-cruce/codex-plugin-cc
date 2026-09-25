@@ -107,6 +107,13 @@ export function agentSummaries(data: LiveView) {
   })
 }
 
+// A thread spans every round it has had, and the reader is watching the newest
+// one: its clock and its tokens are the figures worth drawing. A lone job has
+// no rounds.
+export function latestRound(data: Pick<LiveView, 'rounds' | 'latestRoundId'>) {
+  return data.rounds?.find(round => round.jobId === data.latestRoundId)
+}
+
 export function statusText(jobs: LiveView[], now: number): string | undefined {
   const running = jobs.filter(data => data.status === 'running' || data.status === 'waiting-for-answer')
   if (!running.length) return undefined
@@ -115,7 +122,7 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
     const command = data.activeCommands.find(command => !command.agentThreadId)
     const detail = command ? `$ ${clip(command.command, 30)}`
       : data.files.length ? `✎ ${data.files.length} files` : clip(data.tail.at(-1)?.text ?? '', 30)
-    return `${clip(data.label, 80)} ${elapsed(data.startedAt, now)}${detail ? ` ${detail}` : ''}`
+    return `${clip(data.label, 80)} ${elapsed(latestRound(data)?.startedAt ?? data.startedAt, now)}${detail ? ` ${detail}` : ''}`
   }).join(' · ')}`
 }
 
@@ -169,14 +176,19 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
   const stalled = data.status === 'running' && data.tail.length ? now - Date.parse(data.tail.at(-1)!.at) : 0
+  // A thread's own clock and counts run across every round it has had, which
+  // says nothing about the question in hand: the header measures the newest round.
+  const current = latestRound(data)
+  const usage = current?.usage ?? data.usage
+  const startedAt = current?.startedAt ?? data.startedAt
   // An ACP agent never reports usage, so its counts stay at zero for the whole
   // run: the header says nothing rather than saying the same nothing forever.
-  const counted = data.usage.inputTokens > 0 || data.usage.outputTokens > 0 || data.usage.cachedInputTokens > 0
+  const counted = usage.inputTokens > 0 || usage.outputTokens > 0 || usage.cachedInputTokens > 0
   const header = [
     { text: `● ${executor} · ` },
     { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
-    { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(data.startedAt)) : elapsed(data.startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(data.usage.inputTokens)} ↓${tokens(data.usage.outputTokens)} tokens` : ''}` },
+    { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(usage.inputTokens)} ↓${tokens(usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.
