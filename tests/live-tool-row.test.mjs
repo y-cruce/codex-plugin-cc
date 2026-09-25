@@ -375,7 +375,7 @@ describe('live row polish', () => {
       rounds: [round('job-1', data.startedAt, 7000, 700), round('job-2', '2026-09-15T01:57:00Z', 2000, 200)] });
     const now = Date.parse('2026-09-15T02:00:00Z');
     const text = textOf(liveTree($.ui.resolve(row()), data, 120, now));
-    assert.match(text, /^● Codex · fixture task · running · 3m · ↑2k ↓200 tokens /m);
+    assert.match(text, /^● Codex · fixture task · running · 3m · ↓200 tokens /m);
     assert.equal(statusText([data], now), 'Codex · 1 running · fixture task 3m $ npm test');
   });
   test('renders a completed card once, preserves original output, and falls back on interruption/error', async ($, on) => {

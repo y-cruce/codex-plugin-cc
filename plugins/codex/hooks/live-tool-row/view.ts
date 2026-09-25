@@ -188,7 +188,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     { text: `● ${executor} · ` },
     { text: data.label, bold: true },
     { text: ` · ${status}`, color: colors[status] },
-    { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↑${tokens(usage.inputTokens)} ↓${tokens(usage.outputTokens)} tokens` : ''}` },
+    { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.
@@ -323,7 +323,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     if (!round.endedAt) return
     const counted = round.usage.inputTokens > 0 || round.usage.outputTokens > 0 || round.usage.cachedInputTokens > 0
     const spent = Date.parse(round.endedAt) - Date.parse(round.startedAt ?? round.endedAt)
-    const counts = counted ? ` · ↑${tokens(round.usage.inputTokens)} ↓${tokens(round.usage.outputTokens)} tokens` : ''
+    const counts = counted ? ` · ↓${tokens(round.usage.outputTokens)} tokens` : ''
     marks.push({ seq: `${BigInt(round.lastSeq) + 1n}`, at: round.endedAt, type: 'round.ended',
       text: `✻ ${round.status} · ${duration(spent)}${counts} · ${clock(round.endedAt)}` })
   })
