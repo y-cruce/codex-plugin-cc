@@ -155,6 +155,24 @@ Examples:
 
 The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
 
+### `/codex:tasks`
+
+Opens or closes the tasks pane for this session. Select a task by its row number
+or a case-insensitive part of its name. Live rows are reconciled with job files
+and live views on each poll.
+
+```text
+/codex:tasks
+/codex:tasks 2
+/codex:tasks refresh
+/codex:tasks forget 2
+/codex:tasks forget batch 74
+```
+
+`refresh` clears the pane's cache and rebuilds the list from disk. `forget` hides
+the matching row without changing job data. It stays hidden across polls until
+refresh, plugin reload, or a new session.
+
 ### `/codex:status`
 
 Shows running and recent Codex jobs for the current repository.

@@ -24,7 +24,9 @@ type State = {
   since: number
   busy: boolean
   booting: boolean
-  polling: boolean
+  polling: Promise<void> | null
+  generation: number
+  forgotten: Set<string>
   opened: boolean
   selected: string | null
   // The element the pane's focus ring was last put on, to tell Tab off the
@@ -196,28 +198,40 @@ async function discoverRoots($: EngineInterface, state: State) {
 
 // The live view is a file the companion rewrites. Once its path is known, a
 // stat per tick keeps the pane current without starting a process.
-async function refreshViews($: EngineInterface, state: State) {
+async function refreshViews($: EngineInterface, state: State, reconcile = false) {
   let changed = false
-  const sessionId = state.sessionId
+  const generation = state.generation
   for (const [id, path] of state.paths) {
     try {
       const stat = await $.fs.stat(path)
-      if (sessionId !== state.sessionId) return
-      if (stat.mtimeMs === state.mtimes.get(id)) continue
-      const view = JSON.parse(await $.fs.read(path)) as LiveView
-      if (sessionId !== state.sessionId) return
+      if (generation !== state.generation) return
+      const cached = state.views.get(id)
+      if (stat.mtimeMs === state.mtimes.get(id) && !(reconcile && cached && !DONE.includes(cached.status))) continue
+      let view = JSON.parse(await $.fs.read(path)) as LiveView
+      if (generation !== state.generation) return
       if (view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
+      // Both history layouts live beside jobs/. Read the active/latest round,
+      // not the record id: a resumed thread keeps its first round's record id.
+      const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(path)?.[1]
+      if (directory) {
+        const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId
+        const job = JSON.parse(await $.fs.read(`${directory}/jobs/${jobId}.json`)) as { status: string; completedAt?: string }
+        if (generation !== state.generation) return
+        if (DONE.includes(job.status)) {
+          view = { ...view, status: job.status as LiveView['status'], activeRoundId: null,
+            endedAt: job.completedAt ?? view.endedAt ?? new Date(await $.clock.now()).toISOString() }
+        }
+      }
+      if (generation !== state.generation) return
       const owners = state.owners.get(id) ?? (view.rounds ?? []).map(round => round.sessionId).filter((sessionId): sessionId is string => Boolean(sessionId))
       const foreign = owners.length > 0 && !owners.includes(state.sessionId)
       state.mtimes.set(id, stat.mtimeMs)
       state.views.set(id, { ...view, foreign })
       changed = true
-    } catch {
-      if (sessionId !== state.sessionId) return
-      // A view whose file is gone is a job that was pruned, and the comment
-      // here used to say so while nothing acted on it: the task stayed in the
-      // tabs for the rest of the session. A path that fails only this once is
-      // found again by the next poll, which asks the companion for it.
+    } catch (error) {
+      if (generation !== state.generation) return
+      // A missing job or view was pruned. A read failure is not deletion.
+      if ((error as { code?: string }).code !== 'ENOENT') continue
       if (!state.views.has(id) && !state.paths.has(id)) continue
       state.views.delete(id)
       state.paths.delete(id)
@@ -229,23 +243,29 @@ async function refreshViews($: EngineInterface, state: State) {
   if (changed) $.ui.invalidate('ui.render')
 }
 
-async function bindSession($: EngineInterface, state: State, sessionId: string) {
-  state.sessionId = sessionId
-  state.key = `${$.plugin.name}:tasks:${sessionId}`
-  state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
+function resetRows(state: State) {
+  state.generation += 1
   state.roots = new Set([state.cwd])
   state.paths.clear()
   state.mtimes.clear()
   state.views.clear()
   state.owners.clear()
   state.rootIds.clear()
-  state.pending = []
+  state.forgotten.clear()
   state.unreadable.clear()
   state.liveRoots.clear()
   state.selected = null
   state.expanded.clear()
   state.clock = ''
   state.ticks = 0
+}
+
+async function bindSession($: EngineInterface, state: State, sessionId: string) {
+  state.sessionId = sessionId
+  state.key = `${$.plugin.name}:tasks:${sessionId}`
+  state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
+  resetRows(state)
+  state.pending = []
   const now = await $.clock.now()
   const sinceKey = `${state.key}:since`
   const stored = await $.store.get(sinceKey)
@@ -260,9 +280,13 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   $.ui.invalidate('ui.render')
 }
 
-async function poll($: EngineInterface, state: State) {
-  if (state.polling || !state.script) return
-  state.polling = true
+function poll($: EngineInterface, state: State): Promise<void> {
+  if (!state.script) return Promise.resolve()
+  state.polling ??= pollOnce($, state).finally(() => { state.polling = null })
+  return state.polling
+}
+
+async function pollOnce($: EngineInterface, state: State) {
   try {
     const sessionId = await $.session.id()
     if (sessionId !== state.sessionId) {
@@ -311,7 +335,10 @@ async function poll($: EngineInterface, state: State) {
         dropped ||= existed
       }
     }
-    if (dropped) $.ui.invalidate('ui.render')
+    if (dropped) {
+      state.generation += 1
+      $.ui.invalidate('ui.render')
+    }
     for (const { thread } of found) {
       state.paths.set(thread.id, thread.viewPath)
       state.owners.set(thread.id, thread.sessionIds)
@@ -319,7 +346,9 @@ async function poll($: EngineInterface, state: State) {
     // Before the loop, not after: the reconciliation below reads these views for
     // the text it reports, and a round that refreshed them afterwards had none
     // to read on its first pass and sent an empty line.
-    await refreshViews($, state)
+    // The listing is time-filtered and can stop answering after errors. Check
+    // every cached live row against disk even when it no longer appears there.
+    await refreshViews($, state, true)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
     state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
@@ -342,7 +371,7 @@ async function poll($: EngineInterface, state: State) {
         const receipt = ledger[job.id]!
         const view = state.views.get(thread.id)
         if (view && Boolean(view.foreign) !== foreign) state.views.set(thread.id, { ...view, foreign })
-        if (view && job.status === 'queued' && view.status !== 'queued') {
+        if (view && job.status === 'queued' && view.status !== 'queued' && !isOver(view)) {
           state.views.set(thread.id, { ...view, status: 'queued', endedAt: null })
         }
         // The owner process writes the ending, so a job whose owner died never
@@ -444,14 +473,11 @@ async function poll($: EngineInterface, state: State) {
     await $.store.set(state.key, ledger)
   } catch (error) {
     $.ui.log(`Codex tasks: ${error instanceof Error ? error.message : String(error)}`)
-  } finally {
-    state.polling = false
   }
 }
 
-// Run once per module environment. A saved edit reloads the module and drops
-// the old environment's timers, and session.start never fires again in that
-// session, so a turn re-arms the watcher when it is not running.
+// Run once per module environment. The host cancels its timers on reload and
+// fires session.start for the new instance; turn.start also retries bootstrap.
 async function bootstrap($: EngineInterface, state: State, push: boolean) {
   if (state.script || state.booting) return
   state.booting = true
@@ -505,6 +531,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
 // long ago.
 function visibleThreads(state: State): LiveView[] {
   return [...state.views.values()]
+    .filter(view => !state.forgotten.has(view.recordId ?? view.jobId))
     .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
     .sort((a, b) => {
       const latest = (view: LiveView) => view.rounds?.find(round => round.jobId === view.latestRoundId)?.startedAt ?? view.startedAt
@@ -516,9 +543,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
-    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(),
+    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
     views: new Map<string, LiveView>(), ledger: {},
-    ticks: 0, since: 0, busy: false, booting: false, polling: false, opened: false, selected: null, ring: undefined, expanded: new Set<string>(),
+    ticks: 0, since: 0, busy: false, booting: false, polling: null, opened: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
     liveRoots: new Set<string>(),
@@ -561,32 +588,52 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
+    const args = e.args.trim()
+    const refresh = args === 'refresh'
+    const forget = /^forget(?:\s|$)/.test(args)
+    const wanted = forget ? args.slice('forget'.length).trim() : refresh ? '' : args
+    if (forget && !wanted) return { text: 'Usage: /codex:tasks forget <number | part of a task name>' }
+    if (refresh) {
+      // Let an in-flight poll finish before clearing its maps. The generation
+      // also prevents a concurrent view read from restoring the old cache.
+      await state.polling
+      resetRows(state)
+      await poll($, state)
+    }
     let threads = visibleThreads(state)
-    if (!threads.length) {
+    if (!threads.length && !refresh) {
       await poll($, state)
       threads = visibleThreads(state)
     }
     // The pane opens whether or not anything is running: it is where tasks are
     // watched, and asking for it before dispatching one is a fair thing to do.
-    const wanted = e.args.trim()
     // Bare, the command is the pane's switch: it closes a pane that is open.
-    if (!wanted && state.opened) {
+    if (!wanted && !refresh && state.opened) {
       state.opened = false
       await $.ui.close({ id: PANE })
       return { text: 'Codex tasks · closed' }
     }
-    if (wanted && threads.length) {
+    if (wanted) {
       const index = Number(wanted)
       const match = Number.isInteger(index) && index >= 1 && index <= threads.length
         ? threads[index - 1]
         : threads.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
       if (!match) return { text: `No task matches "${wanted}". Open tasks: ${threads.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
-      state.selected = match.recordId ?? match.jobId
+      const id = match.recordId ?? match.jobId
+      if (forget) {
+        state.forgotten.add(id)
+        if (state.selected === id) state.selected = null
+        state.toEnd = true
+        $.ui.invalidate('ui.render')
+        return { text: `Codex tasks · forgot ${match.label}` }
+      }
+      state.selected = id
       state.toEnd = true
     }
     state.opened = true
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
+    if (refresh) return { text: `Codex tasks · refreshed · ${threads.length} tasks` }
     if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }

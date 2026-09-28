@@ -9,6 +9,185 @@ const view = {
   lastMessage: { kind: "assistant", text: "四条都修好了", at: "" },
 };
 
+async function paneHarness(stored = new Map()) {
+  const hooks = new Map();
+  const timers = new Map();
+  const files = new Map();
+  const now = Date.now();
+  const base = "/home/test/.claude/plugins/data/codex/state/main";
+  const jobPath = `${base}/jobs/job-a.json`;
+  const viewPath = `${base}/thread-records/record-a/live-view.json`;
+  const live = {
+    schemaVersion: 1, recordId: "record-a", jobId: "job-a", label: "Alpha task",
+    status: "running", startedAt: new Date(now).toISOString(), endedAt: null,
+    activeRoundId: "job-a", latestRoundId: "job-a", rounds: [], tail: [],
+    activeCommands: [], files: [], pendingQuestion: null, lastMessage: null,
+    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false },
+    history: { continuity: "complete", committedSeq: "0" },
+  };
+  files.set(jobPath, { id: "job-a", sessionId: "session", workspaceRoot: "/work", status: "running" });
+  files.set(viewPath, live);
+  const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
+    status: "running", sessionIds: ["session"], viewPath, historyAvailable: false }];
+  let threads = listing;
+  let writes = 0;
+  let viewRead;
+  let mtime = now;
+  const read = async (path) => {
+    if (!files.has(path)) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+    return JSON.stringify(files.get(path));
+  };
+  const element = (type) => (props) => ({ type, ...props });
+  const engine = {
+    plugin: { name: "codex" },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => "session" },
+    env: { get: async () => "/home/test" },
+    clock: { now: async () => now, every: (ms, fn) => timers.set(ms, fn) },
+    store: { get: async (key) => stored.get(key), set: async (key, value) => {
+      stored.set(key, value);
+      if (key === "codex:tasks:session") writes++;
+    } },
+    fs: {
+      list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
+        : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
+        : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json" }] : [],
+      stat: async (path) => { await read(path); return { mtimeMs: mtime }; },
+      read: async (path) => {
+        const text = await read(path);
+        if (path === viewPath && viewRead) {
+          const wait = viewRead;
+          viewRead = null;
+          await wait();
+        }
+        return text;
+      },
+    },
+    process: { run: async (args) => {
+      if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
+      if (args[0] === "pgrep") return { exitCode: 0, stdout: "123", stderr: "" };
+      if (threads instanceof Error) throw threads;
+      return { exitCode: 0, stdout: JSON.stringify({ threads }), stderr: "" };
+    } },
+    tool: { call: async () => assert.fail("no real monitors") },
+    ui: { open: async () => {}, close: async () => {}, invalidate: () => {}, log: () => {}, toast: () => {},
+      scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Button"].map((key) => [key, element(key)])) },
+  };
+  registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
+  const settle = async (previous) => {
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (writes > previous) return;
+    }
+    assert.fail("poll did not complete");
+  };
+  await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
+  await settle(0);
+  return {
+    files, jobPath, viewPath, live, stored, listing,
+    holdViewRead: () => {
+      let started, release;
+      const reading = new Promise((resolve) => { started = resolve; });
+      const pending = new Promise((resolve) => { release = resolve; });
+      viewRead = () => { started(); return pending; };
+      return { reading, release };
+    },
+    viewTick: () => { mtime++; timers.get(500)(); },
+    list: (value) => { threads = value === true ? listing : value; },
+    tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
+    command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
+    render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
+      { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
+  };
+}
+
+test("live rows reconcile with disk even after dropping out or exhausting the query", async () => {
+  for (const query of [[], new Error("listing failed")]) {
+    for (const ending of ["legacy", "completed", "failed", "cancelled", "missing", "view", "inactive"]) {
+      const pane = await paneHarness();
+      assert.match(await pane.render(), /running/);
+      if (ending === "legacy") {
+        const legacyPath = pane.viewPath.replace("/thread-records/record-a/", "/job-history/job-a/");
+        pane.files.set(legacyPath, { ...pane.live, recordId: undefined, label: "Legacy task" });
+        pane.list([{ ...pane.listing[0], id: "job-a", recordId: "job-a", viewPath: legacyPath }]);
+        await pane.tick();
+        assert.match(await pane.render(), /Legacy task/);
+      }
+      pane.list(ending === "legacy" && !(query instanceof Error) ? true : query);
+      if (query instanceof Error) for (let i = 0; i < 5; i++) await pane.tick();
+      if (ending === "inactive") {
+        pane.files.set(pane.viewPath, { ...pane.live, activeRoundId: null });
+        pane.viewTick();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (ending === "missing") pane.files.delete(pane.jobPath);
+      else if (ending === "view") pane.files.set(pane.viewPath, { ...pane.live, status: "completed", activeRoundId: null, endedAt: new Date().toISOString() });
+      else pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: ["inactive", "legacy"].includes(ending) ? "completed" : ending, completedAt: new Date().toISOString() });
+      await pane.tick();
+      const rendered = await pane.render();
+      assert.doesNotMatch(rendered, /running/, `${query}: ${ending}`);
+      if (ending === "legacy") {
+        assert.match(rendered, /completed/);
+        if (query instanceof Error) assert.match(rendered, /Legacy task/);
+        else {
+          assert.doesNotMatch(rendered, /Legacy task/);
+          assert.equal((rendered.match(/"key":"codex_tab_/g) ?? []).length, 1);
+        }
+      } else if (ending === "missing" || !(query instanceof Error)) assert.doesNotMatch(rendered, /Alpha task/);
+      else assert.match(rendered, new RegExp(["view", "inactive"].includes(ending) ? "completed" : ending), `${query}: ${ending}`);
+    }
+  }
+});
+
+test("forget uses task selectors and stays hidden until refresh rebuilds from disk", async () => {
+  for (const selector of ["1", "aLpHa"]) {
+    const pane = await paneHarness();
+    const before = JSON.stringify([...pane.files]);
+    assert.match((await pane.command(selector)).text, /Alpha task/);
+    assert.match((await pane.command(`forget ${selector}`)).text, /forgot/i);
+    await pane.tick();
+    assert.doesNotMatch(await pane.render(), /Alpha task/);
+    assert.equal(JSON.stringify([...pane.files]), before);
+    assert.match((await pane.command("refresh")).text, /refresh/i);
+    assert.match(await pane.render(), /Alpha task/);
+    assert.match((await pane.command("forget absent")).text, /No task matches/);
+    assert.match((await pane.command("forget")).text, /Usage/);
+    pane.list([]);
+    assert.match((await pane.command("refresh")).text, /refresh/i);
+    assert.doesNotMatch(await pane.render(), /Alpha task/);
+  }
+});
+
+test("refresh waits for polling and refresh or pruning discards an old concurrent view read", async () => {
+  for (const source of ["poll", "view", "prune"]) {
+    const pane = await paneHarness();
+    const read = pane.holdViewRead();
+    const pending = source === "poll" ? pane.tick() : pane.viewTick();
+    await read.reading;
+    pane.list([]);
+    const refreshed = source === "prune" ? pane.tick() : pane.command("refresh");
+    if (source !== "poll") await refreshed;
+    read.release();
+    await pending;
+    await refreshed;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.doesNotMatch(await pane.render(), /Alpha task/, source);
+  }
+});
+
+test("terminal receipts do not seed rows or prevent disk reconciliation", async () => {
+  for (const status of ["running", "queued"]) {
+    const stored = new Map([["codex:tasks:session", { "job-a": { terminal: "completed" } }]]);
+    const pane = await paneHarness(stored);
+    // The receipt is notification bookkeeping, not a rendered row or its status.
+    assert.match(await pane.render(), /running/);
+    pane.list(pane.listing.map((thread) => ({ ...thread, status })));
+    pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed", completedAt: new Date().toISOString() });
+    await pane.tick();
+    assert.match(await pane.render(), /completed/);
+    assert.doesNotMatch(await pane.render(), /running|queued/);
+  }
+});
+
 test("task pane follows the new session after clear on the first Bash dispatch", async () => {
   const hooks = new Map();
   const timers = [];
