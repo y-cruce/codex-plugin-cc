@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { pushLine, registerTaskPane, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
+import { askPane, renderPaneReply } from "../plugins/codex/scripts/lib/pane-channel.mjs";
 
 const view = {
   pendingQuestion: { requestId: "0", text: "是否允许修改测试文件？", openedAt: "", expiresAt: null },
@@ -52,6 +56,7 @@ async function paneHarness(stored = new Map()) {
         : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json" }] : [],
       stat: async (path) => { await read(path); return { mtimeMs: mtime }; },
+      write: async (path, text) => { files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
         if (path === viewPath && viewRead) {
@@ -92,6 +97,7 @@ async function paneHarness(stored = new Map()) {
       return { reading, release };
     },
     viewTick: () => { mtime++; timers.get(500)(); },
+    touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
     tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
@@ -154,6 +160,61 @@ test("forget uses task selectors and stays hidden until refresh rebuilds from di
     pane.list([]);
     assert.match((await pane.command("refresh")).text, /refresh/i);
     assert.doesNotMatch(await pane.render(), /Alpha task/);
+  }
+});
+
+test("the pane answers shell requests to list, forget and refresh through the channel files", async () => {
+  const stored = new Map();
+  const pane = await paneHarness(stored);
+  const dir = "/home/test/.claude/plugins/data/codex-tasks-pane";
+  const ask = async (id, action, target) => {
+    pane.files.set(`${dir}/session.request.json`, { id, action, target });
+    pane.touch();
+    await pane.tick();
+    for (let i = 0; i < 100 && pane.files.get(`${dir}/session.reply.json`)?.id !== id; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return pane.files.get(`${dir}/session.reply.json`);
+  };
+  const listed = await ask("1", "list");
+  assert.deepEqual(listed.rows.map(({ n, id, status, job }) => [n, id, status, job]), [[1, "record-a", "running", pane.jobPath]]);
+  assert.match((await ask("2", "forget", "absent")).text, /no task matches/);
+  const forgot = await ask("3", "forget", "job-a");
+  assert.match(forgot.text, /forgot Alpha task/);
+  assert.deepEqual(forgot.rows, []);
+  // Hidden rows stay hidden in the instance a reload starts.
+  assert.doesNotMatch(await (await paneHarness(stored)).render(), /Alpha task/);
+  const refreshed = await ask("4", "refresh");
+  assert.match(refreshed.text, /refreshed · 1 tasks/);
+  assert.deepEqual(refreshed.forgotten, []);
+});
+
+test("askPane waits for the pane's reply and marks rows the disk has already ended", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pane-channel-"));
+  const job = path.join(dir, "task-a.json");
+  fs.writeFileSync(job, JSON.stringify({ status: "completed" }));
+  const pane = setInterval(() => {
+    try {
+      const { id, action, target } = JSON.parse(fs.readFileSync(path.join(dir, "s.request.json"), "utf8"));
+      assert.deepEqual([action, target], ["forget", "2"]);
+      fs.writeFileSync(path.join(dir, "s.reply.json"), JSON.stringify({ id, text: "forgot b", forgotten: ["b"], rows: [
+        { n: 1, id: "a", label: "Alpha", status: "running", job, view: null },
+        { n: 2, id: "c", label: "Gamma", status: "running", job: path.join(dir, "gone.json"), view: null },
+      ] }));
+    } catch {}
+  }, 20);
+  try {
+    const reply = await askPane("s", "forget", "2", { dir, pollMs: 20 });
+    assert.deepEqual(reply.rows.map((row) => row.disk), ["completed", "missing"]);
+    const text = renderPaneReply("s", reply);
+    assert.match(text, /1 Alpha · pane running · disk completed · STALE/);
+    assert.match(text, /2 Gamma · pane running · disk missing · STALE/);
+    assert.match(text, /hidden by forget: b/);
+    await assert.rejects(askPane("absent", "list", "", { dir, timeoutMs: 100, pollMs: 20 }), /did not answer/);
+    assert.equal(fs.existsSync(path.join(dir, "absent.request.json")), false);
+  } finally {
+    clearInterval(pane);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

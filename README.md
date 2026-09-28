@@ -170,8 +170,14 @@ and live views on each poll.
 ```
 
 `refresh` clears the pane's cache and rebuilds the list from disk. `forget` hides
-the matching row without changing job data. It stays hidden across polls until
-refresh, plugin reload, or a new session.
+the matching row without changing job data. It stays hidden until refresh or a
+new session.
+
+A shell in the same session reaches the pane with
+`node scripts/codex-companion.mjs pane [list|refresh|forget <n|name|task id>]`.
+`list` prints each row's status in the pane next to its job file's status on
+disk and marks the rows that disagree `STALE`. The pane answers after its next
+poll, within a few seconds.
 
 ### `/codex:status`
 

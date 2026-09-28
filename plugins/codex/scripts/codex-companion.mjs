@@ -25,6 +25,7 @@ import { runAcpTurn } from "./lib/acp.mjs";
 import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
+import { askPane, renderPaneReply } from "./lib/pane-channel.mjs";
 import { readRoundContext } from "./lib/history-resolver.mjs";
 import { finishObservedJob } from "./lib/observation-client.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
@@ -99,7 +100,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--thread <thread-id>] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/codex-companion.mjs pane [list|refresh|forget <number|part of a task name|task id>] [--session <id>] [--timeout-ms <ms>] [--json]"
     ].join("\n")
   );
 }
@@ -1162,6 +1164,23 @@ async function handleLiveCommand(command, argv) {
   outputCommandResult(result, `${JSON.stringify(result, null, 2)}\n`, options.json);
 }
 
+async function handlePane(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["session", "timeout-ms"],
+    booleanOptions: ["json"]
+  });
+  const [action = "list", ...rest] = positionals;
+  const target = rest.join(" ").trim();
+  if (!["list", "refresh", "forget"].includes(action) || (action === "forget" && !target)) {
+    throw new Error("usage: pane [list|refresh|forget <number|part of a task name|task id>] [--session <id>] [--json]");
+  }
+  const sessionId = options.session ?? getCurrentClaudeSessionId();
+  if (!sessionId) throw new Error("pane needs the Claude session id: run it from that session's shell, or pass --session <id>");
+  const reply = await askPane(sessionId, action, target,
+    options["timeout-ms"] ? { timeoutMs: Number(options["timeout-ms"]) } : {});
+  outputCommandResult(reply, renderPaneReply(sessionId, reply), options.json);
+}
+
 async function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "thread"],
@@ -1345,6 +1364,9 @@ async function main() {
       break;
     case "cancel":
       await handleCancel(argv);
+      break;
+    case "pane":
+      await handlePane(argv);
       break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);

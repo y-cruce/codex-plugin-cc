@@ -27,6 +27,8 @@ type State = {
   polling: Promise<void> | null
   generation: number
   forgotten: Set<string>
+  answering: boolean
+  requestMtime: number
   opened: boolean
   selected: string | null
   // The element the pane's focus ring was last put on, to tell Tab off the
@@ -196,6 +198,13 @@ async function discoverRoots($: EngineInterface, state: State) {
   state.roots = roots
 }
 
+// Both history layouts live beside jobs/. Read the active/latest round,
+// not the record id: a resumed thread keeps its first round's record id.
+function jobFileOf(path: string, view: LiveView) {
+  const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(path)?.[1]
+  return directory ? `${directory}/jobs/${view.activeRoundId ?? view.latestRoundId ?? view.jobId}.json` : null
+}
+
 // The live view is a file the companion rewrites. Once its path is known, a
 // stat per tick keeps the pane current without starting a process.
 async function refreshViews($: EngineInterface, state: State, reconcile = false) {
@@ -210,12 +219,9 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
       let view = JSON.parse(await $.fs.read(path)) as LiveView
       if (generation !== state.generation) return
       if (view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
-      // Both history layouts live beside jobs/. Read the active/latest round,
-      // not the record id: a resumed thread keeps its first round's record id.
-      const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(path)?.[1]
-      if (directory) {
-        const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId
-        const job = JSON.parse(await $.fs.read(`${directory}/jobs/${jobId}.json`)) as { status: string; completedAt?: string }
+      const file = jobFileOf(path, view)
+      if (file) {
+        const job = JSON.parse(await $.fs.read(file)) as { status: string; completedAt?: string }
         if (generation !== state.generation) return
         if (DONE.includes(job.status)) {
           view = { ...view, status: job.status as LiveView['status'], activeRoundId: null,
@@ -265,6 +271,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   state.key = `${$.plugin.name}:tasks:${sessionId}`
   state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
   resetRows(state)
+  for (const id of (await $.store.get(`${state.key}:forgotten`) ?? []) as string[]) state.forgotten.add(id)
   state.pending = []
   const now = await $.clock.now()
   const sinceKey = `${state.key}:since`
@@ -476,6 +483,76 @@ async function pollOnce($: EngineInterface, state: State) {
   }
 }
 
+// What /codex:tasks and `dispatch.sh pane` share: rebuild the rows from disk,
+// find a row, hide one.
+async function refreshRows($: EngineInterface, state: State) {
+  // Let an in-flight poll finish before clearing its maps. The generation
+  // also prevents a concurrent view read from restoring the old cache.
+  await state.polling
+  resetRows(state)
+  await $.store.set(`${state.key}:forgotten`, [])
+  await poll($, state)
+}
+
+function findRow(threads: LiveView[], wanted: string) {
+  const index = Number(wanted)
+  if (Number.isInteger(index) && index >= 1 && index <= threads.length) return threads[index - 1]
+  return threads.find(view => [view.recordId, view.jobId, view.latestRoundId, view.activeRoundId].includes(wanted))
+    ?? threads.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
+}
+
+async function forgetRow($: EngineInterface, state: State, view: LiveView) {
+  const id = view.recordId ?? view.jobId
+  state.forgotten.add(id)
+  await $.store.set(`${state.key}:forgotten`, [...state.forgotten])
+  if (state.selected === id) state.selected = null
+  state.toEnd = true
+  $.ui.invalidate('ui.render')
+}
+
+// `dispatch.sh pane` runs in a shell, outside this process, so it asks through
+// two files (scripts/lib/pane-channel.mjs): it writes a request, and the pane
+// answers after its next poll with the rows it is showing.
+function channel(state: State, name: 'request' | 'reply') {
+  return `${state.home}/.claude/plugins/data/codex-tasks-pane/${state.sessionId}.${name}.json`
+}
+
+async function answer($: EngineInterface, state: State) {
+  if (state.answering) return
+  state.answering = true
+  try {
+    const stat = await $.fs.stat(channel(state, 'request')).catch(() => null)
+    if (!stat || stat.mtimeMs === state.requestMtime) return
+    state.requestMtime = stat.mtimeMs
+    const request = JSON.parse(await $.fs.read(channel(state, 'request'))) as { id?: unknown; action?: unknown; target?: unknown }
+    if (typeof request.id !== 'string') return
+    // A reload starts an instance that has not seen this request yet; the reply
+    // on disk says whether the one before it already answered.
+    const replied = await $.fs.read(channel(state, 'reply')).then(text => (JSON.parse(text) as { id?: unknown }).id).catch(() => null)
+    if (replied === request.id) return
+    let text = ''
+    if (request.action === 'refresh') {
+      await refreshRows($, state)
+      text = `refreshed · ${visibleThreads(state).length} tasks`
+    } else if (request.action === 'forget') {
+      const wanted = String(request.target ?? '').trim()
+      const match = findRow(visibleThreads(state), wanted)
+      if (match) await forgetRow($, state, match)
+      text = match ? `forgot ${match.label}` : `no task matches "${wanted}"`
+    }
+    const rows = visibleThreads(state).map((view, at) => {
+      const id = view.recordId ?? view.jobId
+      const path = state.paths.get(id) ?? null
+      return { n: at + 1, id, label: view.label, status: view.status, view: path, job: path && jobFileOf(path, view) }
+    })
+    await $.fs.write(channel(state, 'reply'), `${JSON.stringify({ id: request.id, text, rows, forgotten: [...state.forgotten] })}\n`)
+  } catch (error) {
+    $.ui.log(`Codex tasks pane request: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    state.answering = false
+  }
+}
+
 // Run once per module environment. The host cancels its timers on reload and
 // fires session.start for the new instance; turn.start also retries bootstrap.
 async function bootstrap($: EngineInterface, state: State, push: boolean) {
@@ -506,7 +583,7 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     // before the reload drops out of the pane.
     await bindSession($, state, await $.session.id())
     $.clock.every(500, () => { void refreshViews($, state) })
-    $.clock.every(2000, () => { void poll($, state) })
+    $.clock.every(2000, () => { void poll($, state).then(() => answer($, state)) })
     // The heading's clock moves on its own, and nothing else asks for the redraw
     // that shows it: a job that is thinking writes no view file, so the pane
     // would sit at the second of the last event and then jump over the silence.
@@ -544,6 +621,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
+    answering: false, requestMtime: 0,
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: false, polling: null, opened: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
@@ -592,14 +670,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const refresh = args === 'refresh'
     const forget = /^forget(?:\s|$)/.test(args)
     const wanted = forget ? args.slice('forget'.length).trim() : refresh ? '' : args
-    if (forget && !wanted) return { text: 'Usage: /codex:tasks forget <number | part of a task name>' }
-    if (refresh) {
-      // Let an in-flight poll finish before clearing its maps. The generation
-      // also prevents a concurrent view read from restoring the old cache.
-      await state.polling
-      resetRows(state)
-      await poll($, state)
-    }
+    if (forget && !wanted) return { text: 'Usage: /codex:tasks forget <number | part of a task name | task id>' }
+    if (refresh) await refreshRows($, state)
     let threads = visibleThreads(state)
     if (!threads.length && !refresh) {
       await poll($, state)
@@ -614,17 +686,11 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       return { text: 'Codex tasks · closed' }
     }
     if (wanted) {
-      const index = Number(wanted)
-      const match = Number.isInteger(index) && index >= 1 && index <= threads.length
-        ? threads[index - 1]
-        : threads.find(view => view.label.toLowerCase().includes(wanted.toLowerCase()))
+      const match = findRow(threads, wanted)
       if (!match) return { text: `No task matches "${wanted}". Open tasks: ${threads.map((view, at) => `${at + 1} ${view.label}`).join(', ')}` }
       const id = match.recordId ?? match.jobId
       if (forget) {
-        state.forgotten.add(id)
-        if (state.selected === id) state.selected = null
-        state.toEnd = true
-        $.ui.invalidate('ui.render')
+        await forgetRow($, state, match)
         return { text: `Codex tasks · forgot ${match.label}` }
       }
       state.selected = id
