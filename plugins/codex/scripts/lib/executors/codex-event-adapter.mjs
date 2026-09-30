@@ -323,7 +323,10 @@ export class CodexEventAdapter {
       return false;
     }
     await this.record(normalizeCodexEvent(message, binding.job, binding.agent));
-    if (p.item?.type === "subAgentActivity" && p.item.agentThreadId) {
+    // The activity names the thread acted on, so a child that messages its
+    // parent names the job's own thread, which must stay the job's.
+    const target = this.sessions.get(p.item?.agentThreadId);
+    if (p.item?.type === "subAgentActivity" && p.item.agentThreadId && !(target?.job.id === binding.job.id && !target.agent)) {
       await this.bindSession(p.item.agentThreadId, binding.job, { id: p.item.agentThreadId,
         path: String(p.item.agentPath ?? p.item.agentThreadId).split("/").filter(Boolean).at(-1), parentId: sessionId });
     } else if (p.item?.type === "collabAgentToolCall") {

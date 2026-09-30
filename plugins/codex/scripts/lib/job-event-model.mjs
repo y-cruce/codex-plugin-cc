@@ -299,6 +299,9 @@ export function applyJobEvent(view, event, options = {}) {
   let tailKey = null;
   switch (event.type) {
     case "agent.activity": {
+      // A child that messages its parent reports the parent as the agent it
+      // acted on; the job's own thread is not one of its sub-agents.
+      if (p.agentId === view.threadId) { tailKey = key; break; }
       view.subAgents ??= [];
       const threadId = p.agentId;
       let agent = view.subAgents.find((entry) => entry.threadId === threadId);

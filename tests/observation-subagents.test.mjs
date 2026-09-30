@@ -75,6 +75,23 @@ test("a new root job replaces the thread binding and retires the old job's child
   assert.equal(recorded.at(-1).jobId, second.id);
 });
 
+test("a child messaging its parent leaves the parent's own events unattributed", async () => {
+  const job = { id: "task", threadId: "parent" };
+  const view = createLiveView(job);
+  let seq = 0;
+  const adapter = new CodexEventAdapter((event) => { event.seq = String(++seq); applyJobEvent(view, event); });
+  await adapter.bindSession("parent", job);
+  await adapter.accept(activity("started"));
+  await adapter.accept({ method: "item/started", params: { threadId: "child", turnId: "turn-child",
+    item: { type: "subAgentActivity", id: "call-reply", kind: "interacted", agentThreadId: "parent", agentPath: "/root" } } });
+  await adapter.accept({ method: "item/completed", params: { threadId: "parent", turnId: "turn-parent",
+    item: { type: "agentMessage", id: "parent-after", text: "parent after" } } });
+  assert.equal(adapter.sessions.get("parent").agent, null);
+  assert.deepEqual(view.subAgents.map((agent) => agent.threadId), ["child"]);
+  assert.equal(view.lastMessage.text, "parent after");
+  assert.equal(view.tail.at(-1).agentThreadId, undefined);
+});
+
 test("child messages and questions do not replace the parent's current state", () => {
   const job = { id: "task", threadId: "parent" };
   const view = createLiveView(job);
