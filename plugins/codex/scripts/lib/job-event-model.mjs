@@ -517,6 +517,15 @@ export function applyJobEvent(view, event, options = {}) {
       if (p.reason?.message) agent.lastActivity = preview(p.reason.message, 300);
     }
   }
+  // A model that sends no reasoning summary thinks without writing a row: eight
+  // reasoning items in a row ran nearly five minutes and the pane looked
+  // stalled. The stretch runs from the first of them to the next row the agent
+  // writes, or to the end of its turn.
+  if (!child) {
+    if (event.type === "reasoning.started") view.thinkingSince ??= event.occurredAt;
+    else if ((text != null && !event.type.startsWith("reasoning.") && event.type !== "agent.activity")
+      || ["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.thinkingSince = null;
+  }
   updateTail(view, event, text, tailKey);
   if (key && event.type.endsWith(".completed")) delete view._items[key];
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) view._items = {};

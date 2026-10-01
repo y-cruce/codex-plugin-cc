@@ -23,6 +23,9 @@ export type LiveView = {
   effort?: string | null
   activeCommands: { itemId: string; command: string; cwd: string; startedAt: string; agentThreadId?: string }[]
   lastMessage: { kind: 'assistant' | 'reasoning'; text: string; at: string } | null
+  // When the agent began the thinking it is still doing; absent on views
+  // written before the pane showed it.
+  thinkingSince?: string | null
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
@@ -175,7 +178,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
   const fullTrace = maxTail !== undefined
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
-  const stalled = data.status === 'running' && data.tail.length ? now - Date.parse(data.tail.at(-1)!.at) : 0
+  const thinking = !result && !isOver(data) && data.thinkingSince ? data.thinkingSince : null
+  const stalled = data.status === 'running' && data.tail.length && !thinking ? now - Date.parse(data.tail.at(-1)!.at) : 0
   // A thread's own clock and counts run across every round it has had, which
   // says nothing about the question in hand: the header measures the newest round.
   const current = latestRound(data)
@@ -501,5 +505,9 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
   })
+  if (thinking) {
+    entry = true
+    add(`● Thinking · ${elapsed(thinking, now)}…`, { dimColor: true })
+  }
   return tree()
 }

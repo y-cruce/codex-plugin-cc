@@ -662,6 +662,30 @@ describe('live row polish', () => {
     assert.equal(textOf(rowsOf(tree)[2]), 'waiting 3m · expires in 7m');
     assert.doesNotMatch(textOf(tree), /no progress/);
   });
+  test("thinking with no summary draws one row timed from its first item instead of the stall warning", ($, on) => {
+    world($, on);
+    const start = Date.parse(fixture().startedAt);
+    const data = createLiveView({ id: "task", threadId: "parent", startedAt: fixture().startedAt });
+    let seq = 0;
+    const accept = (method, item, second) => {
+      const event = normalizeJobEvent({ method, emittedAtMs: start + second * 1000, params: { threadId: "parent", turnId: "turn", item } },
+        { id: "task", threadId: "parent" });
+      event.seq = String(++seq);
+      applyJobEvent(data, event);
+    };
+    const draw = second => rowsOf(liveTree($.ui.resolve(row()), JSON.parse(JSON.stringify(data)), 120, start + second * 1000)).map(textOf);
+    accept("item/completed", { type: "agentMessage", id: "m", text: "answer received" }, 0);
+    // A model with no summary thinks in back-to-back reasoning items with
+    // empty bodies, none of which writes a row.
+    accept("item/started", { type: "reasoning", id: "r1", summary: [], content: [] }, 3);
+    accept("item/completed", { type: "reasoning", id: "r1", summary: [], content: [] }, 35);
+    accept("item/started", { type: "reasoning", id: "r2", summary: [], content: [] }, 35);
+    const thinking = draw(280);
+    assert.equal(thinking.at(-1), "● Thinking · 4m…");
+    assert.doesNotMatch(thinking.join("\n"), /no progress/);
+    accept("item/started", { type: "commandExecution", id: "c", command: "pwd", cwd: "/w" }, 281);
+    assert.doesNotMatch(draw(282).join("\n"), /Thinking/);
+  });
   test('selects the newest 4 to 12 tail entries from viewport rows, defaulting to 8', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
