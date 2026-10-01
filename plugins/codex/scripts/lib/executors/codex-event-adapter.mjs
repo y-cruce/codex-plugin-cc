@@ -87,14 +87,28 @@ function webSearchTitle(item) {
   return query ? `web search: ${query}` : "";
 }
 
+// Items with no tool, query, path or text of their own would fall back to
+// their id, and the row would read as a bare UUID: a compaction carries
+// nothing but the id, a sleep only its duration.
+function toolTitle(item) {
+  switch (item.type) {
+    case "webSearch": return webSearchTitle(item);
+    case "contextCompaction": return "Compacting context";
+    case "sleep": return `Sleep ${item.durationMs / 1000}s`;
+    case "hookPrompt": return `hook prompt: ${item.fragments.map((fragment) => fragment.text).join(" ")}`;
+    case "functionCallOutput": return `${item.namespace ? `${item.namespace}/` : ""}${item.name}`;
+    case "enteredReviewMode": case "exitedReviewMode": return `review: ${item.review}`;
+    // The prompt arrives with the result, so a started event says nothing.
+    case "imageGeneration": return item.revisedPrompt || item.savedPath ? `image: ${item.revisedPrompt || item.savedPath}` : "";
+    default: return `${item.server ? `${item.server}/` : ""}${item.tool ?? item.query ?? item.path ?? item.text ?? item.id ?? ""}`;
+  }
+}
+
 function toolSnapshot(item, status) {
-  const detail = item.type === "webSearch"
-    ? webSearchTitle(item)
-    : item.tool ?? item.query ?? item.path ?? item.text ?? item.id ?? "";
   return {
     toolCallId: String(item.id),
     name: item.type ?? null,
-    title: `${item.server ? `${item.server}/` : ""}${detail}`,
+    title: toolTitle(item),
     kind: "other",
     status,
     content: [],

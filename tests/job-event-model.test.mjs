@@ -153,6 +153,22 @@ test("a web search says what it searched for and its empty start draws no row", 
   assert.deepEqual(view.tail.map((row) => row.text), searches.map(([, expected]) => `webSearch completed: ${expected}`));
 });
 
+test("an item that names no tool says what it is doing instead of its id", () => {
+  const { view, accept } = harness();
+  // These items carry no tool, query, path or text, so the title fell back to
+  // the id and a context compaction drew as a bare UUID.
+  const items = [
+    [{ type: "contextCompaction" }, "Compacting context"],
+    [{ type: "sleep", durationMs: 30000 }, "Sleep 30s"],
+    [{ type: "hookPrompt", fragments: [{ text: "run the gate", hookRunId: "h" }] }, "hook prompt: run the gate"],
+    [{ type: "functionCallOutput", name: "lookup", namespace: "docs", output: "" }, "docs/lookup"],
+    [{ type: "enteredReviewMode", review: "Review requested." }, "review: Review requested."],
+    [{ type: "imageGeneration", status: "completed", revisedPrompt: "a red fox", result: "" }, "image: a red fox"]
+  ];
+  items.forEach(([item], index) => accept("item/completed", { item: { id: `01a0f736-${index}`, ...item } }));
+  assert.deepEqual(view.tail.map((row) => row.text), items.map(([item, expected]) => `${item.type} completed: ${expected}`));
+});
+
 test("a view opens with the brief the job was given, without the note around it", () => {
   // The brief travels in a file and the trace starts at what the agent did, so
   // the pane never showed what it was asked. The worker prepends a fixed note
