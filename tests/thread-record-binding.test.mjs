@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-even
 import { resolveJobHistory, resolveThreadRecord } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { readHistory, readRecordHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { bindProvisionalDispatch, bufferProvisionalEvent, createProvisionalDispatch, failProvisionalDispatch } from "../plugins/codex/scripts/lib/thread-record-binding.mjs";
+import { threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
 
 const AT = "2026-09-21T00:00:00.000Z";
 
@@ -101,6 +103,38 @@ test("a later round appends in the existing record sequence", async (t) => {
   // skipped, not scanned against the limit a page at a time.
   const page = await readHistory(workspaceRoot, second.jobId, { stateDir, limit: 1 });
   assert.deepEqual(page.events.map((entry) => entry.seq), ["3"]);
+});
+
+test("a round whose job already ended no longer holds its thread", async (t) => {
+  const exitedPid = spawnSync(process.execPath, ["-e", ""]).pid;
+  const cases = [
+    ["job failed when its broker shut down", { status: "failed", errorMessage: "Codex connection closed before the turn completed." },
+      "Codex connection closed before the turn completed."],
+    ["owner process exited", { status: "running", pid: exitedPid }, "owner process exited"]
+  ];
+  for (const [name, stored, message] of cases) {
+    const { workspaceRoot, stateDir } = fixture(t);
+    const dropped = provisional(workspaceRoot, "task-dropped");
+    bufferProvisionalEvent(dropped, event(dropped.jobId, "job.started", "dropped", "turn-dropped"));
+    const { recordId } = await bindProvisionalDispatch(dropped, "thread-dropped", { stateDir });
+    fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "jobs", `${dropped.jobId}.json`), JSON.stringify({ id: dropped.jobId, ...stored }));
+
+    const retry = provisional(workspaceRoot, "task-retry");
+    bufferProvisionalEvent(retry, event(retry.jobId, "job.started", "retry"));
+    assert.equal((await bindProvisionalDispatch(retry, "thread-dropped", { stateDir })).recordId, recordId, name);
+
+    const history = await readRecordHistory(workspaceRoot, recordId, { stateDir });
+    assert.deepEqual(history.events.map((entry) => [entry.jobId, entry.type]), [
+      [dropped.jobId, "job.started"],
+      [dropped.jobId, "job.failed"],
+      [retry.jobId, "job.started"]
+    ], name);
+    assert.equal(history.events[1].payload.error.message, message, name);
+    const paths = threadRecordPaths(stateDir, recordId, dropped.jobId);
+    assert.equal(JSON.parse(fs.readFileSync(paths.manifest, "utf8")).activeRoundId, retry.jobId, name);
+    assert.equal(JSON.parse(fs.readFileSync(paths.roundReceipt, "utf8")).status, "failed", name);
+  }
 });
 
 test("provisional events flush in arrival order", async (t) => {

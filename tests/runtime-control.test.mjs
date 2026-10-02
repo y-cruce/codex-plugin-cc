@@ -334,7 +334,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
   assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
 });
 
-test("session end fully cleans up jobs for the ending session", async (t) => {
+test("session end cleans up its own jobs and keeps the broker another session's job runs on", async (t) => {
   const repo = makeTempDir();
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -405,7 +405,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
           },
           {
             id: "review-other",
-            status: "completed",
+            status: "running",
             title: "Codex Review",
             sessionId: "sess-other",
             logFile: otherSessionLog,
@@ -419,6 +419,8 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
     )}\n`,
     "utf8"
   );
+
+  saveBrokerSession(repo, { endpoint: `unix:${path.join(stateDir, "broker.sock")}` });
 
   const result = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
@@ -454,6 +456,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
   const otherJob = state.jobs[0];
   assert.equal(otherJob.logFile, otherSessionLog);
+  assert.ok(loadBrokerSession(repo), "the broker serving review-other was shut down");
 });
 
 test("commands lazily start and reuse one shared app-server after first use", async () => {

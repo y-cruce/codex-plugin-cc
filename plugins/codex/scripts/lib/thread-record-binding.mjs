@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { createCanonicalEvent } from "./executor-events.mjs";
 import { stateDirFor, resolveThreadRecord } from "./history-resolver.mjs";
 import { acquireWriter, atomicJson, JobEventStore, releaseWriter } from "./job-event-store.mjs";
 import { canonicalWorkspaceRoot, executorKeyFor, jobIndexPath, threadIndexHash, threadIndexPath, threadRecordPaths } from "./thread-records.mjs";
@@ -11,6 +12,7 @@ export const MAX_PROVISIONAL_BYTES = 1024 * 1024;
 
 const INDEX_LOCK_TIMEOUT_MS = 5000;
 const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function bindingError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -93,7 +95,36 @@ async function appendEvents(store, events) {
   return records;
 }
 
-async function writeRound(provisional, { stateDir, recordId, threadId, activeRoundId, events, job }) {
+function ownerExited(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error.code === "ESRCH"; }
+}
+
+// A round releases its thread on its terminal event, which the broker writes.
+// A broker shut down mid-turn wrote none, and every later round on the thread
+// was THREAD_BUSY although the job file already said the round had failed.
+async function abandonedRound(stateDir, jobId) {
+  const job = await readJson(path.join(stateDir, "jobs", `${jobId}.json`));
+  if (!job || (!TERMINAL_STATUSES.has(job.status) && !ownerExited(job.pid))) return null;
+  const status = TERMINAL_STATUSES.has(job.status) ? job.status : "failed";
+  const message = status === job.status ? job.errorMessage ?? null : "owner process exited";
+  const completedAt = job.completedAt ?? new Date().toISOString();
+  const ended = { ...job, status, completedAt, ...(message ? { errorMessage: message } : {}) };
+  const event = createCanonicalEvent({
+    job: ended,
+    type: `job.${status}`,
+    identity: { sessionId: job.executorSessionId ?? job.threadId ?? null, turnId: job.turnId ?? null },
+    occurredAt: completedAt,
+    payload: { status, reason: { code: status === "cancelled" ? "cancelled" : status === "completed" ? "end_turn" : "backend_error",
+      backendCode: status, message, retryable: false }, completedAt, finalMessages: [],
+      error: message ? { message } : null, result: job.result ?? null },
+    source: { protocol: "local", method: `job.${status}`, raw: null }
+  });
+  return { job: ended, event };
+}
+
+async function writeRound(provisional, { stateDir, recordId, threadId, activeRoundId, events, job, abandoned = null }) {
   const workspaceRoot = canonicalWorkspaceRoot(provisional.workspaceRoot);
   const location = threadRecordPaths(stateDir, recordId, provisional.jobId);
   const store = new JobEventStore(workspaceRoot, recordId, {
@@ -102,6 +133,12 @@ async function writeRound(provisional, { stateDir, recordId, threadId, activeRou
   });
   await store.initialize();
   try {
+    if (abandoned) {
+      await appendEvents(store, [abandoned.event]);
+      await updateRoundReceipt(threadRecordPaths(stateDir, recordId, abandoned.job.id),
+        { status: abandoned.job.status, endedAt: abandoned.job.completedAt },
+        { ...abandoned.job, recordId, roundId: abandoned.job.id, threadId });
+    }
     const records = await appendEvents(store, events);
     await store.updateManifest({ activeRoundId });
     const receipt = receiptFor(provisional, recordId, events, records, job);
@@ -167,14 +204,16 @@ export async function bindProvisionalDispatch(provisional, threadId, {
     if (expectedRecordId && (!existing || existing.recordId !== expectedRecordId || !manifest)) {
       throw bindingError("THREAD_RECORD_MISSING", `Thread record ${expectedRecordId} is no longer available`);
     }
+    let abandoned = null;
     if (manifest?.activeRoundId && manifest.activeRoundId !== provisional.jobId) {
-      throw bindingError("THREAD_BUSY", `THREAD_BUSY thread=${threadId} active_job=${manifest.activeRoundId}`);
+      abandoned = await abandonedRound(stateDir, manifest.activeRoundId);
+      if (!abandoned) throw bindingError("THREAD_BUSY", `THREAD_BUSY thread=${threadId} active_job=${manifest.activeRoundId}`);
     }
     const recordId = existing?.recordId ?? provisional.jobId;
     const job = { ...structuredClone(provisional.job), recordId, roundId: provisional.jobId, threadId };
     const activeRoundId = events.some((event) => TERMINAL_EVENTS.has(event.type)) ? null : provisional.jobId;
     const result = await writeRound(provisional, {
-      stateDir, recordId, threadId, activeRoundId, events, job
+      stateDir, recordId, threadId, activeRoundId, events, job, abandoned
     });
     if (!existing) {
       await writeJson(threadIndexPath(stateDir, workspaceRoot, provisional.executorKey, threadId), {

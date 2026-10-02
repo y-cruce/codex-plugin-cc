@@ -73,6 +73,16 @@ function cleanupSessionJobs(cwd, sessionId) {
   });
 }
 
+function otherSessionJobRunning(cwd, sessionId) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  if (!fs.existsSync(resolveStateFile(workspaceRoot))) {
+    return false;
+  }
+  return loadState(workspaceRoot).jobs.some(
+    (job) => job.sessionId !== sessionId && (job.status === "queued" || job.status === "running")
+  );
+}
+
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
@@ -81,6 +91,14 @@ function handleSessionStart(input) {
 
 async function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
+  const sessionId = input.session_id || process.env[SESSION_ID_ENV];
+  // Every session in the workspace shares one broker. Shutting it down under
+  // another session's running job aborted that job's turn; left alone, the
+  // broker exits once it is idle.
+  if (otherSessionJobRunning(cwd, sessionId)) {
+    cleanupSessionJobs(cwd, sessionId);
+    return;
+  }
   const brokerSession =
     loadBrokerSession(cwd) ??
     (process.env[BROKER_ENDPOINT_ENV]
@@ -100,7 +118,7 @@ async function handleSessionEnd(input) {
     await sendBrokerShutdown(brokerEndpoint);
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  cleanupSessionJobs(cwd, sessionId);
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,
