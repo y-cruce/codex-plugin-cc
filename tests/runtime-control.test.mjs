@@ -487,49 +487,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   });
   assert.equal(adversarial.status, 0, adversarial.stderr);
 
-  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-  assert.equal(fakeState.appServerStarts, 1);
-
-  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
-    cwd: repo,
-    env,
-    input: JSON.stringify({
-      hook_event_name: "SessionEnd",
-      cwd: repo
-    })
-  });
-  assert.equal(cleanup.status, 0, cleanup.stderr);
-});
-
-test("setup reuses an existing shared app-server without starting another one", () => {
-  const repo = makeTempDir();
-  const binDir = makeTempDir();
-  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
-
-  installFakeCodex(binDir);
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
-  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
-
-  const env = buildEnv(binDir);
-
-  const review = run("node", [SCRIPT, "review"], {
-    cwd: repo,
-    env
-  });
-  assert.equal(review.status, 0, review.stderr);
-
-  const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
-
-  const setup = run("node", [SCRIPT, "setup", "--json"], {
-    cwd: repo,
-    env
-  });
+  const setup = run("node", [SCRIPT, "setup", "--json"], { cwd: repo, env });
   assert.equal(setup.status, 0, setup.stderr);
 
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
@@ -545,6 +503,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   });
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
+
 
 test("setup and status honor --cwd when reading shared session runtime", () => {
   const targetWorkspace = makeTempDir();

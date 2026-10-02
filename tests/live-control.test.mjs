@@ -9,21 +9,12 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "../plugins/codex/scr
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { ensureBrokerSession, saveBrokerSession, sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers, waitFor, within, closeTestBroker } from "./helpers.mjs";
 import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
-async function waitFor(predicate) {
-  // Waits on a broker and on worker processes it starts, so it takes the same
-  // allowance as a broker starting up.
-  for (let i = 0; i < BROKER_READY_MS / 25; i += 1) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out waiting for live control.");
-}
+
 async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
   isolateTestEnvironment(t);
   const repo = makeTempDir();
@@ -44,12 +35,7 @@ async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
   broker.stderr.on("data", (data) => { errors += data; });
   const closed = new Promise((resolve) => broker.on("exit", resolve));
   const clients = [];
-  t.after(async () => {
-    for (const client of clients) await client.close();
-    await sendBrokerShutdown(endpoint);
-    if (broker.exitCode === null) broker.kill();
-    await closed;
-  });
+  t.after(() => closeTestBroker(broker, closed, endpoint, clients, pidFile));
   assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, errors);
   const connect = async () => {
     const client = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
@@ -81,6 +67,8 @@ test("steering from another socket preserves FIFO and the owning event stream", 
   const final = h.notifications.find((item) => item.params?.item?.type === "agentMessage");
   assert.equal(final.params.item.text, "hold|first|finish");
   assert.deepEqual((await control.request("broker/status", { threadId: h.thread.id })).pendingMessages, []);
+  process.kill(h.broker.pid, "SIGSTOP");
+  await assert.rejects(within(h.owner.close(), 100, "stopped broker close"), /stopped broker close/);
 });
 
 test("parallel thread owners receive only their own events and reject another socket taking an active thread", async (t) => {
@@ -182,8 +170,8 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   child.stderr.on("data", (data) => { stderr += data; });
   const done = new Promise((resolve) => child.on("exit", (code) => resolve({ code, stdout, stderr })));
   t.after(async () => { if (child.exitCode === null) child.kill(); await done; });
-  const job = await waitFor(() => {
-    const result = h.cli("status");
+  const job = await waitFor((remainingMs) => {
+    const result = run(process.execPath, [SCRIPT, "status", "--json"], { cwd: h.repo, env: h.env, timeout: remainingMs });
     assert.equal(result.status, 0, result.stderr);
     const snapshot = JSON.parse(result.stdout);
     return (snapshot.threads ?? snapshot.running).find((item) => item.pid === child.pid && item.threadId && item.turnId);

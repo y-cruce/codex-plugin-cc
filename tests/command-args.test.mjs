@@ -1,6 +1,7 @@
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { handleObserve } from "../plugins/codex/scripts/lib/job-observe.mjs";
 import { fileURLToPath } from "node:url";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
@@ -31,15 +32,16 @@ test("events rejects unknown options with its supported options and accepts lega
   assert.match(accepted.stdout, /^IDLE_EXIT /m);
 });
 
-test("follow rejects unknown and unused options while preserving its job-id positional", () => {
+test("follow rejects unknown and unused options while preserving its job-id positional", async () => {
   const h = setup();
   for (const args of [["--stall-msec", "1"], ["--json"], ["--jsonl"], ["--limit", "1"]]) {
-    const rejected = run(process.execPath, [SCRIPT, "observe", "follow", "missing-job", "--cwd", h.cwd, ...args], h);
-    assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, new RegExp(`Unknown option ${args[0]}`));
-    for (const option of ["--cwd", "--after", "--until", "--max-seconds", "--verbose", "--quiet"]) {
-      assert.match(rejected.stderr, new RegExp(option));
-    }
+    await assert.rejects(handleObserve(["follow", "missing-job", "--cwd", h.cwd, ...args]), (error) => {
+      assert.match(error.message, new RegExp(`Unknown option ${args[0]}`));
+      for (const option of ["--cwd", "--after", "--until", "--max-seconds", "--verbose", "--quiet"]) {
+        assert.match(error.message, new RegExp(option));
+      }
+      return true;
+    });
   }
 
   const accepted = run(process.execPath, [SCRIPT, "observe", "follow", "missing-job", "--cwd", h.cwd,

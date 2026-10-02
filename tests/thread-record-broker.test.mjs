@@ -12,7 +12,7 @@ import { readHistory, readRecordHistory } from "../plugins/codex/scripts/lib/job
 import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, closeTestBroker } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -57,9 +57,7 @@ test("broker seam binds resumed dispatches to one shared record", async (t) => {
     for (const pid of workers) {
       try { process.kill(pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
     }
-    await sendBrokerShutdown(endpoint);
-    if (broker.exitCode === null) broker.kill();
-    await closed;
+    await closeTestBroker(broker, closed, endpoint, [], path.join(socketDir, "broker.pid"));
     fs.rmSync(socketDir, { recursive: true, force: true });
   });
   assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, brokerErrors);

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, within } from "./helpers.mjs";
 
 const SCRIPTS = fileURLToPath(new URL("../plugins/codex/scripts/", import.meta.url));
 const enabled = process.env.CODEX_REAL_APP_SERVER_TEST === "1";
@@ -92,11 +92,12 @@ unified_exec = true
     if (t.signal.aborted || serverError || requests.length !== 8) {
       t.diagnostic(JSON.stringify({ paths, requests: requests.length, processes: children.slice(-3).map((entry) => entry.inspect()) }));
     }
-    await control?.close();
-    await sendBrokerShutdown(endpoint);
-    for (const entry of children) {
-      if (entry.child.exitCode === null) entry.child.kill();
-      await entry.done;
+    try {
+      await within(Promise.allSettled([control?.close(), sendBrokerShutdown(endpoint)]), 1000, "real test runtime cleanup").catch(() => {});
+    } finally {
+      control?.socket.destroy();
+      for (const entry of children) if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill("SIGKILL");
+      await within(Promise.all(children.map((entry) => entry.done)), 5000, "real test child exit");
     }
   });
   assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true);

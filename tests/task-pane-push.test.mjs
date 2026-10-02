@@ -13,9 +13,10 @@ const view = {
   lastMessage: { kind: "assistant", text: "四条都修好了", at: "" },
 };
 
-async function paneHarness(stored = new Map()) {
+async function paneHarness(stored = new Map(), openResult, sessionId = "session") {
   const hooks = new Map();
   const timers = new Map();
+  const opened = [];
   const files = new Map();
   const now = Date.now();
   const base = "/home/test/.claude/plugins/data/codex/state/main";
@@ -29,10 +30,10 @@ async function paneHarness(stored = new Map()) {
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false },
     history: { continuity: "complete", committedSeq: "0" },
   };
-  files.set(jobPath, { id: "job-a", sessionId: "session", workspaceRoot: "/work", status: "running" });
+  files.set(jobPath, { id: "job-a", sessionId, workspaceRoot: "/work", status: "running" });
   files.set(viewPath, live);
   const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
-    status: "running", sessionIds: ["session"], viewPath, historyAvailable: false }];
+    status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false }];
   let threads = listing;
   let writes = 0;
   let viewRead;
@@ -44,12 +45,12 @@ async function paneHarness(stored = new Map()) {
   const element = (type) => (props) => ({ type, ...props });
   const engine = {
     plugin: { name: "codex" },
-    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => "session" },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId },
     env: { get: async () => "/home/test" },
     clock: { now: async () => now, every: (ms, fn) => timers.set(ms, fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => {
       stored.set(key, value);
-      if (key === "codex:tasks:session") writes++;
+      if (key === `codex:tasks:${sessionId}`) writes++;
     } },
     fs: {
       list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
@@ -74,7 +75,7 @@ async function paneHarness(stored = new Map()) {
       return { exitCode: 0, stdout: JSON.stringify({ threads }), stderr: "" };
     } },
     tool: { call: async () => assert.fail("no real monitors") },
-    ui: { open: async () => {}, close: async () => {}, invalidate: () => {}, log: () => {}, toast: () => {},
+    ui: { open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: () => {}, toast: () => {},
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -88,7 +89,7 @@ async function paneHarness(stored = new Map()) {
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing,
+    files, jobPath, viewPath, live, stored, listing, opened,
     holdViewRead: () => {
       let started, release;
       const reading = new Promise((resolve) => { started = resolve; });
@@ -100,11 +101,84 @@ async function paneHarness(stored = new Map()) {
     touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
     tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
+    band: async () => hooks.get("ui.render:AbovePrompt")(engine, { props: {} }, async () => {}),
+    close: async (kind = "person") => hooks.get("ui.close:")(engine, { id: "codex_tasks", origin: { kind } }, async () => {}),
+    session: (value) => {
+      sessionId = value;
+      files.set(jobPath, { ...files.get(jobPath), sessionId });
+      listing[0].sessionIds = [sessionId];
+    },
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
+
+test("the tasks button follows placement and only a person's close stops automatic opens", async (t) => {
+  for (const [name, result, close] of [
+    ["unplaced", { isPlaced: false, reason: "unasked below 144 columns" }, "person"],
+    ["no placement result", undefined, "person"],
+    ["placed", { isPlaced: true }, "person"],
+    ["plugin close", { isPlaced: false }, "plugin"],
+    ["engine unload", { isPlaced: false }, "unload"],
+    ["command close", { isPlaced: false }, "command"],
+  ]) {
+    await t.test(name, async () => {
+      const pane = await paneHarness(new Map(), result);
+      const button = result?.isPlaced ? undefined : "codex_tasks_open";
+      assert.equal((await pane.band())?.children[0].key, button);
+      await pane.tick();
+      await pane.tick();
+      assert.equal(pane.opened.length, 1, "poll opens once while waiting for placement");
+      assert.equal((await pane.band())?.children[0].key, button);
+      await pane.render();
+      assert.equal(await pane.band(), undefined, "Pane render proves the pane is drawn");
+      if (close === "command") assert.match((await pane.command("")).text, /closed/);
+      else await pane.close(close);
+      assert.equal((await pane.band()).children[0].key, "codex_tasks_open");
+      const blocked = close === "person" || close === "command";
+      await pane.tick();
+      await pane.tick();
+      assert.equal(pane.opened.length, blocked ? 1 : 2, "only a person's close stops poll opens");
+      if (blocked) assert.equal((await pane.band()).children[0].key, "codex_tasks_open");
+
+      const reloaded = await paneHarness(pane.stored, result);
+      const automatic = blocked ? 0 : 1;
+      assert.equal(reloaded.opened.length, automatic, "the person's choice survives reload");
+      assert.equal((await reloaded.band())?.children[0].key, blocked ? "codex_tasks_open" : button);
+      await reloaded.tick();
+      assert.equal(reloaded.opened.length, automatic);
+      reloaded.session("new-session");
+      await reloaded.tick();
+      assert.equal(reloaded.opened.length, automatic + 1, "a new session allows automatic opens");
+    });
+  }
+});
+
+test("asking to open a waiting or closed pane hides the button and clears the saved close", async (t) => {
+  for (const source of ["button", "command"]) {
+    for (const closed of [false, true]) {
+      await t.test(`${source}: ${closed ? "closed" : "waiting"}`, async () => {
+        const result = { isPlaced: false, reason: "narrow terminal" };
+        let pane = await paneHarness(new Map(), result);
+        if (closed) {
+          await pane.render();
+          await pane.close();
+          pane = await paneHarness(pane.stored, result);
+          assert.equal(pane.opened.length, 0);
+        }
+        const previous = pane.opened.length;
+        if (source === "button") await (await pane.band()).children[0].onPress();
+        else assert.match((await pane.command("")).text, /Alpha task/);
+        assert.equal(pane.opened.length, previous + 1);
+        assert.equal(pane.opened.at(-1).focus, true);
+        assert.equal(await pane.band(), undefined);
+        const reloaded = await paneHarness(pane.stored, result);
+        assert.equal(reloaded.opened.length, 1, "an explicit open restores automatic opens across reload");
+      });
+    }
+  }
+});
 
 test("live rows reconcile with disk even after dropping out or exhausting the query", async () => {
   for (const query of [[], new Error("listing failed")]) {

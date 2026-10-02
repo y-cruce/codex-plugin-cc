@@ -272,6 +272,7 @@ function ensureCodexAvailable(cwd) {
   if (!availability.available) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
+  return availability;
 }
 
 function buildNativeReviewTarget(target) {
@@ -390,7 +391,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
     return null;
   }
 
-  return executor === "codex" ? findLatestTaskThread(workspaceRoot) : null;
+  return executor === "codex" ? findLatestTaskThread(workspaceRoot, options.availability) : null;
 }
 
 function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "codex") {
@@ -561,7 +562,8 @@ function taskExecution(request, result) {
 
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  if (request.executor === "codex") ensureCodexAvailable(request.cwd);
+  const availability = request.executor === "codex" ? ensureCodexAvailable(request.cwd) : undefined;
+  const workspaceAvailability = request.cwd === workspaceRoot ? availability : undefined;
   if (request.resumeThreadId && !request.allowOtherRepo) {
     requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId, request.executor);
   }
@@ -576,7 +578,8 @@ async function executeTaskRun(request) {
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId,
-      executor: request.executor
+      executor: request.executor,
+      availability: workspaceAvailability
     });
     if (!latestThread) {
       throw new Error("No previous Codex task thread was found for this repository.");
@@ -618,6 +621,7 @@ async function executeTaskRun(request) {
     }
   } : {};
   const result = await (request.executor === "acp" ? runAcpTurn : runAppServerTurn)(workspaceRoot, {
+    availability: workspaceAvailability,
     resumeThreadId,
     prompt: request.prompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",

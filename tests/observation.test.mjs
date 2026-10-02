@@ -9,7 +9,7 @@ import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mj
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run, closeTestBroker, within } from "./helpers.mjs";
 import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
@@ -85,16 +85,17 @@ async function setup(t) {
     for (const pid of workerPids) {
       try { globalThis.process.kill(pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
     }
-    await sendBrokerShutdown(endpoint);
-    if (broker.exitCode === null) broker.kill();
-    await closed;
+    await closeTestBroker(broker, closed, endpoint, [], path.join(socketDir, "broker.pid"));
     fs.rmSync(socketDir, { recursive: true, force: true });
   });
   assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, brokerErrors);
   const rpc = async (method, params = {}) => {
     const client = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
     try { return await client.request(method, params); }
-    finally { await client.close(); }
+    finally {
+      try { await within(client.close(), 1000, "observation RPC close"); }
+      finally { client.socket?.destroy(); }
+    }
   };
   const start = async (prompt, label = prompt, options = []) => {
     const result = cli("task", "--background", ...options, "--label", label, "--json", prompt);
@@ -140,11 +141,15 @@ test("observe discovery, committed replay, live projection and follow resume", a
     return view?.lastMessage?.text === "live incremental " ? view : null;
   }, "delta-updated live view");
   assert.equal(live.tail.filter((row) => row.text.includes("live incremental")).length, 1);
+  await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId,
+    input: [{ type: "text", text: "observation-live-next" }] });
   const completeView = await waitFor(() => {
     const view = readView();
     return view?.lastMessage?.text === "live incremental conclusion" ? view : null;
   }, "folded message delta");
   assert.equal(completeView.tail.filter((row) => row.text.includes("live incremental")).length, 1);
+  await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId,
+    input: [{ type: "text", text: "observation-live-complete" }] });
   await waitFor(() => followed.output().includes("live incremental conclusion") || null, "follow printed the folded message");
   followed.process.kill("SIGINT");
   const result = await followed.done;

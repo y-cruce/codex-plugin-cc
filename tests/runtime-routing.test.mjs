@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, writeExecutable } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
@@ -303,3 +303,20 @@ test("session start hook exports the Claude session id, transcript path, and plu
   );
 });
 
+
+
+test("a capability check in a subdirectory is not reused for the workspace root", { skip: process.platform === "win32" }, () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  const cwd = path.join(repo, "sub");
+  fs.mkdirSync(path.join(cwd, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(repo, "bin"));
+  writeExecutable(path.join(cwd, "bin", "codex"), '#!/bin/sh\nprintf "sub runtime available\n"\n');
+  writeExecutable(path.join(repo, "bin", "codex"), '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "old root runtime\n"; exit 0; fi\nexit 77\n');
+  const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--json", "basic"], {
+    cwd, env: { ...process.env, PATH: `bin${path.delimiter}${process.env.PATH}`,
+      CODEX_COMPANION_APP_SERVER_ENDPOINT: `unix:${path.join(makeTempDir("cx-unused-"), "broker.sock")}` }
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Codex CLI is not installed or is missing required runtime support/);
+});

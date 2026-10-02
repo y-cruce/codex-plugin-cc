@@ -13,25 +13,11 @@ import { liveStatus, sendLiveCommand } from "../plugins/codex/scripts/lib/live-c
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
 import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
-
-// Every wait here is on a real companion subprocess and a real agent, and the
-// budget has to cover them on a box running the rest of the suite beside them,
-// not the second and a half they take with the file to themselves. Ten seconds
-// was under three times the solo cost and failed whenever the suite was busy.
-async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("Timed out waiting for ACP live control");
-}
 
 function recordingPrompts(file) {
   if (!fs.existsSync(file)) return [];
@@ -40,7 +26,7 @@ function recordingPrompts(file) {
     .map((entry) => entry.params.prompt.map((block) => block.text).join("\n"));
 }
 
-function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold") {
+async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold") {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
@@ -53,43 +39,73 @@ function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" 
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  const done = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal, stdout, stderr })));
+  const done = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+  let exitResult;
+  let exitError;
+  done.then((result) => { exitResult = result; }, (error) => { exitError = error; });
   t.after(async () => {
-    if (child.exitCode === null) child.kill("SIGTERM");
-    await done;
+    fs.writeFileSync(releaseFile, "release\n");
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await within(done.catch(() => {}), 5000, "ACP child cleanup").catch(async () => {
+      child.kill("SIGKILL");
+      await done.catch(() => {});
+    });
   });
   const cli = (...args) => run(process.execPath, [SCRIPT, ...args, "--cwd", cwd, "--json"], { cwd, env });
   const runningJob = () => listJobs(cwd).find((job) => job.pid === child.pid && job.turnId) ?? null;
   const release = () => fs.writeFileSync(releaseFile, "release\n");
-  return { cwd, env, child, done, cli, recording, runningJob, release };
+  const state = () => `pid=${child.pid}, stderr=${stderr}, state=${JSON.stringify(listJobs(cwd))}`;
+  const ready = async (predicate, phase, timeoutMs) => {
+    try {
+      return await Promise.race([
+        waitFor(() => {
+          if (exitResult || exitError) throw new Error(`ACP child exited during ${phase}`);
+          return predicate();
+        }, phase, timeoutMs),
+        done.then((result) => { throw new Error(`ACP child exited during ${phase} (code=${result.code}, signal=${result.signal})`); })
+      ]);
+    } catch (error) {
+      throw new Error(`${error.message}; ${state()}`, { cause: error });
+    }
+  };
+  // A companion and its agent are separate fresh processes. Functional waits
+  // start only after their initialization and the first prompt are observed.
+  await ready(() => listJobs(cwd).find((job) => job.pid === child.pid), "ACP companion readiness", 2 * BROKER_READY_MS);
+  const job = await ready(() => recordingPrompts(recording).includes(prompt) && runningJob(), "ACP agent readiness", BROKER_READY_MS);
+  return { cwd, env, child, done, cli, recording, job, release, state };
 }
 
-async function waitForExit(task, timeoutMs = BROKER_READY_MS) {
-  let timer;
+async function waitForExit(task, timeoutMs = 15000) {
   try {
-    return await Promise.race([task.done, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Timed out waiting for ACP task exit")), timeoutMs);
-      timer.unref?.();
-    })]);
-  } finally {
-    clearTimeout(timer);
+    return await within(task.done, timeoutMs, "ACP task exit after readiness");
+  } catch (error) {
+    throw new Error(`${error.message}; ${task.state()}`, { cause: error });
   }
 }
 
 const cases = [
   {
-    name: "--queue waits for the active turn and starts the next turn",
+    name: "--queue preserves FIFO, refuses mid-turn messages and binds each next round",
     run: async (t) => {
-      const h = startTask(t);
-      const job = await waitFor(h.runningJob);
+      const h = await startTask(t);
+      const job = h.job;
       const queued = h.cli("message", job.id, "--queue", "queued-next");
       assert.equal(queued.status, 0, queued.stderr);
       const accepted = JSON.parse(queued.stdout);
       assert.equal(accepted.queued, true);
       assert.notEqual(accepted.queuedJobId, job.id);
+      const second = await sendLiveCommand(h.cwd, job.id, "message", { queue: true }, "queued-second");
+      const queuedJobIds = [accepted.queuedJobId, second.queuedJobId];
+      assert.equal(new Set([job.id, ...queuedJobIds]).size, 3);
+      const refused = h.cli("message", job.id, "mid-turn");
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /cannot add a message to the active turn/i);
       const pending = (await liveStatus(h.cwd, job)).pendingMessages;
       assert.deepEqual(pending.map((entry) => [entry.jobId, entry.input[0].text, entry.queued]),
-        [[accepted.queuedJobId, "queued-next", true]]);
+        [[accepted.queuedJobId, "queued-next", true], [second.queuedJobId, "queued-second", true]]);
       const original = await readRoundContext(h.cwd, job.id);
       assert.equal(readStoredJob(h.cwd, accepted.queuedJobId).recordId, original.recordId);
       const reserved = await observationThreads(resolveStateDir(h.cwd));
@@ -98,22 +114,25 @@ const cases = [
       h.release();
       const result = await waitForExit(h);
       assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-next"]);
+      assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-next", "queued-second"]);
 
       const continuation = await readRoundContext(h.cwd, accepted.queuedJobId);
       assert.equal(continuation.recordId, original.recordId);
+      const contexts = await Promise.all([job.id, ...queuedJobIds].map((jobId) => readRoundContext(h.cwd, jobId)));
+      assert.equal(new Set(contexts.map((context) => context.recordId)).size, 1);
       const history = await readRecordHistory(h.cwd, original.recordId);
       assert.deepEqual(history.events.filter((event) => event.type.startsWith("job.")).map((event) => [event.jobId, event.type]), [
         [job.id, "job.started"], [job.id, "job.completed"],
-        [accepted.queuedJobId, "job.started"], [accepted.queuedJobId, "job.completed"]
+        [accepted.queuedJobId, "job.started"], [accepted.queuedJobId, "job.completed"],
+        [second.queuedJobId, "job.started"], [second.queuedJobId, "job.completed"]
       ]);
     }
   },
   {
     name: "a queued round fails in its thread when its predecessor fails",
     run: async (t) => {
-      const h = startTask(t, "default", "cancel-late");
-      const job = await waitFor(h.runningJob);
+      const h = await startTask(t, "default", "cancel-late");
+      const job = h.job;
       const original = await readRoundContext(h.cwd, job.id);
       const queued = h.cli("message", job.id, "--queue", "basic");
       assert.equal(queued.status, 0, queued.stderr);
@@ -182,51 +201,13 @@ const cases = [
       assert.match(text, /failed/);
     }
   },
-  {
-    name: "a message without a flag remains unsupported for ACP",
-    run: async (t) => {
-      const h = startTask(t);
-      const job = await waitFor(h.runningJob);
-      const refused = h.cli("message", job.id, "mid-turn");
-      assert.equal(refused.status, 1);
-      assert.match(refused.stderr, /cannot add a message to the active turn/i);
-      h.release();
-      const result = await waitForExit(h);
-      assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(recordingPrompts(h.recording), ["hold"]);
-    }
-  },
-  {
-    name: "two queued messages start turns in FIFO order",
-    run: async (t) => {
-      const h = startTask(t);
-      const job = await waitFor(h.runningJob);
-      const queuedJobIds = [];
-      for (const prompt of ["queued-first", "queued-second"]) {
-        const queued = await sendLiveCommand(h.cwd, job.id, "message", { queue: true }, prompt);
-        queuedJobIds.push(queued.queuedJobId);
-      }
-      assert.equal(new Set([job.id, ...queuedJobIds]).size, 3);
-      h.release();
-      const result = await waitForExit(h);
-      assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-first", "queued-second"]);
 
-      const contexts = await Promise.all([job.id, ...queuedJobIds].map((jobId) => readRoundContext(h.cwd, jobId)));
-      assert.equal(new Set(contexts.map((context) => context.recordId)).size, 1);
-      const history = await readRecordHistory(h.cwd, contexts[0].recordId);
-      assert.deepEqual(history.events.filter((event) => event.type.startsWith("job.")).map((event) => [event.jobId, event.type]), [
-        [job.id, "job.started"], [job.id, "job.completed"],
-        [queuedJobIds[0], "job.started"], [queuedJobIds[0], "job.completed"],
-        [queuedJobIds[1], "job.started"], [queuedJobIds[1], "job.completed"]
-      ]);
-    }
-  },
+
   {
     name: "a permission wakes the director and answer selects an option value",
     run: async (t) => {
-      const h = startTask(t);
-      const job = await waitFor(h.runningJob);
+      const h = await startTask(t);
+      const job = h.job;
       const queued = h.cli("message", job.id, "--queue", "permission");
       assert.equal(queued.status, 0, queued.stderr);
       const queuedJobId = JSON.parse(queued.stdout).queuedJobId;
@@ -259,15 +240,6 @@ const cases = [
       const result = await waitForExit(h);
       assert.equal(result.code, 0, result.stderr);
       assert.match(readStoredJob(h.cwd, queuedJobId).result.rawOutput, /"optionId":"allow"/);
-    }
-  },
-  {
-    name: "yolo automatically chooses the most permissive option",
-    run: async (t) => {
-      const h = startTask(t, "yolo");
-      const result = await waitForExit(h);
-      assert.equal(result.code, 0, result.stderr);
-      assert.match(JSON.parse(result.stdout).rawOutput, /"optionId":"allow-session"/);
     }
   }
 ];

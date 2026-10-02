@@ -137,9 +137,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       reply({ turnId: thread.turnId });
       if (p.input.some((item) => item.text === "observation-live")) {
         const base = { threadId: thread.id, turnId: thread.turnId };
-        setTimeout(() => emit("item/agentMessage/delta", { ...base, itemId: "observe-live", delta: "live incremental " }), 100);
-        setTimeout(() => emit("item/agentMessage/delta", { ...base, itemId: "observe-live", delta: "conclusion" }), 600);
-        setTimeout(() => emit("item/completed", { ...base, item: { type: "agentMessage", id: "observe-live", text: "live incremental conclusion", phase: "commentary" } }), 1200);
+        emit("item/agentMessage/delta", { ...base, itemId: "observe-live", delta: "live incremental " });
+      }
+      if (p.input.some((item) => item.text === "observation-live-next")) {
+        emit("item/agentMessage/delta", { threadId: thread.id, turnId: thread.turnId, itemId: "observe-live", delta: "conclusion" });
+      }
+      if (p.input.some((item) => item.text === "observation-live-complete")) {
+        emit("item/completed", { threadId: thread.id, turnId: thread.turnId,
+          item: { type: "agentMessage", id: "observe-live", text: "live incremental conclusion", phase: "commentary" } });
       }
       setTimeout(() => {
         emit("item/started", { threadId: thread.id, turnId: thread.turnId, item: {

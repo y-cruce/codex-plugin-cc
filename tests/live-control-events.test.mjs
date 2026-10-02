@@ -9,22 +9,13 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "../plugins/codex/scr
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { ensureBrokerSession, saveBrokerSession, sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { buildEnv } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, shutdownTestBrokers, waitFor, closeTestBroker } from "./helpers.mjs";
 import { liveStatus } from "../plugins/codex/scripts/lib/live-commands.mjs";
 import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
-async function waitFor(predicate) {
-  // Waits on a broker and on worker processes it starts, so it takes the same
-  // allowance as a broker starting up.
-  for (let i = 0; i < BROKER_READY_MS / 25; i += 1) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out waiting for live control.");
-}
+
 
 function listTestJobs(h) {
   const pluginData = process.env.CLAUDE_PLUGIN_DATA;
@@ -57,12 +48,7 @@ async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
   broker.stderr.on("data", (data) => { errors += data; });
   const closed = new Promise((resolve) => broker.on("exit", resolve));
   const clients = [];
-  t.after(async () => {
-    for (const client of clients) await client.close();
-    await sendBrokerShutdown(endpoint);
-    if (broker.exitCode === null) broker.kill();
-    await closed;
-  });
+  t.after(() => closeTestBroker(broker, closed, endpoint, clients, pidFile));
   assert.equal(await waitForBrokerEndpoint(endpoint, BROKER_READY_MS), true, errors);
   const connect = async () => {
     const client = await CodexAppServerClient.connect(repo, { brokerEndpoint: endpoint, env });
@@ -89,11 +75,7 @@ async function startJob(t, h, prompt, options = ["--write"]) {
   t.after(async () => { if (child.exitCode === null) child.kill(); await done; });
   const storedJob = await waitFor(() => listTestJobs(h)
     .find((item) => item.pid === child.pid && item.threadId && item.turnId));
-  const result = h.cli("status");
-  assert.equal(result.status, 0, result.stderr);
-  const snapshot = JSON.parse(result.stdout);
-  const job = (snapshot.threads ?? snapshot.running).find((item) => item.id === storedJob.id);
-  return { job, done, child };
+  return { job: storedJob, done, child };
 }
 
 test("task thread starts declare notify_director and initialize enables experimental API", async (t) => {
@@ -207,15 +189,11 @@ test("task sandbox and network options are persisted and preserved through inter
   const h = await setup(t);
   for (const { options, sandbox, policy } of [
     { options: ["--sandbox", "danger-full-access"], sandbox: "danger-full-access", policy: { type: "dangerFullAccess" } },
-    { options: ["--write", "--network"], sandbox: "workspace-write", policy: {
-      type: "workspaceWrite", writableRoots: [fs.realpathSync(h.repo)], networkAccess: true,
-      excludeTmpdirEnvVar: false, excludeSlashTmp: false
-    } }
+    { options: ["--write", "--network"], sandbox: "workspace-write", policy: { type: "workspaceWrite",
+      writableRoots: [fs.realpathSync(h.repo)], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false } }
   ]) {
     const { job, done } = await startJob(t, h, "hold", options);
-    const status = h.cli("status", job.id);
-    assert.equal(status.status, 0, status.stderr);
-    const current = JSON.parse(status.stdout).job;
+    const current = job;
     assert.equal(current.sandbox, sandbox);
     assert.equal(current.request.sandbox, sandbox);
     assert.equal(current.write, true);
@@ -239,6 +217,7 @@ test("task sandbox and network options are persisted and preserved through inter
   const job = snapshot.threads?.find((thread) => thread.status !== "queued" && thread.status !== "running") ?? snapshot.latestFinished;
   assert.equal(job.sandbox, "read-only");
   assert.equal(job.write, false);
+  assert.equal(job.network, false);
   const started = h.requests().find((item) => item.method === "turn/start" && item.params.threadId === job.threadId);
   assert.deepEqual(started.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
 });

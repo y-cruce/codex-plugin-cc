@@ -1061,7 +1061,7 @@ export async function importExternalAgentSession(cwd, options = {}) {
 }
 
 export async function runAppServerTurn(cwd, options = {}) {
-  const availability = getCodexAvailability(cwd);
+  const availability = options.availability ?? getCodexAvailability(cwd);
   if (!availability.available) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
@@ -1150,8 +1150,7 @@ export async function runAppServerTurn(cwd, options = {}) {
   }, { requireBroker: options.persistThread });
 }
 
-export async function findLatestTaskThread(cwd) {
-  const availability = getCodexAvailability(cwd);
+export async function findLatestTaskThread(cwd, availability = getCodexAvailability(cwd)) {
   if (!availability.available) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }

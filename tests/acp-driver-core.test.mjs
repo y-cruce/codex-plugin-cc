@@ -11,7 +11,7 @@ import { loadAcpDriver } from "../plugins/codex/scripts/lib/acp.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -36,10 +36,20 @@ async function setupPort(t, id = "acp-job", options = {}) {
   upsertJob(cwd, job);
   const port = await openAcpExecutorJob({ cwd, job, command: process.execPath, args: [AGENT], env: options.env,
     modelId: options.modelId, effortId: options.effortId });
-  t.after(() => port.close());
   const events = [];
   const pump = (async () => { for await (const event of port.events()) events.push(event); })();
-  t.after(() => pump);
+  t.after(async () => {
+    try {
+      await within(port.close(), 5000, "ACP port cleanup");
+    } finally {
+      if (port.proc?.exitCode === null && port.proc.signalCode === null) port.proc.kill("SIGKILL");
+      port.proc?.stdin.destroy();
+      port.proc?.stdout.destroy();
+      port.queue.close();
+      await within(pump, 1000, "ACP event pump cleanup");
+      await within(port.runtime.close(), 1000, "ACP runtime cleanup");
+    }
+  });
   const session = await port.startSession({ cwd, additionalDirectories: [], mcpServers: [], modeId: "default",
     modelId: options.modelId, effortId: options.effortId });
   return { cwd, job, port, events, session };
@@ -98,6 +108,14 @@ test("ACP permission and elicitation stay distinct and resolve through pending m
   assert.equal(permission.payload.options[0].kind, "allow_once");
   await h.port.answerPermission({ requestId: permission.requestId, outcome: "selected", optionId: "allow" });
   assert.equal((await permissionTurn.done).status, "completed");
+  const manual = h.events.find((event) => event.type === "permission.resolved" && event.identity.requestId === permission.requestId);
+  assert.ok(manual, "manual answer resolution was not recorded");
+  assert.deepEqual(manual.payload, { requestId: permission.requestId, outcome: "selected", optionId: "allow" });
+  await h.port.setMode({ sessionId: h.session.sessionId, modeId: "yolo" });
+  const automatic = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "permission" }] });
+  const outcome = await within(automatic.done, 10000, "automatic yolo permission turn");
+  assert.equal(outcome.status, "completed");
+  assert.match(outcome.finalMessages.find((message) => message.role === "assistant").text, /"optionId":"allow-session"/);
   const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
   const question = await waitFor(() => [...h.port.questions.values()][0]);
   assert.deepEqual(question.payload.fields.map((field) => field.kind), ["text", "single_select", "multi_select", "boolean"]);

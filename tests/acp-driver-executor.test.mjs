@@ -15,13 +15,19 @@ test("companion selects the ACP executor without changing the Codex default", (t
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   initGitRepo(cwd);
+  const recording = path.join(cwd, "acp-recording.jsonl");
   const result = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
-    "--executor-args", JSON.stringify([AGENT]), "--json", "basic"], { cwd });
+    "--executor-args", JSON.stringify([AGENT]), "--executor-mode", "yolo", "--json", "permission"],
+    { cwd, env: { ...process.env, ACP_FAKE_RECORDING: recording } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.executor, "acp");
-  assert.equal(payload.rawOutput, "Basic complete");
+  assert.match(payload.rawOutput, /"optionId":"allow-session"/);
   const job = listJobs(cwd)[0];
+  assert.equal(job.request.executorMode, "yolo");
+  const mode = fs.readFileSync(recording, "utf8").trim().split("\n").map(JSON.parse)
+    .find((entry) => entry.method === "session/set_mode");
+  assert.equal(mode.params.modeId, "yolo");
   const replay = run(process.execPath, [SCRIPT, "observe", "replay", job.id, "--cwd", cwd, "--jsonl"], { cwd });
   assert.equal(replay.status, 0, replay.stderr);
   const events = replay.stdout.trim().split("\n").map(JSON.parse);

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -189,6 +189,7 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
   const stateDir = resolveStateDir(repo);
   const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
   const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
@@ -202,23 +203,6 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
   );
 });
 
-test("task waits for the main thread to complete before returning the final result", () => {
-  const repo = makeTempDir();
-  const binDir = makeTempDir();
-  installFakeCodex(binDir, "with-subagent");
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
-
-  const result = run("node", [SCRIPT, "task", "challenge the current design"], {
-    cwd: repo,
-    env: buildEnv(binDir)
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
-});
 
 test("task --background persists a trimmed, capped label in JSON and text launch output", async () => {
   for (const json of [true, false]) {
@@ -248,10 +232,8 @@ test("task --background persists a trimmed, capped label in JSON and text launch
     assert.match(launchPayload.jobId, /^task-/);
 
     await waitFor(() => {
-      const file = path.join(resolveStateDir(repo), "jobs", `${launchPayload.jobId}.json`);
-      if (!fs.existsSync(file)) return false;
-      const job = JSON.parse(fs.readFileSync(file, "utf8"));
-      return job.threadId && job.turnId;
+      const job = listJobs(repo).find((item) => item.id === launchPayload.jobId);
+      return job?.threadId && job.turnId;
     });
 
     const waitedStatus = run(

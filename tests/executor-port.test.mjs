@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
+import { findLatestTaskThread, runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
 import { CodexExecutorJobPort } from "../plugins/codex/scripts/lib/executors/codex-driver.mjs";
 import { canonicalTerminalReason, jobStatusForTerminal } from "../plugins/codex/scripts/lib/executor-port.mjs";
 import { readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
@@ -94,4 +96,56 @@ test("Codex port queues a notification emitted before session creation returns",
   assert.deepEqual(requests.map((request) => request.method), ["thread/start"]);
   await port.close();
   assert.equal((await iterator.next()).done, true);
+});
+
+
+test("Codex turn policy variants reach the recorded server request", async () => {
+  const requests = [];
+  const client = { notificationHandler: null, setNotificationHandler(handler) { this.notificationHandler = handler; },
+    async request(method, params) {
+      requests.push({ method, params });
+      return { turn: { id: `turn-${requests.length}`, status: "completed" } };
+    } };
+  const port = await CodexExecutorJobPort.open({ client, cwd: "/repo", job: { id: "policy-job" },
+    captureTurn: async (client, sessionId, start, options) => {
+      const response = await start();
+      options.onResponse(response);
+      return { turnId: response.turn.id, finalTurn: response.turn, lastAgentMessage: "written", error: null };
+    } });
+  for (const [sandbox, network, policy] of [
+    ["danger-full-access", false, { type: "dangerFullAccess" }],
+    ["workspace-write", true, { type: "workspaceWrite", writableRoots: ["/repo"], networkAccess: true,
+      excludeTmpdirEnvVar: false, excludeSlashTmp: false }],
+    ["read-only", false, { type: "readOnly", networkAccess: false }]
+  ]) {
+    const turn = await port.startTurn({ sessionId: "session-1", prompt: "write redirected", sandbox, network });
+    assert.equal((await turn.done).status, "completed");
+    assert.deepEqual(requests.at(-1).params.sandboxPolicy, policy);
+  }
+  await port.close();
+});
+
+
+test("a task reuses its checked capability result without caching later probes", async (t) => {
+  isolateTestEnvironment(t);
+  process.env.PATH = makeTempDir();
+  const client = { transport: "direct", stderr: "", async close() {}, async request(method) {
+    assert.equal(method, "thread/list");
+    return { data: [{ id: "session-1", name: "Codex Companion Task fixture" }] };
+  } };
+  t.mock.method(CodexAppServerClient, "connect", async () => client);
+  t.mock.method(CodexExecutorJobPort, "open", async () => ({
+    async *events() {}, async close() {}, async startSession() { return { sessionId: "session-1" }; },
+    async startTurn() { return { done: Promise.resolve(terminal("end_turn")), capture: Promise.resolve({
+      turnId: "turn-1", lastAgentMessage: "done", reasoningSummary: [], finalTurn: { status: "completed" },
+      error: null, fileChanges: [], commandExecutions: []
+    }) }; }
+  }));
+  const availability = { available: true, detail: "already checked" };
+  assert.equal((await findLatestTaskThread(process.cwd(), availability)).id, "session-1");
+  assert.equal((await runAppServerTurn(process.cwd(), { availability, prompt: "basic" })).finalMessage, "done");
+  const missing = /Codex CLI is not installed or is missing required runtime support/;
+  await assert.rejects(runAppServerTurn(process.cwd(), { prompt: "basic" }), missing);
+  await assert.rejects(findLatestTaskThread(process.cwd()), missing);
+  await assert.rejects(runAppServerTurn(process.cwd(), { availability: { available: false }, prompt: "basic" }), missing);
 });

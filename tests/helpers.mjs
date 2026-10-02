@@ -18,10 +18,45 @@ let testPluginDataDirs = null;
 // something is actually broken.
 export const BROKER_READY_MS = 120000;
 
+export async function within(promise, timeoutMs, description) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${description} after ${timeoutMs}ms`)), timeoutMs);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function waitFor(predicate, description = "condition", timeoutMs = BROKER_READY_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    const value = await within(Promise.resolve().then(() => predicate(remainingMs)), remainingMs, description);
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, Math.max(0, deadline - Date.now()))));
+  }
+  throw new Error(`Timed out waiting for ${description} after ${timeoutMs}ms`);
+}
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.add(dir);
   return dir;
+}
+
+export async function closeTestBroker(broker, closed, endpoint, clients = [], pidFile = null) {
+  try {
+    await within(Promise.allSettled([
+      ...clients.map((client) => client.close()), sendBrokerShutdown(endpoint)
+    ]), 1000, "test broker graceful cleanup").catch(() => {});
+  } finally {
+    for (const client of clients) client.socket?.destroy();
+    if (broker.exitCode === null && broker.signalCode === null) broker.kill("SIGKILL");
+    await within(closed, 5000, "test broker exit");
+    if (pidFile && fs.existsSync(pidFile) && Number(fs.readFileSync(pidFile, "utf8")) === broker.pid) fs.unlinkSync(pidFile);
+  }
 }
 
 export async function shutdownTestBrokers(pluginDataDir) {
@@ -86,14 +121,18 @@ export function writeExecutable(filePath, source) {
 export function run(command, args, options = {}) {
   const pluginDataDir = (options.env ?? process.env).CLAUDE_PLUGIN_DATA;
   if (pluginDataDir) testPluginDataDirs?.add(pluginDataDir);
-  return spawnSync(command, args, {
+  const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
+    timeout: options.timeout ?? BROKER_READY_MS,
+    killSignal: "SIGKILL",
     shell: options.shell ?? (process.platform === "win32" && !path.isAbsolute(command)),
     windowsHide: true
   });
+  if (result.error && !result.stderr) result.stderr = result.error.message;
+  return result;
 }
 
 export function initGitRepo(cwd) {

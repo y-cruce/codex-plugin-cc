@@ -5,12 +5,12 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
-import { isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
-import { loadState, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run, within } from "./helpers.mjs";
+import { loadState, readJobFile, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 beforeEach(isolateTestEnvironment);
 
-test("concurrent job writers preserve both indices and artifacts", { timeout: 60000 }, async (t) => {
+test("concurrent job writers preserve both indices and artifacts", { timeout: BROKER_READY_MS + 35000 }, async (t) => {
   const workspace = makeTempDir();
   const gate = path.join(workspace, "start");
   const source = `
@@ -21,7 +21,7 @@ test("concurrent job writers preserve both indices and artifacts", { timeout: 60
     const logFile = resolveJobLogFile(workspace, id);
     writeJobFile(workspace, id, { id });
     fs.writeFileSync(logFile, id);
-    fs.writeFileSync(gate + id, "ready");
+    await new Promise((resolve, reject) => process.send("ready", (error) => error ? reject(error) : resolve()));
     while (!fs.existsSync(gate)) Atomics.wait(wait, 0, 0, 10);
     for (let iteration = 0; iteration < 6; iteration += 1) {
       updateState(workspace, (state) => {
@@ -32,24 +32,34 @@ test("concurrent job writers preserve both indices and artifacts", { timeout: 60
         else state.jobs[index] = job;
       });
     }
+    process.disconnect();
   `;
   const workers = ["task-one", "task-two"].map((id) => {
-    const child = spawn(process.execPath, ["--input-type=module", "-e", source, workspace, id, gate], { env: process.env });
+    const child = spawn(process.execPath, ["--input-type=module", "-e", source, workspace, id, gate], {
+      env: process.env, stdio: ["ignore", "pipe", "pipe", "ipc"]
+    });
     let stderr = "";
     child.stderr.on("data", (data) => { stderr += data; });
     const done = new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr || `Worker exited ${code}`)));
+      child.once("error", reject);
+      child.once("exit", (code, signal) => code === 0 ? resolve() :
+        reject(new Error(`Writer ${id} exited (code=${code}, signal=${signal}): ${stderr}`)));
     });
-    t.after(() => { if (child.exitCode === null) child.kill(); });
-    return { id, done };
+    done.catch(() => {});
+    const ready = Promise.race([
+      new Promise((resolve) => child.once("message", (message) => { assert.equal(message, "ready"); resolve(); })),
+      done.then(() => { throw new Error(`Writer ${id} exited before readiness: ${stderr}`); })
+    ]);
+    ready.catch(() => {});
+    return { id, child, done, ready };
   });
-  while (!workers.every(({ id }) => fs.existsSync(gate + id))) {
-    t.signal.throwIfAborted();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  t.after(async () => {
+    for (const { child } of workers) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await Promise.allSettled(workers.map(({ done }) => done));
+  });
+  await within(Promise.all(workers.map(({ ready }) => ready)), BROKER_READY_MS, "state writer readiness");
   fs.writeFileSync(gate, "start");
-  await Promise.all(workers.map(({ done }) => done));
+  await within(Promise.all(workers.map(({ done }) => done)), 30000, "concurrent writer completion after the gate");
   assert.deepEqual(loadState(workspace).jobs.map(({ id, iteration }) => ({ id, iteration })).sort((a, b) => a.id.localeCompare(b.id)),
     workers.map(({ id }) => ({ id, iteration: 5 })));
   for (const { id } of workers) {
@@ -167,4 +177,26 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
       .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`])
       .sort()
   );
+});
+
+
+test("job publication never exposes a partial JSON rewrite", (t) => {
+  const cwd = makeTempDir();
+  const before = { id: "published", text: "old" };
+  const after = { id: "published", text: "x".repeat(4096) };
+  const jobFile = writeJobFile(cwd, before.id, before);
+  const original = fs.writeFileSync;
+  let observed = 0;
+  t.mock.method(fs, "writeFileSync", (file, data, options) => {
+    if (typeof file === "string" && path.dirname(file) === path.dirname(jobFile)) {
+      original(file, data.slice(0, Math.floor(data.length / 2)), options);
+      observed += 1;
+      assert.deepEqual(readJobFile(jobFile), before);
+    }
+    return original(file, data, options);
+  });
+  writeJobFile(cwd, after.id, after);
+  assert.equal(observed, 1);
+  assert.deepEqual(readJobFile(jobFile), after);
+  assert.deepEqual(fs.readdirSync(path.dirname(jobFile)), [path.basename(jobFile)]);
 });

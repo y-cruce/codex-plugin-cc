@@ -30,6 +30,9 @@ type State = {
   answering: boolean
   requestMtime: number
   opened: boolean
+  // Placed or asked for by the person; an unasked open can wait undrawn.
+  shown: boolean
+  dismissed: boolean
   selected: string | null
   // The element the pane's focus ring was last put on, to tell Tab off the
   // last task from Shift+Tab coming round from the pane's close mark.
@@ -267,9 +270,11 @@ function resetRows(state: State) {
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
+  if (state.sessionId && sessionId !== state.sessionId) state.opened = state.shown = false
   state.sessionId = sessionId
   state.key = `${$.plugin.name}:tasks:${sessionId}`
   state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
+  state.dismissed = await $.store.get(`${state.key}:dismissed`) === true
   resetRows(state)
   for (const id of (await $.store.get(`${state.key}:forgotten`) ?? []) as string[]) state.forgotten.add(id)
   state.pending = []
@@ -445,10 +450,12 @@ async function pollOnce($: EngineInterface, state: State) {
     // keeps its finished jobs for weeks, so a fresh session found four threads
     // from a fortnight ago, opened the pane for them, and drew "nothing
     // dispatched yet" -- the list the body works from had dropped them all.
-    if (visibleThreads(state).length && !state.opened) {
+    if (visibleThreads(state).length && !state.opened && !state.dismissed) {
       state.opened = true
-      await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
+      const opened = await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
+      // Older declarations say void; otherwise Pane render supplies the proof.
+      if ((opened as unknown as { isPlaced?: boolean } | undefined)?.isPlaced === true) state.shown = true
     }
     if (!lines.length && !state.pending.length) {
       // Written even with nothing to say: this round still moved cursors and
@@ -621,9 +628,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
-    answering: false, requestMtime: 0,
+    answering: false, requestMtime: 0, dismissed: false,
     views: new Map<string, LiveView>(), ledger: {},
-    ticks: 0, since: 0, busy: false, booting: false, polling: null, opened: false, selected: null, ring: undefined, expanded: new Set<string>(),
+    ticks: 0, since: 0, busy: false, booting: false, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
     liveRoots: new Set<string>(),
@@ -680,8 +687,11 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // The pane opens whether or not anything is running: it is where tasks are
     // watched, and asking for it before dispatching one is a fair thing to do.
     // Bare, the command is the pane's switch: it closes a pane that is open.
-    if (!wanted && !refresh && state.opened) {
+    if (!wanted && !refresh && state.shown) {
       state.opened = false
+      state.shown = false
+      state.dismissed = true
+      await $.store.set(`${state.key}:dismissed`, true)
       await $.ui.close({ id: PANE })
       return { text: 'Codex tasks · closed' }
     }
@@ -697,6 +707,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.toEnd = true
     }
     state.opened = true
+    state.shown = true
+    state.dismissed = false
+    await $.store.set(`${state.key}:dismissed`, false)
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
     if (refresh) return { text: `Codex tasks · refreshed · ${threads.length} tasks` }
@@ -704,16 +717,23 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }
   })
-  // Closing the pane is the person's call, so it is not reopened for them.
-  on('ui.close', ($, e, next) => {
-    if (e.id === PANE) state.opened = false
+  // A person's close stops automatic opens for this session, including reloads.
+  // Plugin and engine closes leave that choice alone; an explicit open clears it.
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE) {
+      state.opened = state.shown = false
+      if (e.origin.kind === 'person') {
+        state.dismissed = true
+        await $.store.set(`${state.key}:dismissed`, true)
+      }
+    }
     return next(e)
   })
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     // Same list as the pane's own body: a session with nothing to show had the
     // button sitting under its prompt for as long as it ran.
     const threads = visibleThreads(state)
-    if (e.props.hasSurvey || state.opened || !threads.length) return next(e)
+    if (e.props.hasSurvey || state.shown || !threads.length) return next(e)
     const { Box, Button } = $.ui.resolve(e)
     const running = threads.filter(view => ['running', 'waiting-for-answer'].includes(view.status)).length
     const queued = threads.filter(view => view.status === 'queued').length
@@ -721,7 +741,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
       label: `Codex tasks${activity ? ` · ${activity}` : ''}`,
-      onPress: () => { state.opened = true; void $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 }) },
+      onPress: async () => {
+        state.opened = state.shown = true
+        state.dismissed = false
+        await $.store.set(`${state.key}:dismissed`, false)
+        await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
+      },
     })] })
   })
   // Tab walks the list at the pane's foot and a task is chosen by landing on
@@ -761,6 +786,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // screen, and the band would offer to open one that is already open. The
     // pane asking to be drawn is the proof that it is.
     state.opened = true
+    state.shown = true
     const threads = visibleThreads(state)
     if (state.selected && !threads.some(view => (view.recordId ?? view.jobId) === state.selected)) {
       state.selected = null
