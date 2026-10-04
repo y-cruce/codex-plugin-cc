@@ -312,6 +312,14 @@ async function pollOnce($: EngineInterface, state: State) {
     const returnedByRoot = new Map<string, Set<string>>()
     for (const root of state.roots) {
       if ((state.unreadable.get(root) ?? 0) >= GIVE_UP) continue
+      // A worktree removed once its jobs ran is gone for good, and spawning the
+      // companion there fails as "spawn node ENOENT", which names node instead
+      // of the directory. The rescan brings it back from the job files; this
+      // drops it again before anything is spawned.
+      if (!await $.fs.stat(root).then(() => true, () => false)) {
+        state.roots.delete(root)
+        continue
+      }
       try {
         const listed = JSON.parse(await companion($, state, root,
           ['threads', '--json', '--finished-after', String(now - KEEP_MS)])) as { threads: Thread[] }

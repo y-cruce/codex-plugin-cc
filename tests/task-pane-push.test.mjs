@@ -18,6 +18,8 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
   const timers = new Map();
   const opened = [];
   const files = new Map();
+  const dirs = new Set(["/work"]);
+  const logs = [];
   const now = Date.now();
   const base = "/home/test/.claude/plugins/data/codex/state/main";
   const jobPath = `${base}/jobs/job-a.json`;
@@ -56,7 +58,11 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
       list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
         : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json" }] : [],
-      stat: async (path) => { await read(path); return { mtimeMs: mtime }; },
+      stat: async (path) => {
+        if (dirs.has(path)) return { kind: "dir", mtimeMs: mtime };
+        await read(path);
+        return { mtimeMs: mtime };
+      },
       write: async (path, text) => { files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
@@ -68,14 +74,16 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
         return text;
       },
     },
-    process: { run: async (args) => {
+    process: { run: async (args, options) => {
+      // Node names the command, not the directory, when a spawn's cwd is gone.
+      if (!dirs.has(options.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep") return { exitCode: 0, stdout: "123", stderr: "" };
       if (threads instanceof Error) throw threads;
       return { exitCode: 0, stdout: JSON.stringify({ threads }), stderr: "" };
     } },
     tool: { call: async () => assert.fail("no real monitors") },
-    ui: { open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: () => {}, toast: () => {},
+    ui: { open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text) => logs.push(text), toast: () => {},
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -89,7 +97,8 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened,
+    files, jobPath, viewPath, live, stored, listing, opened, logs,
+    removeDir: (path) => { dirs.delete(path); },
     holdViewRead: () => {
       let started, release;
       const reading = new Promise((resolve) => { started = resolve; });
@@ -216,6 +225,13 @@ test("live rows reconcile with disk even after dropping out or exhausting the qu
       else assert.match(rendered, new RegExp(["view", "inactive"].includes(ending) ? "completed" : ending), `${query}: ${ending}`);
     }
   }
+});
+
+test("a repository deleted after its jobs ran stops being polled without a log line", async () => {
+  const pane = await paneHarness();
+  pane.removeDir("/work");
+  for (let i = 0; i < 5; i++) await pane.tick();
+  assert.deepEqual(pane.logs, []);
 });
 
 test("forget uses task selectors and stays hidden until refresh rebuilds from disk", async () => {
