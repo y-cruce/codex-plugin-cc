@@ -10,6 +10,34 @@ import { loadState, readJobFile, resolveJobFile, resolveJobLogFile, resolveState
 
 beforeEach(isolateTestEnvironment);
 
+test("state lock recovers old empty and dead owners without removing fresh or live locks", (t) => {
+  for (const [name, content, age, recover] of [
+    ["old empty", "", 2000, true],
+    ["fresh empty", "", 0, false],
+    ["live owner", String(process.pid), 2000, false],
+    ["dead owner", "2147483647", 2000, true]
+  ]) {
+    const cwd = makeTempDir();
+    const lock = path.join(resolveStateDir(cwd), "state.lock");
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, content);
+    const time = new Date(Date.now() - age);
+    fs.utimesSync(lock, time, time);
+    const waiting = new Error("still waiting for lock");
+    t.mock.method(Atomics, "wait", () => { throw waiting; });
+    try {
+      if (recover) {
+        assert.doesNotThrow(() => upsertJob(cwd, { id: name }), name);
+        assert.equal(loadState(cwd).jobs[0].id, name);
+        assert.equal(fs.existsSync(lock), false);
+      } else {
+        assert.throws(() => upsertJob(cwd, { id: name }), (error) => error === waiting, name);
+        assert.equal(fs.readFileSync(lock, "utf8"), content, name);
+      }
+    } finally { t.mock.restoreAll(); }
+  }
+});
+
 test("concurrent job writers preserve both indices and artifacts", { timeout: BROKER_READY_MS + 35000 }, async (t) => {
   const workspace = makeTempDir();
   const gate = path.join(workspace, "start");

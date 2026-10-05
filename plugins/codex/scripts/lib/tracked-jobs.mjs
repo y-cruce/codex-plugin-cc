@@ -177,6 +177,15 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+export function failTrackedJob(job, error) {
+  const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? job;
+  const failed = { ...existing, status: "failed", phase: "failed", pid: null,
+    errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() };
+  writeJobFile(job.workspaceRoot, job.id, failed);
+  // The independent receipt must survive an unavailable index lock.
+  try { upsertJob(job.workspaceRoot, failed); } catch {}
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const runningRecord = {
     ...job,
@@ -186,10 +195,9 @@ export async function runTrackedJob(job, runner, options = {}) {
     pid: process.pid,
     logFile: options.logFile ?? job.logFile ?? null
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
-  upsertJob(job.workspaceRoot, runningRecord);
-
   try {
+    writeJobFile(job.workspaceRoot, job.id, runningRecord);
+    upsertJob(job.workspaceRoot, runningRecord);
     const execution = await runner();
     const completionStatus = jobStatusForTerminal(execution.terminal, execution.exitStatus);
     const completedAt = nowIso();
@@ -233,27 +241,10 @@ export async function runTrackedJob(job, runner, options = {}) {
     await execution.afterCompletion?.();
     return execution;
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
-    const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...existing,
-      status: "failed",
-      phase: "failed",
-      errorMessage,
-      pid: null,
-      completedAt,
-      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
-    });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage,
-      completedAt
-    });
-    await finishObservedJob(job.workspaceRoot, job.id);
+    try {
+      failTrackedJob(runningRecord, error);
+      await finishObservedJob(job.workspaceRoot, job.id);
+    } catch {}
     throw error;
   }
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { resolveJobHistoryAtStateDir } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
 import { threadRecordPaths } from "./thread-records.mjs";
+import { checkJobLiveness } from "./job-control.mjs";
 
 export async function readObservationJson(file) {
   try { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -62,17 +63,19 @@ export async function observationJobs(stateDir) {
 export async function observationThreads(stateDir, { finishedAfter } = /** @type {{ finishedAfter?: number }} */ ({})) {
   const threads = new Map();
   for (const entry of await observationJobs(stateDir)) {
+    entry.job = checkJobLiveness(entry.job.workspaceRoot, entry.job, null, new Map(), { persist: false });
     let history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
     const associatedQueued = history.layout === "legacy" && entry.job.status === "queued" &&
       typeof entry.job.recordId === "string" && entry.job.recordId;
     if (associatedQueued) history = threadRecordPaths(stateDir, entry.job.recordId);
     const view = await readObservationJson(history.liveView);
     if (history.layout === "legacy") {
+      const manifest = await readObservationJson(history.manifest);
       const job = view ?? entry.job;
       // A view is only as fresh as the last write its owner managed, so a job
       // whose owner died mid-flight leaves "running" in it for good. The job
       // record is written on the way out, so a terminal one overrides the view.
-      const status = terminalStatus(entry.job.status) ? entry.job.status : job.status;
+      const status = terminalStatus(entry.job.status) || !manifest ? entry.job.status : job.status;
       threads.set(entry.job.id, { thread: {
         id: entry.job.id,
         recordId: entry.job.id,
@@ -86,7 +89,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
         latestRoundId: entry.job.id,
         sessionIds: entry.job.sessionId ? [entry.job.sessionId] : [],
         viewPath: history.liveView,
-        historyAvailable: Boolean(await readObservationJson(history.manifest)),
+        historyAvailable: Boolean(manifest),
         layout: "legacy"
       }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
       continue;

@@ -40,12 +40,15 @@ export function checkJobLiveness(cwd, job, live, brokerFailures, options = {}) {
     : failures > 2 ? "broker unreachable" : null;
   if (!reason) return job;
   const fail = options.fail ?? ((workspaceRoot, current, errorMessage) => {
-    const latest = listJobs(workspaceRoot).find((item) => item.id === current.id);
-    if (!latest || (latest.status !== "queued" && latest.status !== "running")) return latest ?? current;
-    const patch = { id: current.id, status: "failed", phase: "failed", errorMessage, completedAt: new Date().toISOString() };
-    const stored = readStoredJob(workspaceRoot, current.id);
-    writeJobFile(workspaceRoot, current.id, { ...(stored ?? latest), ...patch });
-    upsertJob(workspaceRoot, patch);
+    const latest = options.persist === false ? current : readStoredJob(workspaceRoot, current.id) ??
+      listJobs(workspaceRoot).find((item) => item.id === current.id) ?? current;
+    if (latest.status !== "queued" && latest.status !== "running") return latest;
+    if (errorMessage === "owner process exited" && latest.pid !== current.pid && ownerProcessAlive(latest.pid) !== false) return latest;
+    const patch = { id: current.id, status: "failed", phase: "failed", pid: null, errorMessage, completedAt: new Date().toISOString() };
+    if (options.persist !== false) {
+      writeJobFile(workspaceRoot, current.id, { ...latest, ...patch });
+      try { upsertJob(workspaceRoot, patch); } catch {}
+    }
     return { ...current, ...patch };
   });
   return fail(cwd, job, reason);
@@ -338,14 +341,16 @@ export function buildStatusSnapshot(cwd, options = {}) {
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const selected = matchJobReference(jobs, reference);
+  const indexed = matchJobReference(jobs, reference, () => true, { allowMissing: true });
+  const stored = readStoredJob(workspaceRoot, indexed?.id ?? reference);
+  const selected = stored ? { ...indexed, ...stored } : indexed;
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
   }
 
   return {
     workspaceRoot,
-    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
+    job: enrichJob(checkJobLiveness(workspaceRoot, selected, null, new Map()), { maxProgressLines: options.maxProgressLines })
   };
 }
 

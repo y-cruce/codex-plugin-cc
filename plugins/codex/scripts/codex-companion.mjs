@@ -58,6 +58,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  failTrackedJob,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -803,7 +804,7 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+async function spawnDetachedTaskWorker(cwd, jobId) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     cwd,
@@ -812,25 +813,40 @@ function spawnDetachedTaskWorker(cwd, jobId) {
     stdio: "ignore",
     windowsHide: true
   });
+  await new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
   child.unref();
   return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+export async function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: process.pid,
     logFile,
     request
   };
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  let child;
+  try {
+    // Publish the dispatch owner's record before starting a detached worker.
+    upsertJob(job.workspaceRoot, queuedRecord);
+    writeJobFile(job.workspaceRoot, job.id, queuedRecord);
+    child = await spawnDetachedTaskWorker(cwd, job.id);
+    queuedRecord.pid = child.pid;
+    writeJobFile(job.workspaceRoot, job.id, queuedRecord);
+    upsertJob(job.workspaceRoot, queuedRecord);
+  } catch (error) {
+    try { if (child) terminateProcessTree(child.pid); } catch {}
+    try { failTrackedJob(queuedRecord, error); } catch {}
+    throw error;
+  }
 
   return {
     payload: {
@@ -986,7 +1002,7 @@ async function handleTask(argv) {
       requireTrackedThreadForWorkspace(workspaceRoot, resumeThreadId, executor);
     }
 
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = await enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -1377,8 +1393,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
-});
+// Run only as the entry point (tests import this module); compare real paths so a symlinked invocation still runs.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}

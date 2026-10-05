@@ -101,13 +101,24 @@ function withStateLock(cwd, action) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       try {
+        const stat = fs.statSync(lockFile);
         const owner = Number(fs.readFileSync(lockFile, "utf8"));
+        // PID publication is synchronous; allow a fresh empty lock to finish it.
+        if (owner === 0 && stat.size === 0 && Date.now() - stat.mtimeMs > 1000) {
+          const current = fs.statSync(lockFile);
+          if (current.dev === stat.dev && current.ino === stat.ino && current.mtimeMs === stat.mtimeMs &&
+              fs.readFileSync(lockFile, "utf8") === "") {
+            fs.unlinkSync(lockFile);
+            continue;
+          }
+        }
         if (Number.isSafeInteger(owner) && owner > 0) {
           try {
             process.kill(owner, 0);
           } catch (ownerError) {
             if (ownerError.code === "ESRCH" && Number(fs.readFileSync(lockFile, "utf8")) === owner) {
               fs.unlinkSync(lockFile);
+              continue;
             }
           }
         }

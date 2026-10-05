@@ -229,6 +229,8 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
         if (DONE.includes(job.status)) {
           view = { ...view, status: job.status as LiveView['status'], activeRoundId: null,
             endedAt: job.completedAt ?? view.endedAt ?? new Date(await $.clock.now()).toISOString() }
+        } else if (view.history.continuity === 'legacy') {
+          view = { ...view, status: job.status as LiveView['status'], endedAt: null }
         }
       }
       if (generation !== state.generation) return

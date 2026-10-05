@@ -7,6 +7,10 @@ import { pushLine, registerTaskPane, shouldDropMonitorExpiry } from "../plugins/
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
 import { askPane, renderPaneReply } from "../plugins/codex/scripts/lib/pane-channel.mjs";
+import { buildSingleJobSnapshot, readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
+import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
+import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const view = {
   pendingQuestion: { requestId: "0", text: "是否允许修改测试文件？", openedAt: "", expiresAt: null },
@@ -322,6 +326,39 @@ test("refresh waits for polling and refresh or pruning discards an old concurren
     await refreshed;
     await new Promise((resolve) => setImmediate(resolve));
     assert.doesNotMatch(await pane.render(), /Alpha task/, source);
+  }
+});
+
+test("orphan status and fallback pane rows follow the job instead of freezing the view", async (t) => {
+  isolateTestEnvironment(t);
+  for (const [status, dead] of [["running", true], ["queued", true], ["running", false], ["completed", false]]) {
+    for (const source of ["status", "threads"]) {
+      const cwd = makeTempDir();
+      const job = { id: "job-a", workspaceRoot: cwd, status, pid: dead ? 2147483647 : process.pid };
+      writeJobFile(cwd, job.id, job);
+      const directory = path.join(resolveStateDir(cwd), "job-history", job.id);
+      fs.mkdirSync(directory, { recursive: true });
+      const legacy = { schemaVersion: 1, jobId: job.id, status: "queued", history: { continuity: "legacy" } };
+      fs.writeFileSync(path.join(directory, "live-view.json"), JSON.stringify(legacy));
+      const expected = dead ? "failed" : status;
+      if (source === "status") {
+        const reported = buildSingleJobSnapshot(cwd, job.id).job;
+        assert.equal(reported.status, expected);
+        if (dead) {
+          assert.equal(reported.errorMessage, "owner process exited");
+          assert.equal(readStoredJob(cwd, job.id).pid, null);
+        }
+      }
+      const [{ thread }] = await observationThreads(resolveStateDir(cwd));
+      assert.equal(thread.status, expected, `${source}/${status}/${dead}`);
+      const pane = await paneHarness();
+      pane.files.set(pane.viewPath, { ...pane.live, status: "queued", history: { continuity: "legacy" } });
+      pane.files.set(pane.jobPath, { ...job, ...(source === "status" ? readStoredJob(cwd, job.id) : {}) });
+      pane.list(pane.listing.map((entry) => ({ ...entry, status: thread.status })));
+      await pane.tick();
+      assert.match(await pane.render(), new RegExp(expected), `${source}/${status}/${dead}`);
+      if (dead || status === "completed") assert.doesNotMatch(await pane.render(), /running|queued/);
+    }
   }
 });
 
