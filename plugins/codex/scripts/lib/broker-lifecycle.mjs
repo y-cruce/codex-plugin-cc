@@ -26,9 +26,9 @@ function connectToEndpoint(endpoint) {
 
 const BROKER_START_MS = 120000;
 
-export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
+export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000, signal = null) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (!signal?.aborted && Date.now() - start < timeoutMs) {
     const ready = await new Promise((resolve) => {
       const socket = connectToEndpoint(endpoint);
       socket.on("connect", () => {
@@ -178,6 +178,7 @@ async function ensureLockedBrokerSession(cwd, options) {
     clearBrokerSession(cwd);
   }
 
+  const failureLog = path.join(resolveStateDir(cwd), "broker-start-failure.log");
   const sessionDir = createBrokerSessionDir();
   const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
   const endpoint = endpointFactory(sessionDir, options.platform);
@@ -200,21 +201,44 @@ async function ensureLockedBrokerSession(cwd, options) {
   // which then binds: a second or two as a rule. But a new node process can sit
   // at _dyld_start, before its first instruction and with no CPU in use, for
   // tens of seconds -- past 45 s has been seen -- and a wait that runs out tears
-  // the broker down and reports it absent ("a shared broker is required"),
-  // which reads as a broken install. The startup lock above waits as long for
-  // the same broker.
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? BROKER_START_MS);
-  if (!ready) {
+  // the broker down. The startup lock above waits as long for the same broker.
+  const timeoutMs = options.timeoutMs ?? BROKER_START_MS;
+  const controller = new AbortController();
+  let rejectStartup;
+  const childFailure = new Promise((_, reject) => { rejectStartup = reject; });
+  const onExit = (code, signal) => rejectStartup(new Error(signal ? `exited with signal ${signal}` : `exited with code ${code}`));
+  const onError = (error) => rejectStartup(new Error(`failed to start: ${error.message}`));
+  child.once("exit", onExit);
+  child.once("error", onError);
+  let failure = null;
+  try {
+    const ready = await Promise.race([waitForBrokerEndpoint(endpoint, timeoutMs, controller.signal), childFailure]);
+    if (!ready) failure = new Error(`did not become ready within ${timeoutMs / 1000} s`);
+  } catch (error) {
+    failure = error;
+  } finally {
+    controller.abort();
+    child.off("exit", onExit);
+    child.off("error", onError);
+  }
+  if (failure) {
     // The process was started here and is given up on here: left running, it
     // binds late to a directory already removed and lingers until its idle exit.
-    teardownBrokerSession({
-      endpoint,
-      pidFile,
-      logFile,
-      sessionDir,
-      pid: child.pid ?? null,
-      killProcess: options.killProcess ?? terminateProcessTree
-    });
+    try {
+      fs.copyFileSync(logFile, failureLog);
+    } finally {
+      teardownBrokerSession({
+        endpoint,
+        pidFile,
+        logFile,
+        sessionDir,
+        pid: child.pid ?? null,
+        killProcess: options.killProcess ?? terminateProcessTree
+      });
+    }
+    if (options.requireBroker) {
+      throw new Error(`Shared Codex broker (pid ${child.pid ?? "unavailable"}) ${failure.message}. Log kept at ${failureLog}.`);
+    }
     return null;
   }
 
