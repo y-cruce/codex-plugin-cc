@@ -14,15 +14,9 @@ const DOT: Record<string, string> = {
 
 const DONE = ['completed', 'failed', 'cancelled']
 
-// The engine refuses a text child longer than 10000 characters and draws its own
-// body instead, so what reaches it is bounded -- per line, since Markdown lands
-// a line per child and a whole answer is worth reading. Cutting is not clip's
-// job here either: clip folds every newline into a space, and a message that
-// loses its line breaks loses its Markdown with them.
-const LINE = 8000
+// Keep individual messages readable without losing their line breaks.
 function shorten(text: string, limit: number): string {
-  const bounded = text.length <= limit ? text : `${text.slice(0, limit)}\u2026`
-  return bounded.split('\n').map(line => line.length <= LINE ? line : `${line.slice(0, LINE)}\u2026`).join('\n')
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`
 }
 
 // A tab only has to be recognizable, so it may lose its end -- but a cut made
@@ -96,9 +90,7 @@ export function paneBody(
     ] })
   })
 
-  // The engine refuses a text child longer than 10000 characters and draws its
-  // own body instead, so every string handed to liveTree is cut down first: a
-  // pane shows what a task is doing, not a whole answer.
+  // Bound each message and event so one long answer does not fill the trace.
   const trimmed: LiveView = {
     ...focused,
     // The card draws its running commands above the trace as a summary, which

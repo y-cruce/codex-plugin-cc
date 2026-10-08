@@ -17,14 +17,20 @@ const view = {
   lastMessage: { kind: "assistant", text: "四条都修好了", at: "" },
 };
 
-async function paneHarness(stored = new Map(), openResult, sessionId = "session") {
+async function paneHarness(stored = new Map(), openResult = { isPlaced: false, reason: "narrow terminal" }, sessionId = "session", options = {}) {
   const hooks = new Map();
   const timers = new Map();
   const opened = [];
   const files = new Map();
   const dirs = new Set(["/work"]);
   const logs = [];
-  const now = Date.now();
+  const debugLogs = [];
+  const now = options.now ?? Date.now();
+  let startedAt = options.startedAt ?? now;
+  const workspaceRoot = options.workspaceRoot ?? "/work";
+  dirs.add(workspaceRoot);
+  const statPaths = [];
+  const observed = [];
   const base = "/home/test/.claude/plugins/data/codex/state/main";
   const jobPath = `${base}/jobs/job-a.json`;
   const viewPath = `${base}/thread-records/record-a/live-view.json`;
@@ -36,14 +42,14 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false },
     history: { continuity: "complete", committedSeq: "0" },
   };
-  files.set(jobPath, { id: "job-a", sessionId, workspaceRoot: "/work", status: "running" });
+  files.set(jobPath, { id: "job-a", sessionId, workspaceRoot, status: "running" });
   files.set(viewPath, live);
   const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
     status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false }];
   let threads = listing;
   let writes = 0;
   let viewRead;
-  let mtime = now;
+  let mtime = options.mtime ?? now;
   const read = async (path) => {
     if (!files.has(path)) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
     return JSON.stringify(files.get(path));
@@ -51,7 +57,7 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
   const element = (type) => (props) => ({ type, ...props });
   const engine = {
     plugin: { name: "codex" },
-    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }) },
     env: { get: async () => "/home/test" },
     clock: { now: async () => now, every: (ms, fn) => timers.set(ms, fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => {
@@ -61,8 +67,9 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
     fs: {
       list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
         : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
-        : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json" }] : [],
+        : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json", kind: "file", mtimeMs: mtime, isLink: false, ...options.jobEntry }] : [],
       stat: async (path) => {
+        statPaths.push(path);
         if (dirs.has(path)) return { kind: "dir", mtimeMs: mtime };
         await read(path);
         return { mtimeMs: mtime };
@@ -83,11 +90,12 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
       if (!dirs.has(options.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep") return { exitCode: 0, stdout: "123", stderr: "" };
+      observed.push(options.cwd);
       if (threads instanceof Error) throw threads;
-      return { exitCode: 0, stdout: JSON.stringify({ threads }), stderr: "" };
+      return { exitCode: 0, stdout: JSON.stringify({ threads: options.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
     tool: { call: async () => assert.fail("no real monitors") },
-    ui: { open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text) => logs.push(text), toast: () => {},
+    ui: { panes: async () => options.panes ?? [], open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: () => {},
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -101,7 +109,7 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, statPaths, observed,
     removeDir: (path) => { dirs.delete(path); },
     holdViewRead: () => {
       let started, release;
@@ -118,6 +126,7 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
     close: async (kind = "person") => hooks.get("ui.close:")(engine, { id: "codex_tasks", origin: { kind } }, async () => {}),
     session: (value) => {
       sessionId = value;
+      startedAt = now;
       files.set(jobPath, { ...files.get(jobPath), sessionId });
       listing[0].sessionIds = [sessionId];
     },
@@ -130,11 +139,10 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
 test("the tasks button follows placement and only a person's close stops automatic opens", async (t) => {
   for (const [name, result, close] of [
     ["unplaced", { isPlaced: false, reason: "unasked below 144 columns" }, "person"],
-    ["no placement result", undefined, "person"],
     ["placed", { isPlaced: true }, "person"],
-    ["plugin close", { isPlaced: false }, "plugin"],
-    ["engine unload", { isPlaced: false }, "unload"],
-    ["command close", { isPlaced: false }, "command"],
+    ["plugin close", { isPlaced: false, reason: "narrow terminal" }, "plugin"],
+    ["engine unload", { isPlaced: false, reason: "narrow terminal" }, "unload"],
+    ["command close", { isPlaced: false, reason: "narrow terminal" }, "command"],
   ]) {
     await t.test(name, async () => {
       const pane = await paneHarness(new Map(), result);
@@ -164,6 +172,45 @@ test("the tasks button follows placement and only a person's close stops automat
       reloaded.session("new-session");
       await reloaded.tick();
       assert.equal(reloaded.opened.length, automatic + 1, "a new session allows automatic opens");
+    });
+  }
+});
+
+test("reload restores pane placement before its first render", async (t) => {
+  for (const [isShown, isPlaced] of [[true, true], [true, false], [false, true]]) {
+    await t.test(`shown ${isShown}, placed ${isPlaced}`, async () => {
+      const pane = await paneHarness(new Map(), undefined, "session", {
+        panes: [{ id: "codex_tasks", title: "Codex tasks", isShown, isPlaced, isFocused: false }],
+      });
+      assert.equal(pane.opened.length, 0, "poll does not reopen an existing pane");
+      const button = (await pane.band())?.children[0];
+      assert.equal(button?.key, isShown && isPlaced ? undefined : "codex_tasks_open");
+      if (isShown && isPlaced) assert.match((await pane.command("")).text, /closed/);
+      else {
+        await button.onPress();
+        assert.equal(pane.opened.at(-1).focus, true);
+        assert.equal(await pane.band(), undefined);
+      }
+    });
+  }
+});
+
+test("reload and resumed sessions discover jobs from the session's first start", async (t) => {
+  const now = Date.now();
+  const startedAt = now - 3_600_000;
+  for (const [name, jobEntry] of [["file", undefined], ["link", { kind: "other", isLink: true, mtimeMs: 0 }], ["directory", { kind: "dir", mtimeMs: 0 }]]) {
+    await t.test(name, async () => {
+      const options = { now, startedAt, mtime: now - 1_800_000, workspaceRoot: "/work/earlier", jobEntry };
+      const stored = new Map([["codex:tasks:session:since", now - 60_000]]);
+      const pane = await paneHarness(stored, undefined, "session", options);
+      assert.ok(pane.observed.includes(options.workspaceRoot), "resuming finds an earlier job in another repository");
+      assert.match(await pane.render(), /Alpha task/);
+      assert.equal(pane.statPaths.includes(pane.jobPath), Boolean(jobEntry), "only entries without a file mtime need stat");
+      const reloaded = await paneHarness(stored, undefined, "session", { ...options, now: now + 1_800_000 });
+      assert.ok(reloaded.observed.includes(options.workspaceRoot), "reload does not advance the scan floor");
+      assert.match(await reloaded.render(), /Alpha task/);
+      const beforeSession = await paneHarness(new Map(), undefined, "session", { ...options, mtime: startedAt - 1 });
+      assert.equal(beforeSession.observed.includes(options.workspaceRoot), false, "files from before the session are skipped");
     });
   }
 });
@@ -385,6 +432,8 @@ test("task pane follows the new session after clear on the first Bash dispatch",
   const stored = new Map();
   const now = 1_000_000;
   let sessionId = "session-a";
+  let startedAt = now - 3_600_000;
+  const usageStarts = [];
   let jobs = ["a.json"];
   const job = (id) => JSON.stringify({ sessionId: `session-${id}`, workspaceRoot: `/work/${id}` });
   const live = (id) => JSON.stringify({
@@ -394,14 +443,14 @@ test("task pane follows the new session after clear on the first Bash dispatch",
   });
   const engine = {
     plugin: { name: "codex" },
-    session: { surfaces: async () => ["terminal"], cwd: async () => "/work/main", id: async () => sessionId },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work/main", id: async () => sessionId, usage: async () => { usageStarts.push(startedAt); return { startedAt }; } },
     env: { get: async () => "/home/test" },
     clock: { now: async () => now, every: (ms, fn) => timers.push([ms, fn]) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => { stored.set(key, value); } },
     fs: {
       list: async (path) => path === "/home/test/.claude/plugins/data" ? [{ kind: "dir", name: "codex" }]
         : path === "/home/test/.claude/plugins/data/codex/state" ? [{ kind: "dir", name: "main" }]
-        : path.endsWith("/jobs") ? jobs.map((name) => ({ name })) : [],
+        : path.endsWith("/jobs") ? jobs.map((name) => ({ name, kind: "file", mtimeMs: name === "a.json" ? now - 1_800_000 : now, isLink: false })) : [],
       stat: async () => ({ mtimeMs: now }),
       read: async (path) => path.endsWith(".json") ? job(path.endsWith("a.json") ? "a" : "b")
         : live(path.endsWith("/a") ? "a" : "b"),
@@ -416,7 +465,7 @@ test("task pane follows the new session after clear on the first Bash dispatch",
           status: "running", sessionIds: [`session-${id}`], viewPath: `/view/${id}`, historyAvailable: false }] : [] }), stderr: "" };
     } },
     tool: { call: async (request) => { monitors.push(request); } },
-    ui: { open: async (request) => { opened.push(request); }, invalidate: () => {}, log: () => {}, toast: () => {} },
+    ui: { panes: async () => [], open: async (request) => { opened.push(request); return { isPlaced: true }; }, invalidate: () => {}, log: () => {}, toast: () => {} },
   };
   const on = (event, options, callback) => hooks.set(event, callback ?? options);
   const until = async (predicate) => {
@@ -432,13 +481,15 @@ test("task pane follows the new session after clear on the first Bash dispatch",
   assert.ok(monitors.some((request) => request.command.includes("--session session-a")));
 
   sessionId = "session-b";
+  startedAt = now;
   jobs = ["a.json", "b.json"];
   observed.length = 0;
   await hooks.get("tool.call")(engine, { command: "bash dispatch.sh" }, async () => {});
   await until(() => stored.has("codex:tasks:session-b"));
 
   assert.equal(timers.length, 3);
-  assert.equal(stored.get("codex:tasks:session-b:since"), now - 60_000);
+  assert.deepEqual(usageStarts, [now - 3_600_000, now]);
+  assert.equal(stored.has("codex:tasks:session-b:since"), false);
   assert.ok(observed.some((call) => call.cwd === "/work/b" && call.sessionId === "session-b"));
   assert.equal(observed.some((call) => call.cwd === "/work/a"), false);
   assert.ok(monitors.some((request) => request.command.includes("events --cwd /work/b --session session-b")));

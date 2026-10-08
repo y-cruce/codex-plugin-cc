@@ -154,7 +154,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       description: `Codex job events in ${root.split('/').at(-1) ?? root}`,
       timeout_ms: MONITOR_MS,
     }).catch((error: unknown) => {
-      $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`)
+      $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     })
   }
 }
@@ -175,7 +175,7 @@ async function companion($: EngineInterface, state: State, cwd: string, args: st
 // A job lives under the state directory of the repository it was dispatched
 // into, which is rarely the session's own cwd. Job files carry the Claude
 // session and the repository, so a scan finds every repository this session
-// dispatched to; stat keeps it cheap once hundreds of jobs have accumulated.
+// dispatched to; mtimes keep it cheap once hundreds of jobs have accumulated.
 async function discoverRoots($: EngineInterface, state: State) {
   const roots = new Set<string>([...state.roots, state.cwd])
   const data = `${state.home}/.claude/plugins/data`
@@ -188,8 +188,8 @@ async function discoverRoots($: EngineInterface, state: State) {
         if (!file.name.endsWith('.json')) continue
         const path = `${jobs}/${file.name}`
         try {
-          const stat = await $.fs.stat(path)
-          if (stat.mtimeMs < state.since) continue
+          const mtimeMs = file.kind === 'file' && !file.isLink ? file.mtimeMs : (await $.fs.stat(path)).mtimeMs
+          if (mtimeMs < state.since) continue
           // A pane follows only work this session dispatched; sharing the
           // repository is not ownership, and another session arms its own watch.
           const job = JSON.parse(await $.fs.read(path)) as { sessionId?: string; workspaceRoot?: string }
@@ -281,10 +281,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   for (const id of (await $.store.get(`${state.key}:forgotten`) ?? []) as string[]) state.forgotten.add(id)
   state.pending = []
   const now = await $.clock.now()
-  const sinceKey = `${state.key}:since`
-  const stored = await $.store.get(sinceKey)
-  state.since = typeof stored === 'number' ? stored : now - 60_000
-  if (typeof stored !== 'number') await $.store.set(sinceKey, state.since)
+  state.since = (await $.session.usage()).startedAt
   // A reload or /clear may leave an earlier session's watches running.
   state.monitors.clear()
   const armed = await $.store.get(`${state.key}:monitors`)
@@ -333,8 +330,7 @@ async function pollOnce($: EngineInterface, state: State) {
         // Said once, then the root is left alone. This runs every two seconds,
         // and a repository whose companion cannot start -- a missing dependency
         // in an installed copy, say -- otherwise writes the same line into the
-        // transcript for the rest of the session. `$.ui.log` is the only channel
-        // there is, and it always lands in the transcript as well as the log.
+        // transcript for the rest of the session.
         const failures = (state.unreadable.get(root) ?? 0) + 1
         state.unreadable.set(root, failures)
         if (failures === GIVE_UP) {
@@ -464,8 +460,10 @@ async function pollOnce($: EngineInterface, state: State) {
       state.opened = true
       const opened = await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
         .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
-      // Older declarations say void; otherwise Pane render supplies the proof.
-      if ((opened as unknown as { isPlaced?: boolean } | undefined)?.isPlaced === true) state.shown = true
+      if (opened) {
+        if (opened.isPlaced === true) state.shown = true
+        else $.ui.log(`Codex tasks pane: ${opened.reason}`, { to: 'debug' })
+      }
     }
     if (!lines.length && !state.pending.length) {
       // Written even with nothing to say: this round still moved cursors and
@@ -599,6 +597,9 @@ async function bootstrap($: EngineInterface, state: State, push: boolean) {
     // began, not when the module last loaded: otherwise every job dispatched
     // before the reload drops out of the pane.
     await bindSession($, state, await $.session.id())
+    const pane = (await $.ui.panes()).find(pane => pane.id === PANE)
+    state.opened = Boolean(pane)
+    state.shown = Boolean(pane?.isShown && pane.isPlaced)
     $.clock.every(500, () => { void refreshViews($, state) })
     $.clock.every(2000, () => { void poll($, state).then(() => answer($, state)) })
     // The heading's clock moves on its own, and nothing else asks for the redraw
@@ -792,9 +793,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   })
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    // A reload builds a fresh state while the pane it left behind is still on
-    // screen, and the band would offer to open one that is already open. The
-    // pane asking to be drawn is the proof that it is.
+    // An unasked pane waiting for room may now be placed after a resize.
     state.opened = true
     state.shown = true
     const threads = visibleThreads(state)
