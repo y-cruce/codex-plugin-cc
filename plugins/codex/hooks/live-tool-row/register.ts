@@ -146,6 +146,7 @@ export function register(on: On, followed?: Set<string>) {
     const jobs = [...new Set(state.rows.values())].flatMap(job => job.data ? [job.data] : [])
     const text = statusText(jobs, state.now)
     if (!text) return next(e)
+    if (e.surface === 'terminal') return next({ ...e, props: { ...e.props, tail: text } })
     const { Text } = $.ui.resolve(e)
     const columns = Math.max(1, e.viewport?.columns ?? 120)
     const hint = clip(e.props.hint, columns)

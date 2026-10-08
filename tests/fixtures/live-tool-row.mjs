@@ -24,7 +24,7 @@ export function test(name, fn) {
     };
     const element = type => ({ children, ...props }) => ({ type, props, children: Array.isArray(children) ? children : [children ?? ''] });
     const $ = {
-      ui: { status: text => { void dispatch('ui.status', { text }); }, toast: (text, options) => { void dispatch('ui.toast', { text, ...options }); }, render: e => dispatch('ui.render', e), resolve: () => ({ Box: element('Box'), Text: element('Text'), Code: element('Code') }), invalidate: event => { void dispatch('ui.invalidate', { event }); } },
+      ui: { status: text => { void dispatch('ui.status', { text }); }, toast: (text, options) => { void dispatch('ui.toast', { text, ...options }); }, render: e => dispatch('ui.render', e), resolve: () => ({ Box: element('Box'), Text: element('Text'), Markdown: element('Markdown') }), invalidate: event => { void dispatch('ui.invalidate', { event }); } },
       fs: { stat: path => dispatch('fs.stat', { path }), read: path => dispatch('fs.read', { path }) },
       process: { run: (argv, init) => dispatch('process.run', { argv, init }) },
       session: { cwd: () => dispatch('session.cwd') },
@@ -88,11 +88,11 @@ export function resultRow(output, props = {}) {
 export function world($, on) {
   const clock = mock.clock($);
   mock.env(on, { HOME: '/home/test' });
-  const state = { text: JSON.stringify(fixture()), mtime: 1, reads: 0, stats: 0, runs: [], invalidations: [], statuses: [], toasts: [], missing: false, unknown: false };
+  const state = { text: JSON.stringify(fixture()), mtime: 1, reads: 0, stats: 0, runs: [], invalidations: [], statuses: [], hints: [], toasts: [], missing: false, unknown: false };
   on('session.cwd', () => '/work');
   on('ui.render', { component: 'ToolUse' }, () => ({ type: 'Text', children: ['native Bash row'] }));
   on('ui.render', { component: 'ToolResult' }, () => ({ type: 'Text', children: ['native Bash result'] }));
-  on('ui.render', { component: 'PromptHint' }, (_, e) => ({ type: 'Text', children: [e.props.hint] }));
+  on('ui.render', { component: 'PromptHint' }, (_, e) => { state.hints.push(e); return { type: 'Text', children: [e.props.hint] }; });
   on('ui.status', (_, e) => { state.statuses.push(e.text); });
   on('ui.toast', (_, e) => { state.toasts.push(e); });
   on('ui.invalidate', (_, e) => { state.invalidations.push(e); });
@@ -107,8 +107,8 @@ export function world($, on) {
 }
 export function textOf(tree) {
   if (typeof tree === 'string') return tree;
-  if (tree.type === 'Code') return tree.props.source;
-  return (tree.children ?? []).map(textOf).join(tree.type === 'Box' ? '\n' : '');
+  if (tree.type === 'Markdown') return tree.props.text;
+  return (tree.children ?? []).map(textOf).join(tree.type === 'Box' && tree.props?.flexDirection !== 'row' ? '\n' : '');
 }
 
 export function hint(props = {}, columns = 120) {

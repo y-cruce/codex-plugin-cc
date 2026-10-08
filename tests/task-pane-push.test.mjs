@@ -88,7 +88,7 @@ async function paneHarness(stored = new Map(), openResult, sessionId = "session"
     } },
     tool: { call: async () => assert.fail("no real monitors") },
     ui: { open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text) => logs.push(text), toast: () => {},
-      scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Button"].map((key) => [key, element(key)])) },
+      scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
   const settle = async (previous) => {
@@ -500,7 +500,7 @@ test("a thread is over when it has no active round, with legacy views unchanged"
 
 test("task pane renders one thread row with both rounds in trace order", () => {
   const element = (type) => ({ children, ...props }) => ({ type, props, children: Array.isArray(children) ? children : [children ?? ""] });
-  const ui = { Box: element("Box"), Text: element("Text"), Code: element("Code"), Button: element("Button") };
+  const ui = { Box: element("Box"), Text: element("Text"), Code: element("Code"), Markdown: element("Markdown"), Button: element("Button") };
   const data = {
     schemaVersion: 1, recordId: "task-old", jobId: "task-new", label: "newest", threadId: "thread-1",
     startedAt: "2026-09-21T01:00:00Z", endedAt: "2026-09-21T02:00:00Z", turnId: "turn-new",
@@ -528,6 +528,7 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   const visit = (value) => {
     if (typeof value === "string") return value;
     nodes.push(value);
+    if (value.type === "Markdown") return value.props.text;
     return (value.children ?? []).map(visit).join("\n");
   };
   const text = visit(tree);

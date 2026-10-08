@@ -200,7 +200,7 @@ describe('live ToolUse row', () => {
     const command = rows.find(r => r.text === '● Ran 1 shell command');
     assert.equal(command.wrap, 'truncate-end');
     const message = rows.find(r => r.text.startsWith('›'));
-    assert.equal(message.wrap, 'wrap');
+    assert.equal(rowsOf(tree).find(node => textOf(node).startsWith('›')).children[1].children[0].type, 'Markdown');
     assert.equal(message.text, '› first line\nsecond line that is quite a bit longer than forty columns end');
     // Thinking is not part of the trace; only the answer and the work are.
     assert.equal(rows.find(r => r.text.includes('older thought')), undefined);
@@ -421,7 +421,8 @@ describe('live row polish', () => {
     await $.ui.render(row()); await clock.settle();
     await $.ui.render(row(undefined, { tool_use_id: 'duplicate' }));
     const initial = textOf(await $.ui.render(hint()));
-    assert.match(initial, /^Codex · 1 running/);
+    assert.equal(initial, '? for shortcuts');
+    assert.match(state.hints.at(-1).props.tail, /^Codex · 1 running/);
     await clock.advance(500);
     assert.equal(textOf(await $.ui.render(hint())), initial);
     state.mtime++; state.text = JSON.stringify({ ...data, status: 'completed' });
@@ -491,7 +492,7 @@ describe('live row polish', () => {
     accept({ type: "subAgentActivity", id: "spawn", agentThreadId: "child", agentPath: "/root/baseline", kind: "started" }, false, "item/started");
     accept({ type: "commandExecution", id: "cmd", command: "pwd", cwd: "/work" }, true, "item/started");
     accept({ type: "agentMessage", id: "after", text: "**parent** after" });
-    assert.deepEqual(texts().slice(2), ["› parent before", " ", "⇢ baseline · running", "    $ pwd", " ", "› parent after"]);
+    assert.deepEqual(texts().slice(2), ["› parent before", " ", "⇢ baseline · running", "    $ pwd", " ", "› **parent** after"]);
     const anchor = texts().findIndex(text => text.startsWith("⇢"));
     accept({ type: "agentMessage", id: "child-message", text: "old child message" }, true);
     accept({ type: "commandExecution", id: "cmd", command: "pwd", exitCode: 1, aggregatedOutput: "old child warning" }, true);
@@ -510,7 +511,7 @@ describe('live row polish', () => {
       assert.equal(summaries[0].props.dimColor, true);
       assert.ok(summaries[0].children.every(child => typeof child === "string"));
       assert.doesNotMatch(nodes.map(textOf).join("\n"), /old child|late child|\[baseline\]|sub-agent|pwd/);
-      assert.ok(nodes.find(node => textOf(node).includes("parent after")).children.some(child => child.props?.bold));
+      assert.ok(nodes.some(node => textOf(node).includes("**parent** after")));
     }
     assert.equal(texts().findIndex(text => text.startsWith("⇢")), anchor);
     data.tail = data.tail.filter(event => event.type === "message.completed" && !event.agent && event.positionSeq !== "1");
@@ -580,7 +581,8 @@ describe('live row polish', () => {
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
     for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['→', 'cyan', false]]) {
-      const node = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
+      const row = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
+      const node = row.type === 'Box' ? row.children[0] : row;
       assert.equal(node.props.color, color); assert.equal(node.props.dimColor, dim);
     }
     // reasoning.completed is in the tail above and must not reach the tree.
@@ -701,67 +703,19 @@ describe('live row polish', () => {
 });
 
 describe('Markdown and prompt footer', () => {
-  test('commits earlier Markdown blocks and streams the unfinished prose that follows', ($, on) => {
+  test('shows unfinished Markdown as sanitized plain text until the message pauses', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
-    const committed = '# Heading\n\n- **item**\n\n| A | B |\n|--|--|\n| one | two |\n\n```ts\nconst x = 1\n\nreturn x\n```\n\n';
-    const last = '**writing** `code` [a](/x/y\u001b';
-    const nodes = markdown(ui, committed + last, { dimColor: true }, '› ', 100, true);
-    // Everything before the unfinished block still renders as it finally will.
-    assert.deepEqual(nodes.slice(0, -2), markdown(ui, committed, { dimColor: true }, '› ', 100));
-    // Prose has no block form to snap into, so it is shown as it arrives: an
-    // agent that streams one unbroken paragraph would otherwise show nothing
-    // but the marker for the whole run.
-    assert.match(textOf(nodes.at(-2)), /writing/);
-    assert.equal(nodes.at(-1).type, 'Text');
-    assert.equal(nodes.at(-1).props.dimColor, true);
-    assert.equal(textOf(nodes.at(-1)), '…');
-    assert.ok(nodes.some(node => node.type === 'Code'));
-    assert.ok(nodes.some(node => node.type === 'Box'));
-  });
-  test('a single streaming block shows only the prefixed ellipsis until it completes', ($, on) => {
-    world($, on);
-    for (const source of ['# **Title**\n- *item* [a](/x/y', '| A | B |\n|--|--|\n| x | [a](/x/y']) {
-      const nodes = markdown($.ui.resolve(row()), source, {}, '› ', 100, true);
-      assert.equal(nodes.length, 1);
-      assert.equal(nodes[0].type, 'Text');
-      assert.equal(nodes[0].props.dimColor, true);
-      assert.equal(textOf(nodes[0]), '› …');
+    for (const source of ['修复了 **三', '见 [文档](http', '```ts\nconst x = 1\n\n', '# Heading\n\n- item']) {
+      const nodes = markdown(ui, source + '\u001b', {}, '› ', 100, true);
+      assert.equal(nodes[0].children[1].children[0].type, 'Text');
+      assert.equal(textOf(nodes[0]), `› ${source}`);
+      assert.equal(textOf(nodes[1]), '…');
+      assert.equal(nodes[1].props.dimColor, true);
+      assert.equal(markdown(ui, source, {}, '› ', 100)[0].children[1].children[0].type, 'Markdown');
     }
   });
-  test('holds streaming prose at a marker that has not closed yet', ($, on) => {
-    world($, on);
-    // A marker drawn before it closes is a literal asterisk or backtick that
-    // vanishes a keystroke later; the span appears once it is whole.
-    const cases = [
-      ['修复了 **三', '› 修复了 …'],
-      ['修复了 **三处**', '› 修复了 三处…'],
-      ['用 `npm te', '› 用 …'],
-      ['见 [文档](http', '› 见 …'],
-      ['见 [文档](http://x) 了', '› 见 文档 了…'],
-      // An underscore inside a word never opens emphasis, so identifiers flow.
-      ['改了 snake_case 两处', '› 改了 snake_case 两处…'],
-    ];
-    for (const [source, expected] of cases) {
-      assert.equal(markdown($.ui.resolve(row()), source, {}, '› ', 100, true).map(textOf).join(''), expected, source);
-    }
-  });
-  test('hides an unclosed fence including internal blank lines and commits only after its closing blank line', ($, on) => {
-    world($, on);
-    const ui = $.ui.resolve(row());
-    for (const fence of ['```', '~~~~']) {
-      const source = `${fence}ts\n**raw**\n\n[a](/x/y\n\n`;
-      for (const prefix of ['', '# Ready\n\n']) {
-        const nodes = markdown(ui, prefix + source, {}, '', 100, true);
-        assert.equal(textOf(nodes.at(-1)), '…');
-        assert.ok(nodes.every(node => node.type !== 'Code'));
-        assert.doesNotMatch(textOf({ type: 'Box', children: nodes }), /raw/);
-      }
-      assert.equal(markdown(ui, source + fence, {}, '', 100, true)[0].type, 'Text');
-      assert.equal(markdown(ui, source + fence + '\n\n', {}, '', 100, true)[0].type, 'Code');
-    }
-  });
-  test('keeps transcript message previews compact and always renders result cards as Markdown', async ($, on) => {
+  test('shows streaming previews as text and renders completed cards through Markdown', async ($, on) => {
     const { state, clock } = world($, on);
     const data = fixture(); data.activeCommands = []; data.files = [];
     data.lastMessage.text = '| Name | Detail |\n|--|--|\n| file | [a](/x/y) |';
@@ -769,67 +723,26 @@ describe('Markdown and prompt footer', () => {
     state.text = JSON.stringify(data);
     await $.ui.render(row()); await clock.settle();
     let tree = await $.ui.render(row());
-    assert.match(textOf(tree), /› older/);
+    assert.match(textOf(tree), /› \*\*older\*\*/);
     assert.equal(textOf(rowsOf(tree).at(-1)), '…');
-    assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
+    assert.equal(rowsOf(tree).find(node => node.type === 'Box').children[1].children[0].type, 'Markdown');
     const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
-    assert.deepEqual(rowsOf(result).filter(node => node.type === 'Box').map(node => node.children.map(textOf)), [['Name', 'Detail'], ['file', 'a']]);
+    assert.equal(rowsOf(result).find(node => node.type === 'Markdown').props.text, data.lastMessage.text);
     data.tail.at(-1).type = 'message.completed';
     state.text = JSON.stringify(data); state.mtime++;
     await clock.advance(500);
     tree = await $.ui.render(row());
     assert.equal(textOf(rowsOf(tree).at(-1)), '› truncated');
-    assert.ok(rowsOf(tree).every(node => node.type !== 'Box'));
+    assert.equal(rowsOf(tree).find(node => node.type === 'Box').children[1].children[0].type, 'Markdown');
   });
-  test('renders inline bold, both italics, cyan code and link labels in wrapping paragraphs', ($, on) => {
+  test('hands complete sanitized Markdown to the host without the old code limit', ($, on) => {
     world($, on);
-    const nodes = markdown($.ui.resolve(row()), '**bold** *star* _under_ `code` [title](https://example.com)\nnext\u001b');
+    const source = '# Heading\n\n**bold** [link](https://example.com)\n\n```ts\n' + 'x'.repeat(10001) + '\u001b\n```';
+    const nodes = markdown($.ui.resolve(row()), source, { dimColor: true });
     assert.equal(nodes.length, 1);
-    assert.equal(nodes[0].props.wrap, 'wrap');
-    assert.equal(textOf(nodes[0]), 'bold star under code title\nnext');
-    for (const [text, key, value] of [['bold', 'bold', true], ['star', 'italic', true], ['under', 'italic', true], ['code', 'color', 'cyan']]) {
-      const node = nodes[0].children.find(node => textOf(node) === text);
-      assert.equal(node.props[key], value);
-      assert.equal(node.props.inverse, undefined);
-    }
-  });
-  test('renders all six heading levels and two-level unordered and ordered lists', ($, on) => {
-    world($, on);
-    const ui = $.ui.resolve(row());
-    const headings = markdown(ui, Array.from({ length: 6 }, (_, n) => `${'#'.repeat(n + 1)} Title`).join('\n'));
-    assert.equal(headings.length, 6);
-    assert.ok(headings.every(node => node.props.bold && textOf(node) === 'Title'));
-    const lists = markdown(ui, '- first\n    * nested\n+ next\n1. one\n    2. two\n3. three');
-    assert.deepEqual(lists.map(textOf), ['• first', '  • nested', '• next', '1. one', '  2. two', '3. three']);
-  });
-  test('uses Code with language and sanitizes controls; quotes are dim', ($, on) => {
-    world($, on);
-    const nodes = markdown($.ui.resolve(row()), '```ts\nconst a = 1;\u001b\n\treturn a;\n```\n> **quoted**');
-    assert.equal(nodes[0].type, 'Code');
-    assert.equal(nodes[0].props.language, 'ts');
-    assert.equal(nodes[0].props.source, 'const a = 1;\n return a;');
-    assert.equal(nodes[1].props.dimColor, true);
-    assert.equal(textOf(nodes[1]), 'quoted');
-    const plain = markdown($.ui.resolve(row()), '~~~\nplain\n~~~');
-    assert.equal(plain[0].type, 'Code');
-    assert.equal(plain[0].props.language, undefined);
-  });
-  test('keeps unknown syntax, tables and horizontal rules unchanged', ($, on) => {
-    world($, on);
-    const nodes = markdown($.ui.resolve(row()), '~~strike~~ <tag> {unknown} **unclosed ``unknown`` ![image](url)\n| **raw** | table |\n---');
-    assert.deepEqual(nodes.map(textOf), ['~~strike~~ <tag> {unknown} **unclosed ``unknown`` ![image](url)', '| **raw** | table |', '---']);
-  });
-  test('caps code at 10000 characters and appends a separate dim ellipsis only on overflow', ($, on) => {
-    world($, on);
-    for (const size of [10000, 10001]) {
-      const nodes = markdown($.ui.resolve(row()), `\`\`\`js\n${'x'.repeat(size)}\n\`\`\``);
-      assert.equal(nodes[0].props.source.length, 10000);
-      assert.equal(nodes.length, size === 10000 ? 1 : 2);
-      if (size > 10000) {
-        assert.equal(textOf(nodes[1]), '…');
-        assert.equal(nodes[1].props.dimColor, true);
-      }
-    }
+    assert.equal(nodes[0].type, 'Markdown');
+    assert.equal(nodes[0].props.text, source.replace('\u001b', ''));
+    assert.equal(nodes[0].props.dimColor, true);
   });
   test('renders older and full newest assistant text and result Markdown while thinking stays out', ($, on) => {
     world($, on);
@@ -842,39 +755,54 @@ describe('Markdown and prompt footer', () => {
     ];
     const ui = $.ui.resolve(row());
     let tree = liveTree(ui, data, 120, 0, undefined, undefined, 200);
-    assert.match(textOf(tree), /› older\n \n› Full answer\nconst full = true/);
+    assert.match(textOf(tree), /› \*\*older\*\*\n \n› # Full answer\n```ts\nconst full = true\n```/);
     // The trace shows the answer and the work; the thinking behind it stays out.
     assert.doesNotMatch(textOf(tree), /plain|raw/);
     tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
-    assert.equal(rowsOf(tree)[1].props.bold, true);
-    assert.equal(rowsOf(tree)[2].type, 'Code');
+    assert.equal(rowsOf(tree)[1].type, 'Markdown');
+    assert.equal(rowsOf(tree)[1].props.text, data.lastMessage.text);
     // A job whose final output is a thought still reports it on the result card,
     // which draws lastMessage rather than the trace.
     data.lastMessage = { ...data.lastMessage, kind: 'reasoning', text: '**raw thought**' };
     tree = liveTree(ui, data, 120, 0, undefined, { kind: 'DONE' });
     assert.ok(rowsOf(tree).find(node => textOf(node).includes('**raw thought**')).props.dimColor);
   });
-  test('PromptHint draws cyan Codex and dim status, appends only hints that fit, and uses the shared tick', async ($, on) => {
+  test('terminal PromptHint preserves the engine hint and delegates the status tail at every width', async ($, on) => {
     const { state, clock } = world($, on);
     await $.ui.render(row()); await clock.settle();
-    let tree = await $.ui.render(hint());
+    const own = statusText([fixture()], Date.parse(fixture().startedAt));
+    for (const columns of [1, 40, 120]) {
+      const input = hint({ hint: '中文 ? for shortcuts' }, columns);
+      await $.ui.render(input);
+      const forwarded = state.hints.at(-1);
+      assert.equal(forwarded.props.hint, input.props.hint);
+      assert.equal(forwarded.props.tail, own);
+      assert.equal(input.props.tail, undefined);
+    }
+    state.invalidations.length = 0;
+    await clock.advance(1000);
+    await $.ui.render(hint());
+    assert.match(state.hints.at(-1).props.tail, /fixture task 1s/);
+    assert.equal(state.invalidations.length, 1);
+    assert.equal(clock.timers.size, 1);
+    assert.deepEqual(state.statuses, []);
+  });
+  test('desktop PromptHint retains cyan Codex, dim status and hint fitting', async ($, on) => {
+    const { state, clock } = world($, on);
+    await $.ui.render(row()); await clock.settle();
+    const desktopHint = (props = {}, columns = 120) => ({ ...hint(props, columns), surface: 'desktop' });
+    let tree = await $.ui.render(desktopHint());
     assert.equal(textOf(tree), 'Codex · 1 running · fixture task 0s $ npm test  ? for shortcuts');
     assert.equal(tree.children[0].props.color, 'cyan');
     assert.ok(tree.children.slice(1).every(node => node.props.dimColor));
     const own = statusText([fixture()], Date.parse(fixture().startedAt));
     for (const columns of [own.length, own.length + 16]) {
-      tree = await $.ui.render(hint({}, columns));
+      tree = await $.ui.render(desktopHint({}, columns));
       assert.equal(textOf(tree), own);
     }
-    assert.equal(textOf(await $.ui.render(hint({}, own.length + 17))), `${own}  ? for shortcuts`);
-    assert.equal(textOf(await $.ui.render(hint({ hint: '中文' }, own.length + 5))), own);
-    assert.equal(textOf(await $.ui.render(hint({ hint: '中文' }, own.length + 6))), `${own}  中文`);
-    state.invalidations.length = 0;
-    await clock.advance(1000);
-    assert.match(textOf(await $.ui.render(hint())), /fixture task 1s/);
-    assert.equal(state.invalidations.length, 1);
-    assert.equal(clock.timers.size, 1);
-    assert.deepEqual(state.statuses, []);
+    assert.equal(textOf(await $.ui.render(desktopHint({}, own.length + 17))), `${own}  ? for shortcuts`);
+    assert.equal(textOf(await $.ui.render(desktopHint({ hint: '中文' }, own.length + 5))), own);
+    assert.equal(textOf(await $.ui.render(desktopHint({ hint: '中文' }, own.length + 6))), `${own}  中文`);
   });
   test('PromptHint passes the original event through when no job exists or the prompt is a draft', async ($, on) => {
     const seen = [];
@@ -914,51 +842,9 @@ describe('Markdown and prompt footer', () => {
   });
 });
 
-describe('table layout, body indent and startup noise', () => {
+describe('body indent and startup noise', () => {
   const source = '| Name | Detail |\n|---|:--:|\n| 中文😀 | **bold** *italic* `code` [link](https://example.com) |\n| second | final cell |';
-  test('fits table columns by visible terminal cells, hides separator and formats cells', ($, on) => {
-    world($, on);
-    const nodes = markdown($.ui.resolve(row()), source, {}, '', 100);
-    assert.equal(nodes.length, 3);
-    assert.deepEqual(nodes[0].children.map(node => node.props.width), [6, 21]);
-    for (const node of nodes) {
-      assert.equal(node.props.flexDirection, 'row');
-      assert.equal(node.props.columnGap, 2);
-      assert.ok(node.children.every(cell => cell.props.flexShrink === 0 && cell.children[0].props.wrap === 'truncate-end'));
-    }
-    assert.ok(nodes[0].children.every(cell => cell.children[0].props.bold));
-    const parts = nodes[1].children[1].children[0].children;
-    for (const [text, prop, value] of [['bold', 'bold', true], ['italic', 'italic', true], ['code', 'color', 'cyan']]) {
-      assert.equal(parts.find(part => textOf(part) === text).props[prop], value);
-    }
-    assert.equal(parts.map(textOf).join(''), 'bold italic code link');
-    assert.doesNotMatch(nodes.map(textOf).join('\n'), /---|:--:|`|https:/);
-  });
-  test('compresses proportionally with an eight-cell minimum and preserves full wrapping text', ($, on) => {
-    world($, on);
-    const nodes = markdown($.ui.resolve(row()), source, {}, '', 24);
-    assert.deepEqual(nodes[0].children.map(node => node.props.width), [8, 14]);
-    assert.ok(nodes.every(node => node.children.every(cell => cell.children[0].props.wrap === 'wrap')));
-    assert.equal(textOf(nodes[1].children[1]), 'bold italic code link');
-    const wide = markdown($.ui.resolve(row()), '| A | B | C |\n|--|--|--|\n| 12345678901234567890 | 1234567890123456789012345678901234567890 | x |', {}, '', 44);
-    assert.deepEqual(wide[0].children.map(cell => cell.props.width), [10, 22, 8]);
-  });
-  test('falls back to header-labelled rows below the minimum including gaps, with blank row separators', ($, on) => {
-    world($, on);
-    const ui = $.ui.resolve(row());
-    const nodes = markdown(ui, source, {}, '', 17);
-    assert.deepEqual(nodes.map(textOf), ['Name: 中文😀', 'Detail: bold italic code link', ' ', 'Name: second', 'Detail: final cell']);
-    assert.ok(nodes.filter(node => textOf(node) !== ' ').every(node => node.props.wrap === 'wrap'));
-    assert.equal(nodes[1].children.find(node => textOf(node) === 'code').props.color, 'cyan');
-    assert.equal(markdown(ui, source, {}, '', 18)[0].type, 'Box');
-  });
-  test('pads irregular rows to the maximum column count and accepts optional outer pipes and escaped pipes', ($, on) => {
-    world($, on);
-    const nodes = markdown($.ui.resolve(row()), 'A | B\n--|--\n`x\\|y` | two | extra\nonly |', {}, '', 100);
-    assert.ok(nodes.every(node => node.children.length === 3));
-    assert.deepEqual(nodes.map(node => node.children.map(textOf)), [['A', 'B', ''], ['x|y', 'two', 'extra'], ['only', '', '']]);
-  });
-  test('indents every body node two cells and subtracts two from clipping and Markdown layout in live and result cards', ($, on) => {
+  test('indents every body node two cells and subtracts two from clipping and the native Markdown container in live and result cards', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
     const data = fixture();
@@ -972,8 +858,9 @@ describe('table layout, body indent and startup noise', () => {
       const body = tree.children[1];
       assert.equal(body.props.paddingLeft, 2);
       assert.equal(body.children[0].props.width, 24);
-      const tables = rowsOf(tree).filter(node => node.type === 'Box');
-      assert.deepEqual(tables[0].children.map(cell => cell.props.width), [8, 14]);
+      const message = result ? rowsOf(tree).find(node => node.type === 'Markdown')
+        : rowsOf(tree).find(node => node.type === 'Box').children[1].children[0];
+      assert.equal(message.props.text, source);
       if (!result) {
         assert.equal(textOf(rowsOf(tree).at(-1)), 'x'.repeat(24));
         assert.ok(rowsOf(tree).some(node => textOf(node) === ' '));

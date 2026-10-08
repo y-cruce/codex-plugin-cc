@@ -173,7 +173,7 @@ function planLines(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, data: LiveVie
   ] })]
 }
 
-export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number, headingLast = false, fold?: Fold) {
+export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdown'>, data: LiveView, columns: number, now: number, rows?: number, result?: { kind: 'DONE' | 'FAILED' }, maxTail?: number, headingLast = false, fold?: Fold) {
   const { Box, Text } = ui
   const fullTrace = maxTail !== undefined
   const executor = data.executor?.label ?? 'Codex'

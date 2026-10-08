@@ -53,7 +53,7 @@ function taskLabel(position: number, data: LiveView, executor: string, room: num
 }
 
 export function paneBody(
-  ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Button'>,
+  ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Markdown' | 'Button'>,
   threads: LiveView[],
   columns: number,
   rows: number,
