@@ -17,6 +17,10 @@ const view = {
   lastMessage: { kind: "assistant", text: "四条都修好了", at: "" },
 };
 
+const clockSleep = (_ms, { signal }) => new Promise((_, reject) => {
+  signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+});
+
 async function paneHarness(stored = new Map(), openResult = { isPlaced: false, reason: "narrow terminal" }, sessionId = "session", options = {}) {
   const hooks = new Map();
   const timers = new Map();
@@ -56,15 +60,16 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   };
   const element = (type) => (props) => ({ type, ...props });
   const engine = {
-    plugin: { name: "codex" },
+    plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }) },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => now, every: (ms, fn) => timers.set(ms, fn) },
+    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => {
       stored.set(key, value);
       if (key === `codex:tasks:${sessionId}`) writes++;
     } },
     fs: {
+      exists: async (path) => path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
       list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
         : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json", kind: "file", mtimeMs: mtime, isLink: false, ...options.jobEntry }] : [],
@@ -135,6 +140,67 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
+
+test("tasks reports a stalled start and retries without a companion discovery process", async () => {
+  const hooks = new Map();
+  const timers = [];
+  const stored = new Map();
+  const entered = Promise.withResolvers();
+  const stalled = Promise.withResolvers();
+  const sleeps = [];
+  const opened = [];
+  let firstRead = true;
+  const engine = {
+    plugin: { name: "codex", root: "/plugin" },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => "session", usage: async () => ({ startedAt: 0 }) },
+    env: { get: async () => "/home/test" },
+    clock: { now: async () => 0, every: (ms, fn) => timers.push([ms, fn]), sleep: (ms, { signal }) => {
+      const wait = Promise.withResolvers();
+      sleeps.push({ ms, signal, ...wait });
+      signal.addEventListener("abort", () => wait.reject(signal.reason), { once: true });
+      return wait.promise;
+    } },
+    store: { get: async (key) => {
+      if (firstRead) {
+        firstRead = false;
+        entered.resolve();
+        await stalled.promise;
+      }
+      return stored.get(key);
+    }, set: async (key, value) => stored.set(key, value) },
+    fs: {
+      exists: async (path) => path === "/plugin/scripts/codex-companion.mjs"
+        || path === "/home/test/.claude/skills/codex-director/scripts/codex-worker.sh",
+      list: async () => [], stat: async () => ({}),
+    },
+    process: { run: async (args) => {
+      assert.equal(args[0], "node", "bootstrap must not spawn companion discovery");
+      assert.equal(args[1], "/plugin/scripts/codex-companion.mjs");
+      return { exitCode: 0, stdout: '{"threads":[]}', stderr: "" };
+    } },
+    ui: { panes: async () => [], open: async (request) => { opened.push(request); }, invalidate: () => {}, log: () => {} },
+  };
+  registerTaskPane((event, options, callback) => hooks.set(event, callback ?? options));
+  const command = () => hooks.get("command.run")(engine, { command: "codex:tasks", args: "" },
+    async () => assert.fail("command escaped to Markdown"));
+  const pending = command();
+  await entered.promise;
+  assert.equal(sleeps[0].ms, 5000);
+  sleeps[0].resolve();
+  assert.match((await pending).text, /could not start: initialization did not finish within 5s/);
+  assert.equal(stored.size, 0);
+  assert.equal(timers.length, 0);
+
+  assert.match((await command()).text, /nothing dispatched/);
+  assert.equal(stored.get("codex:tasks:session:dismissed"), false);
+  assert.equal(timers.length, 3);
+  assert.ok(sleeps.every((wait) => wait.signal.aborted), "each host clock wait is cancelled");
+  stalled.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 3, "the late first attempt installs no timers");
+  assert.equal(opened.length, 1);
+  assert.ok([...stored.keys()].every((key) => key.startsWith("codex:tasks:session")));
+});
 
 test("the tasks button follows placement and only a person's close stops automatic opens", async (t) => {
   for (const [name, result, close] of [
@@ -442,12 +508,13 @@ test("task pane follows the new session after clear on the first Bash dispatch",
     activeRoundId: `job-${id}`, latestRoundId: `job-${id}`, rounds: [], tail: [],
   });
   const engine = {
-    plugin: { name: "codex" },
+    plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work/main", id: async () => sessionId, usage: async () => { usageStarts.push(startedAt); return { startedAt }; } },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => now, every: (ms, fn) => timers.push([ms, fn]) },
+    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.push([ms, fn]) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => { stored.set(key, value); } },
     fs: {
+      exists: async (path) => path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
       list: async (path) => path === "/home/test/.claude/plugins/data" ? [{ kind: "dir", name: "codex" }]
         : path === "/home/test/.claude/plugins/data/codex/state" ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") ? jobs.map((name) => ({ name, kind: "file", mtimeMs: name === "a.json" ? now - 1_800_000 : now, isLink: false })) : [],

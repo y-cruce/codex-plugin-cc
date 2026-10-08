@@ -23,7 +23,7 @@ type State = {
   ticks: number
   since: number
   busy: boolean
-  booting: boolean
+  booting: Promise<string | undefined> | null
   polling: Promise<void> | null
   generation: number
   forgotten: Set<string>
@@ -570,56 +570,71 @@ async function answer($: EngineInterface, state: State) {
 
 // Run once per module environment. The host cancels its timers on reload and
 // fires session.start for the new instance; turn.start also retries bootstrap.
-async function bootstrap($: EngineInterface, state: State, push: boolean) {
-  if (state.script || state.booting) return
-  state.booting = true
-  try {
-    if (!(await $.session.surfaces()).length) return
-    state.push = push
-    state.cwd = await $.session.cwd()
+function bootstrap($: EngineInterface, state: State, push: boolean): Promise<string | undefined> {
+  if (state.script) return Promise.resolve(undefined)
+  if (state.booting) return state.booting
+  // A timed-out read may still settle later. It initializes only this attempt's
+  // state, so it cannot overwrite a retry or install another set of timers.
+  const starting: State = {
+    ...state, paths: new Map(), mtimes: new Map(), views: new Map(), owners: new Map(), rootIds: new Map(),
+    forgotten: new Set(), unreadable: new Map(), expanded: new Set(), monitors: new Map(),
+  }
+  async function initialize() {
+    if (!(await $.session.surfaces()).length) throw new Error('no interactive session surface')
+    starting.push = push
+    starting.cwd = await $.session.cwd()
     const home = await $.env.get('HOME')
-    if (!home) return
-    state.home = home
-    // The skill is `code-director/scripts/dispatch.sh` now and was
-    // `codex-director/scripts/codex-worker.sh`; either may be the one installed
-    // while the skill and the plugin are released apart, so the pane takes
-    // whichever answers rather than going blind between them.
+    if (!home) throw new Error('HOME is unavailable')
+    starting.home = home
+    const script = `${$.plugin.root}/scripts/codex-companion.mjs`
+    if (!await $.fs.exists(script)) throw new Error(`companion is missing: ${script}`)
+    // Both current and older skill installations can arm the events monitor.
     for (const worker of ['code-director/scripts/dispatch.sh', 'code-director/scripts/codex-worker.sh',
       'codex-director/scripts/codex-worker.sh'].map(path => `${home}/.claude/skills/${path}`)) {
-      const found = await $.process.run(['bash', worker, 'companion'], { cwd: state.cwd, timeoutMs: 3000 }).catch(() => null)
-      if (found?.exitCode !== 0 || !found.stdout.trim()) continue
-      state.worker = worker
-      state.script = found.stdout.trim()
+      if (!await $.fs.exists(worker)) continue
+      starting.worker = worker
       break
     }
-    if (!state.script) return
-    // A module reload re-runs this, so the scan floor must be when the session
-    // began, not when the module last loaded: otherwise every job dispatched
-    // before the reload drops out of the pane.
-    await bindSession($, state, await $.session.id())
+    if (!starting.worker) throw new Error('dispatch.sh or codex-worker.sh is missing from the director skills')
     const pane = (await $.ui.panes()).find(pane => pane.id === PANE)
-    state.opened = Boolean(pane)
-    state.shown = Boolean(pane?.isShown && pane.isPlaced)
-    $.clock.every(500, () => { void refreshViews($, state) })
-    $.clock.every(2000, () => { void poll($, state).then(() => answer($, state)) })
-    // The heading's clock moves on its own, and nothing else asks for the redraw
-    // that shows it: a job that is thinking writes no view file, so the pane
-    // would sit at the second of the last event and then jump over the silence.
-    // Asking only when the figure it draws has actually changed keeps a task
-    // that has been running for an hour from rebuilding the trace every second.
-    $.clock.every(1000, async () => {
-      if (!state.opened) return
-      const now = await $.clock.now()
-      const clock = [...state.views.values()].filter(view => !isOver(view))
-        .map(view => elapsed(latestRound(view)?.startedAt ?? view.startedAt, now)).join(' ')
-      if (!clock || clock === state.clock) return
-      state.clock = clock
-      $.ui.invalidate('ui.render')
-    })
-    void poll($, state)
-  } finally {
-    state.booting = false
+    await bindSession($, starting, await $.session.id())
+    starting.opened = Boolean(pane)
+    starting.shown = Boolean(pane?.isShown && pane.isPlaced)
+    starting.script = script
+    return starting
   }
+  state.booting = (async () => {
+    const timeout = new AbortController()
+    try {
+      const initialized = await Promise.race([initialize(), $.clock.sleep(5000, { signal: timeout.signal }).then(() => {
+        throw new Error('initialization did not finish within 5s; run /codex:tasks to retry')
+      })])
+      Object.assign(state, initialized, { script: '', busy: state.busy, booting: state.booting })
+      $.clock.every(500, () => { void refreshViews($, state) })
+      $.clock.every(2000, () => { void poll($, state).then(() => answer($, state)) })
+      // The heading's clock moves on its own, and nothing else asks for the redraw
+      // that shows it: a job that is thinking writes no view file, so the pane
+      // would sit at the second of the last event and then jump over the silence.
+      // Asking only when the figure it draws has actually changed keeps a task
+      // that has been running for an hour from rebuilding the trace every second.
+      $.clock.every(1000, async () => {
+        if (!state.opened) return
+        const now = await $.clock.now()
+        const clock = [...state.views.values()].filter(view => !isOver(view))
+          .map(view => elapsed(latestRound(view)?.startedAt ?? view.startedAt, now)).join(' ')
+        if (!clock || clock === state.clock) return
+        state.clock = clock
+        $.ui.invalidate('ui.render')
+      })
+      state.script = initialized.script
+      void poll($, state)
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    } finally {
+      timeout.abort()
+    }
+  })().finally(() => { state.booting = null })
+  return state.booting
 }
 
 // Every thread visible to this session, newest round first, dropping what ended
@@ -641,7 +656,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false,
     views: new Map<string, LiveView>(), ledger: {},
-    ticks: 0, since: 0, busy: false, booting: false, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
+    ticks: 0, since: 0, busy: false, booting: null, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
     liveRoots: new Set<string>(),
@@ -684,6 +699,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
+    const reason = await bootstrap($, state, push)
+    if (reason) return { text: `Codex tasks · could not start: ${reason}` }
     const args = e.args.trim()
     const refresh = args === 'refresh'
     const forget = /^forget(?:\s|$)/.test(args)

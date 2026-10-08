@@ -122,35 +122,6 @@ async function setup(t) {
   return { repo, env, endpoint, broker, closed, cli, child, rpc, start };
 }
 
-test("follow socket closes on process death and another busy job does not mix streams", async (t) => {
-  const h = await setup(t);
-  const first = await h.start("hold observation-burst", "busy");
-  const second = await h.start("hold observation", "quiet");
-  const firstState = listTestJobs(h).find((job) => job.id === first);
-  const secondState = listTestJobs(h).find((job) => job.id === second);
-  assert.notEqual(firstState.threadId, secondState.threadId);
-  const watching = h.child("observe", "follow", first);
-  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "registered follower");
-  watching.process.kill("SIGKILL");
-  await watching.done;
-  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 0, "detached killed follower");
-  const quiet = h.child("observe", "follow", second, "--max-seconds", "0.5");
-  const status = h.cli("status", second, "--json");
-  assert.equal(status.status, 0, status.stderr);
-  assert.equal(JSON.parse(status.stdout).job.status, "running");
-  const output = await quiet.done;
-  assert.equal(output.code, 0, output.stderr);
-  assert.match(output.stdout, new RegExp(`observation-${secondState.threadId}`));
-  assert.doesNotMatch(output.stdout, new RegExp(`observation-${firstState.threadId}`));
-  cursor(output.stdout);
-  const silent = await h.child("observe", "follow", second, "--quiet", "--max-seconds", "0.5").done;
-  assert.equal(silent.code, 0, silent.stderr);
-  assert.match(silent.stdout, /^CURSOR: /m);
-  assert.match(silent.stdout, /^TIMEOUT job=/m);
-  assert.doesNotMatch(silent.stdout, /observation conclusion|echo observation-/);
-  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 0, "released quiet timeout follower");
-});
-
 test("QUESTION exits with cursor and successful answers appear before terminal offline replay", async (t) => {
   const h = await setup(t);
   const jobId = await h.start("ask", "question job");

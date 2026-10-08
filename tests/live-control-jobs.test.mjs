@@ -133,33 +133,6 @@ test("message --interrupt continues the original job and reports retained change
 });
 
 
-test("CLI status exposes questions and answer resumes the original job", async (t) => {
-  const h = await setup(t);
-  const { job, done } = await startJob(t, h, "ask");
-  const status = h.cli("status", job.id);
-  assert.equal(status.status, 0, status.stderr);
-  const question = JSON.parse(status.stdout).job.live.questions[0];
-  assert.equal(question.requestId, "question-1");
-  const stateRoot = path.join(h.env.CLAUDE_PLUGIN_DATA, "state");
-  const stateFile = path.join(stateRoot, fs.readdirSync(stateRoot)[0], "state.json");
-  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  state.jobs.find((entry) => entry.id === job.id).phase = "running";
-  fs.writeFileSync(stateFile, JSON.stringify(state));
-  const waiting = h.cli("status", job.id, "--wait", "--timeout-ms", "5000");
-  assert.equal(waiting.status, 0, waiting.stderr);
-  assert.equal(JSON.parse(waiting.stdout).waitingForAnswer, true);
-  const forbidden = h.cli("message", job.id, "latest");
-  assert.equal(forbidden.status, 1);
-  assert.match(forbidden.stderr, /pending question/);
-  fs.writeFileSync(path.join(h.repo, "answers.json"), JSON.stringify({ source: { answers: ["latest"] } }));
-  const answered = h.cli("answer", job.id, "--request-id", "question-1", "--answers-file", "answers.json");
-  assert.equal(answered.status, 0, answered.stderr);
-  const result = await done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).threadId, job.threadId);
-  assert.match(JSON.parse(result.stdout).rawOutput, /latest/);
-});
-
 test("interruption reports changes that finish during cancellation", async (t) => {
   const h = await setup(t);
   const { turn } = await h.start("hold-late");

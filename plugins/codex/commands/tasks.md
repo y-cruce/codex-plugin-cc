@@ -5,7 +5,7 @@ disable-model-invocation: true
 ---
 
 The pane is drawn by the plugin's hooks module, which answers this command in
-the session; this body runs only when that module is not loaded.
+the session; this body runs when the hooks module did not answer the command.
 
 `/codex:tasks` opens or closes the pane. A number or part of a task name selects
 a task. `/codex:tasks refresh` clears the pane's cache and rebuilds it from disk.

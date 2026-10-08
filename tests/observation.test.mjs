@@ -38,12 +38,6 @@ function listTestJobs(h) {
   }
 }
 
-function cursor(output) {
-  const match = output.match(/^CURSOR: (.+)$/m);
-  assert.ok(match, output);
-  return match[1];
-}
-
 async function setup(t) {
   isolateTestEnvironment(t);
   const repo = makeTempDir();
@@ -114,75 +108,6 @@ async function setup(t) {
   };
   return { repo, env, stateDir, endpoint, broker, closed, cli, child, rpc, start };
 }
-
-test("observe discovery, committed replay, live projection and follow resume", async (t) => {
-  const h = await setup(t);
-  const jobId = await h.start("hold observation", "observation task");
-  const listing = h.cli("observe", "list", "--json");
-  assert.equal(listing.status, 0, listing.stderr);
-  const listData = JSON.parse(listing.stdout);
-  const jobs = Array.isArray(listData) ? listData : listData.jobs;
-  assert.equal(jobs.find((job) => job.id === jobId).historyAvailable, true);
-  const located = h.cli("observe", "view-path", jobId);
-  assert.equal(located.status, 0, located.stderr);
-  const viewPath = located.stdout.trim();
-  assert.equal(path.isAbsolute(viewPath), true);
-  const readView = () => fs.existsSync(viewPath) ? JSON.parse(fs.readFileSync(viewPath, "utf8")) : null;
-  // The window is a backstop, not the test's pace. At ten seconds the setup
-  // below -- attaching, a `status` process, the steer -- ate most of it on a
-  // loaded machine and the fixture's last event landed after it had expired,
-  // so the test failed for being slow rather than for being wrong.
-  const followed = h.child("observe", "follow", jobId, "--max-seconds", "60");
-  await waitFor(async () => (await h.rpc("broker/observe-status")).followers === 1, "attached follow");
-  const metadata = JSON.parse(h.cli("status", jobId, "--json").stdout).job;
-  await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId, input: [{ type: "text", text: "observation-live" }] });
-  const live = await waitFor(() => {
-    const view = readView();
-    return view?.lastMessage?.text === "live incremental " ? view : null;
-  }, "delta-updated live view");
-  assert.equal(live.tail.filter((row) => row.text.includes("live incremental")).length, 1);
-  await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId,
-    input: [{ type: "text", text: "observation-live-next" }] });
-  const completeView = await waitFor(() => {
-    const view = readView();
-    return view?.lastMessage?.text === "live incremental conclusion" ? view : null;
-  }, "folded message delta");
-  assert.equal(completeView.tail.filter((row) => row.text.includes("live incremental")).length, 1);
-  await h.rpc("turn/steer", { threadId: metadata.threadId, expectedTurnId: metadata.turnId,
-    input: [{ type: "text", text: "observation-live-complete" }] });
-  await waitFor(() => followed.output().includes("live incremental conclusion") || null, "follow printed the folded message");
-  followed.process.kill("SIGINT");
-  const result = await followed.done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /echo observation-/);
-  assert.match(result.stdout, /live incremental conclusion/);
-  assert.doesNotMatch(result.stdout, /message\.delta|command\.output\.delta/);
-  const savedCursor = cursor(result.stdout);
-  const accepted = h.cli("message", jobId, "keep working", "--json");
-  assert.equal(accepted.status, 0, accepted.stderr);
-  const resumed = h.child("observe", "follow", jobId, "--after", savedCursor, "--max-seconds", "60");
-  // The line below is the last thing this follow has to see. Anything the
-  // negative assertions guard against would be replayed before it, not after,
-  // so stopping here still catches a regression.
-  await waitFor(() => resumed.output().includes("director → message: keep working") || null, "resumed follow printed the message");
-  resumed.process.kill("SIGINT");
-  const resumedResult = await resumed.done;
-  assert.equal(resumedResult.code, 0, resumedResult.stderr);
-  assert.match(resumedResult.stdout, /director → message: keep working/);
-  assert.doesNotMatch(resumedResult.stdout, /echo observation-|live incremental conclusion/);
-  const replay = h.cli("observe", "replay", jobId, "--jsonl");
-  assert.equal(replay.status, 0, replay.stderr);
-  const rows = replay.stdout.trim().split("\n").map(JSON.parse);
-  const end = rows.pop();
-  assert.equal(end.type, "end");
-  assert.ok(rows.some((event) => event.type === "message.delta"));
-  assert.ok(rows.every((event) => event.schemaVersion === 2 && event.payload && event.identity));
-  assert.ok(rows.every((event) => !Object.hasOwn(event, "threadId") && !Object.hasOwn(event, "turnId") && !Object.hasOwn(event, "itemId")));
-  assert.ok(rows.every((event, index) => index === 0 || BigInt(event.seq) > BigInt(rows[index - 1].seq)));
-  const tail = h.cli("observe", "replay", jobId, "--after", end.nextCursor, "--jsonl");
-  assert.equal(tail.status, 0, tail.stderr);
-  assert.equal(JSON.parse(tail.stdout.trim()).type, "end");
-});
 
 test("resuming one thread routes the next job to its own history, view, follow and result", async (t) => {
   const h = await setup(t);

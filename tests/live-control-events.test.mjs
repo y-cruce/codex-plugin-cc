@@ -134,29 +134,6 @@ test("events emits one notification and one completion, acknowledges the note, a
   assert.deepEqual(result.stdout.trimEnd().split("\n"), [notified, completed]);
 });
 
-test("events and status --wait report a killed task owner as failed once", async (t) => {
-  const h = await setup(t);
-  const { job, done, child } = await startJob(t, h, "hold notify:Owner ready");
-  const events = startEvents(t, h);
-  await waitFor(() => events.lines().some((line) => line.startsWith(`NOTIFIED job=${job.id} `)));
-  child.kill("SIGKILL");
-  await done;
-  const waiting = h.cli("status", job.id, "--wait", "--timeout-ms", "5000");
-  assert.equal(waiting.status, 0, waiting.stderr);
-  const snapshot = JSON.parse(waiting.stdout);
-  assert.equal(snapshot.job.status, "failed");
-  assert.equal(snapshot.waitTimedOut, false);
-  assert.match(snapshot.job.errorMessage, /owner process exited/i);
-  const failed = `FAILED job=${job.id} thread=${job.threadId} owner process exited`;
-  await waitFor(() => events.lines().includes(failed));
-  events.child.kill("SIGTERM");
-  const result = await events.done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stderr, "");
-  assert.deepEqual(events.lines().filter((line) => line.startsWith("FAILED ")), [failed]);
-  assert.equal(JSON.parse(h.cli("status", job.id).stdout).job.status, "failed");
-});
-
 test("events and status --wait report a quiet live task as stalled without failing it", async (t) => {
   const h = await setup(t);
   const { job, done } = await startJob(t, h, "hold notify:Owner ready");

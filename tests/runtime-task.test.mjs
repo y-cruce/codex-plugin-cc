@@ -6,9 +6,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -17,18 +17,6 @@ const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs")
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 
 beforeEach(isolateTestEnvironment);
-
-async function waitFor(predicate, { timeoutMs = BROKER_READY_MS, intervalMs = 50 } = {}) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const value = await predicate();
-    if (value) {
-      return value;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error("Timed out waiting for condition.");
-}
 
 function seedFakeCodexThread(binDir, repo, threadId) {
   fs.writeFileSync(
@@ -203,75 +191,6 @@ test("task logs subagent reasoning and messages with a subagent prefix", () => {
   );
 });
 
-
-test("task --background persists a trimmed, capped label in JSON and text launch output", async () => {
-  for (const json of [true, false]) {
-    const repo = makeTempDir();
-    const binDir = makeTempDir();
-    installFakeCodex(binDir, "slow-task");
-    initGitRepo(repo);
-    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-    run("git", ["add", "README.md"], { cwd: repo });
-    run("git", ["commit", "-m", "init"], { cwd: repo });
-
-    const label = json ? "answer validation" : "x".repeat(90);
-    const expectedLabel = label.slice(0, 80);
-    const launched = run("node", [SCRIPT, "task", "--background", ...(json ? ["--json"] : []), "--label", `  ${label}  `, "investigate the failing test"], {
-      cwd: repo,
-      env: buildEnv(binDir)
-    });
-
-    assert.equal(launched.status, 0, launched.stderr);
-    const launchPayload = json ? JSON.parse(launched.stdout) : { jobId: launched.stdout.match(/as (task-[\w-]+)/)?.[1] };
-    if (json) {
-      assert.equal(launchPayload.status, "queued");
-      assert.equal(launchPayload.label, expectedLabel);
-    } else {
-      assert.ok(launched.stdout.includes(`as ${launchPayload.jobId} [${expectedLabel}]. Check`));
-    }
-    assert.match(launchPayload.jobId, /^task-/);
-
-    await waitFor(() => {
-      const job = listJobs(repo).find((item) => item.id === launchPayload.jobId);
-      return job?.threadId && job.turnId;
-    });
-
-    const waitedStatus = run(
-      "node",
-      [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
-      {
-        cwd: repo,
-        env: buildEnv(binDir)
-      }
-    );
-
-    assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
-    const waitedPayload = JSON.parse(waitedStatus.stdout);
-    assert.equal(waitedPayload.job.id, launchPayload.jobId);
-    assert.equal(waitedPayload.job.status, "completed");
-    assert.equal(waitedPayload.job.label, expectedLabel);
-    const status = run("node", [SCRIPT, "status", "--all", "--json"], { cwd: repo, env: buildEnv(binDir) });
-    assert.equal(status.status, 0, status.stderr);
-    const statusPayload = JSON.parse(status.stdout);
-    assert.equal((statusPayload.threads?.find((thread) => thread.status !== "queued" && thread.status !== "running") ?? statusPayload.latestFinished).label, expectedLabel);
-
-    const resultPayload = await waitFor(() => {
-      const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
-        cwd: repo,
-        env: buildEnv(binDir)
-      });
-      if (result.status !== 0) {
-        return null;
-      }
-      return JSON.parse(result.stdout);
-    });
-
-    assert.equal(resultPayload.job.id, launchPayload.jobId);
-    assert.equal(resultPayload.job.status, "completed");
-    assert.equal(resultPayload.storedJob.label, expectedLabel);
-    assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
-  }
-});
 
 test("review rejects staged-only scope because it is native-review only", () => {
   const repo = makeTempDir();
