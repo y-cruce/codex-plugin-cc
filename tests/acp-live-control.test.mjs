@@ -186,12 +186,13 @@ const cases = [
       assert.deepEqual(view.rounds.map((round) => [round.jobId, round.status]),
         [[job.id, "failed"], [queuedJobId, "failed"]]);
       const element = (type) => ({ children, ...props }) => ({ type, props, children: Array.isArray(children) ? children : [children ?? ""] });
-      const ui = { Box: element("Box"), Text: element("Text"), Code: element("Code"), Button: element("Button") };
+      const ui = { Box: element("Box"), Text: element("Text"), Code: element("Code"), Markdown: element("Markdown"), Button: element("Button") };
       const pane = paneBody(ui, [view], 100, 20, Date.parse(view.endedAt), null, () => {});
       const nodes = [];
       const visit = (value) => {
         if (typeof value === "string") return value;
         nodes.push(value);
+        if (value.type === "Markdown") return value.props.text;
         return (value.children ?? []).map(visit).join("\n");
       };
       const text = visit(pane);
