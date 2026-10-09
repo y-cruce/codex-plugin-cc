@@ -11,6 +11,52 @@ import { createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-
 
 tier('user');
 describe('live ToolUse row', () => {
+  test('renders cached rows while a final read hangs, without render I/O', async ($, on) => {
+    const { state, clock } = world($, on);
+    await $.ui.render(row()); await clock.settle();
+    const read = Promise.withResolvers();
+    const originalRead = $.fs.read;
+    const originalCwd = $.session.cwd;
+    const originalNow = $.clock.now;
+    let inRender = true;
+    $.fs.read = () => { assert.equal(inRender, false); return read.promise; };
+    $.session.cwd = () => { assert.equal(inRender, false); return originalCwd(); };
+    $.clock.now = () => { assert.equal(inRender, false); return originalNow(); };
+    const done = row('node /tools/codex-companion.mjs observe follow task-abc123-xyz789', { isRunning: false, output: terminalOutput('DONE') });
+    const first = await $.ui.render(done);
+    inRender = false;
+    await clock.settle();
+    inRender = true;
+    let timer;
+    try {
+      const second = await Promise.race([$.ui.render(done), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('render joined the pending final read')), 1000);
+      })]);
+      assert.equal(textOf(second), textOf(first));
+    } finally {
+      clearTimeout(timer);
+      inRender = false;
+      read.resolve(JSON.stringify({ ...fixture(), label: 'final snapshot' }));
+      $.fs.read = originalRead;
+      $.session.cwd = originalCwd;
+      $.clock.now = originalNow;
+    }
+    await clock.settle();
+    assert.match(textOf(await $.ui.render(done)), /final snapshot/);
+  });
+  test('temporary read failures stay in debug and retry final cards even without a new mtime', async ($, on) => {
+    const { state, clock } = world($, on);
+    state.text = '{broken';
+    const done = row(undefined, { isRunning: false, output: terminalOutput('DONE') });
+    await $.ui.render(done); await clock.settle();
+    assert.doesNotMatch(textOf(await $.ui.render(done)), /unavailable|JSON|broken/);
+    assert.ok(state.logs.length);
+    assert.ok(state.logs.every(log => log.to === 'debug'));
+    state.text = JSON.stringify({ ...fixture(), label: 'recovered final card' });
+    await clock.advance(2000);
+    assert.match(textOf(await $.ui.render(done)), /recovered final card/);
+    assert.equal(clock.timers.size, 0);
+  });
   test('keeps completed follow groups expanded and stops polling', async ($, on) => {
     const { clock, state } = world($, on);
     const seen = [];
@@ -61,7 +107,7 @@ describe('live ToolUse row', () => {
     await $.ui.render(row());
     await clock.settle();
     assert.match(textOf(await $.ui.render(row())), /Codex · fixture task/);
-    await $.ui.render(row(undefined, { tool_use_id: 'tool-2' }));
+    await $.ui.render(row('node /tools/codex-companion.mjs observe follow task-abc123-xyz789', { tool_use_id: 'tool-2' }));
     await clock.advance(1500);
     assert.equal(state.runs.length, 1);
     assert.deepEqual(state.runs[0].argv, ['node', '/tools/codex-companion.mjs', 'observe', 'view-path', 'task-abc123-xyz789', '--cwd', '/work']);
@@ -83,6 +129,10 @@ describe('live ToolUse row', () => {
     assert.equal(state.runs.length, 2);
     assert.deepEqual(state.runs[0].argv, ['bash', '/home/test/.claude/codex-worker.sh', 'companion']);
     assert.equal(state.runs[1].init.cwd, '/work');
+    $.session.cwd = async () => '/other';
+    await $.ui.render(row('node /tools/codex-companion.mjs observe follow task-new123-xyz789'));
+    await clock.advance(500);
+    assert.equal(state.runs.at(-1).init.cwd, '/other');
   });
   test('invalid JSON falls back to native, retains prior data, and recovers', async ($, on) => {
     const { clock, state } = world($, on);
@@ -95,17 +145,16 @@ describe('live ToolUse row', () => {
     await $.ui.render(row());
     await clock.settle();
     const text = textOf(await $.ui.render(row()));
-    assert.match(text, /^native Bash row\ncodex live view unavailable:/);
+    assert.equal(text, 'native Bash row');
     const reads = state.reads;
     await clock.advance(1000);
-    assert.equal(state.reads, reads);
-    state.mtime++;
+    assert.ok(state.reads > reads);
     state.text = JSON.stringify(fixture());
     await clock.advance(500);
     assert.match(textOf(await $.ui.render(row())), /Codex · fixture task/);
     state.missing = true;
     await clock.advance(500);
-    assert.match(textOf(await $.ui.render(row())), /unavailable: ENOENT/);
+    assert.match(textOf(await $.ui.render(row())), /Codex · fixture task/);
     state.missing = false;
     await clock.advance(500);
     assert.match(textOf(await $.ui.render(row())), /Codex · fixture task/);
@@ -115,7 +164,7 @@ describe('live ToolUse row', () => {
     state.unknown = true;
     await $.ui.render(row());
     await clock.settle();
-    assert.match(textOf(await $.ui.render(row())), /unavailable: UNKNOWN_JOB/);
+    assert.equal(textOf(await $.ui.render(row())), 'native Bash row');
     const runs = state.runs.length;
     await clock.advance(1500);
     assert.equal(state.runs.length, runs);
@@ -132,6 +181,7 @@ describe('live ToolUse row', () => {
     assert.match(textOf(await $.ui.render(row(undefined, { isRunning: false, output: terminalOutput('DONE') }))), /Codex · fixture task/);
     assert.equal(clock.timers.size, 1);
     await $.ui.render(row(undefined, { tool_use_id: 'tool-2', isRunning: false, isInterrupted: true }));
+    await clock.settle();
     const stats = state.stats;
     await clock.advance(3000);
     assert.equal(clock.timers.size, 0);
@@ -248,8 +298,9 @@ describe('live row polish', () => {
   }
   for (const [kind, status, color] of [['DONE', 'completed', 'green'], ['FAILED', 'failed', 'red']]) {
     test(`renders ${kind} full answer with its own status despite stale shared status`, async ($, on) => {
-      const { state } = world($, on);
+      const { state, clock } = world($, on);
       const input = row(undefined, { isRunning: false, output: terminalOutput(kind) });
+      await $.ui.render(input); await clock.settle();
       const tree = await $.ui.render(input);
       assert.match(textOf(tree), new RegExp(`fixture task · ${status} ·`));
       assert.match(textOf(tree), /Checking the change/);
@@ -272,6 +323,7 @@ describe('live row polish', () => {
     const data = fixture(); data.label = 'latest label'; data.lastMessage.text = 'FINAL FULL ANSWER';
     state.mtime++; state.text = JSON.stringify(data);
     const done = row(undefined, { tool_use_id: 'done', isRunning: false, output: terminalOutput('DONE') });
+    await $.ui.render(done); await clock.settle();
     const third = await $.ui.render(done);
     assert.match(textOf(third), /latest label · completed/);
     assert.match(textOf(third), /FINAL FULL ANSWER/);
@@ -386,6 +438,7 @@ describe('live row polish', () => {
     state.text = JSON.stringify(data);
     const output = { stdout: `private tool result\n${terminalOutput('DONE')}` };
     const done = row(undefined, { isRunning: false, output });
+    await $.ui.render(done); await clock.settle();
     const tree = await $.ui.render(done);
     assert.match(textOf(tree), /completed · 1m2s · 5 files\nOriginal answer\nsecond line/);
     assert.match(textOf(tree), /file-2.ts \(\+3 −1\)\n\+2 more$/);

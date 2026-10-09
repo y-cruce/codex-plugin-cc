@@ -27,8 +27,13 @@ type State = {
   since: number
   busy: boolean
   booting: Promise<string | undefined> | null
+  startError?: string
+  now: number
+  pendingWrites: Map<string, unknown>
+  writing: boolean
   polling: Promise<void> | null
   generation: number
+  epoch: number
   forgotten: Set<string>
   answering: boolean
   requestMtime: number
@@ -97,8 +102,8 @@ export function shouldDropMonitorExpiry(
   return false
 }
 const RESCAN_TICKS = 15
-// Polls a job may fail in a row before the pane stops asking for it.
-const GIVE_UP = 5
+// Consecutive failures before retrying only on the periodic rescan.
+const BACKOFF_FAILURES = 5
 // A plugin's own prompt runs once the session is idle, so a job that finishes
 // or asks a question during a long turn waits for the end of it. A background
 // task's notification is the one channel that reaches a running turn, and
@@ -110,30 +115,71 @@ const MONITOR_MS = 1_800_000
 const SETTLE_MS = 15_000
 const CHECK_MS = 15_000
 
+// Pane controls commit in memory first. A refused store write is retried by the
+// timer, so persistence cannot interrupt a command or close the person's pane.
+function writeStore($: EngineInterface, state: State, key: string, value: unknown) {
+  if (!key) return
+  state.pendingWrites.set(key, value)
+  $.clock.after(0, () => { void flushStore($, state) })
+}
+
+async function flushStore($: EngineInterface, state: State) {
+  if (state.writing) return
+  state.writing = true
+  try {
+    for (const [key, value] of state.pendingWrites) {
+      try {
+        await $.store.set(key, value)
+        if (state.pendingWrites.get(key) === value) state.pendingWrites.delete(key)
+      } catch (error) {
+        $.ui.log(`Codex tasks store: ${String(error)}`, { to: 'debug' })
+      }
+    }
+  } finally {
+    state.writing = false
+  }
+}
+
+function readStore($: EngineInterface, key: string) {
+  return $.store.get(key).catch(error => {
+    $.ui.log(`Codex tasks store: ${String(error)}`, { to: 'debug' })
+    return undefined
+  })
+}
+
 // Armed once per repository and never awaited: the call resolves when the
 // monitor ends, which is the whole point of it, so awaiting here would hold the
 // poll for the length of the watch. When it does end -- the host's thirty
 // minute cap, or `events` exiting once the repository has been quiet -- the
 // entry goes and the next poll with a live job there arms a fresh one.
 function recordMonitors($: EngineInterface, state: State) {
-  return $.store.set(`${state.key}:monitors`,
-    Object.fromEntries(state.monitors)).catch(() => {})
-}
-
-async function stopMonitor($: EngineInterface, state: State, taskId: string) {
-  state.retiredMonitors.add(taskId)
-  await $.store.set(`${state.key}:retiredMonitors`, [...state.retiredMonitors])
-  // TaskStop addresses only this process's registry, never another session's shell.
-  await $.tool.call({ tool: 'TaskStop', task_id: taskId }).catch((error: unknown) => {
-    $.ui.log(`Codex tasks stop monitor ${taskId}: ${String(error)}`, { to: 'debug' })
+  const key = `${state.key}:monitors`
+  const value = Object.fromEntries(state.monitors)
+  state.pendingWrites.set(key, value)
+  return $.store.set(key, value).then(() => {
+    if (state.pendingWrites.get(key) === value) state.pendingWrites.delete(key)
+  }, error => {
+    $.ui.log(`Codex tasks store: ${String(error)}`, { to: 'debug' })
+    $.clock.after(0, () => { void flushStore($, state) })
   })
 }
 
-async function stopMonitors($: EngineInterface, state: State) {
+function stopMonitor($: EngineInterface, state: State, taskId: string, key = state.key) {
+  state.retiredMonitors.add(taskId)
+  writeStore($, state, `${key}:retiredMonitors`, [...state.retiredMonitors])
+  // TaskStop addresses only this process's registry, never another session's shell.
+  $.clock.after(0, () => {
+    void $.tool.call({ tool: 'TaskStop', task_id: taskId }).catch((error: unknown) => {
+      $.ui.log(`Codex tasks stop monitor ${taskId}: ${String(error)}`, { to: 'debug' })
+    })
+  })
+}
+
+function stopMonitors($: EngineInterface, state: State) {
   const monitors = [...state.monitors.values()]
   state.monitors.clear()
-  await recordMonitors($, state)
-  await Promise.all(monitors.flatMap(monitor => monitor.taskId ? [stopMonitor($, state, monitor.taskId)] : []))
+  recordMonitors($, state)
+  for (const monitor of monitors) if (monitor.taskId) stopMonitor($, state, monitor.taskId)
 }
 
 // The watch is a process with a command line of its own, so whether it is still
@@ -144,14 +190,17 @@ async function stopMonitors($: EngineInterface, state: State) {
 // repository has been quiet -- went unnoticed until the cap, and a job that
 // finished in that half hour woke nobody.
 async function watching($: EngineInterface, state: State, root: string): Promise<boolean> {
+  const epoch = state.epoch
   const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\.sh events --cwd ${root} --session ${state.sessionId}`],
     { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
-  return Boolean(found && found.exitCode === 0 && found.stdout.trim())
+  return state.epoch === epoch && !state.leaving && Boolean(found && found.exitCode === 0 && found.stdout.trim())
 }
 
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
+  const epoch = state.epoch
+  const key = state.key
   for (const root of live) {
-    if (state.leaving) return
+    if (state.leaving || state.epoch !== epoch) return
     const monitor = state.monitors.get(root)
     // Just armed: the process has not necessarily appeared yet, and asking now
     // would arm a second one for the same repository.
@@ -166,14 +215,14 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       await recordMonitors($, state)
       continue
     }
-    if (state.leaving) return
+    if (state.leaving || state.epoch !== epoch) return
     const sessionId = state.sessionId
     const armed: Monitor = { armedAt: now }
     state.monitors.set(root, armed)
     // Awaited, or a reload between the arm and the write reads the old set and
     // arms a second monitor for the same repository.
     await recordMonitors($, state)
-    if (state.leaving || state.sessionId !== sessionId) return
+    if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId) return
     void $.tool.call({
       tool: 'Monitor',
       command: `bash ${state.worker} events --cwd ${root} --session ${sessionId}`,
@@ -182,7 +231,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
     }).then(async result => {
       const taskId = (result.result as { taskId?: string } | undefined)?.taskId
       if (!taskId) return
-      if (state.leaving || state.sessionId !== sessionId) return stopMonitor($, state, taskId)
+      if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId) return stopMonitor($, state, taskId, key)
       armed.taskId = taskId
       await recordMonitors($, state)
     }).catch((error: unknown) => {
@@ -209,13 +258,21 @@ async function companion($: EngineInterface, state: State, cwd: string, args: st
 // session and the repository, so a scan finds every repository this session
 // dispatched to; mtimes keep it cheap once hundreds of jobs have accumulated.
 async function discoverRoots($: EngineInterface, state: State) {
+  const epoch = state.epoch
   const roots = new Set<string>([...state.roots, state.cwd])
   const data = `${state.home}/.claude/plugins/data`
+  const stateRoots: string[] = []
   for (const plugin of await $.fs.list(data).catch(() => [])) {
     if (plugin.kind !== 'dir') continue
-    for (const workspace of await $.fs.list(`${data}/${plugin.name}/state`).catch(() => [])) {
+    stateRoots.push(`${data}/${plugin.name}/state`)
+  }
+  // Without a SessionStart env export the companion uses its supported temp
+  // store; jobs in another repository still belong to this session's pane.
+  stateRoots.push(`${(await $.env.get('TMPDIR')) ?? '/tmp'}/codex-companion`)
+  for (const root of stateRoots) {
+    for (const workspace of await $.fs.list(root).catch(() => [])) {
       if (workspace.kind !== 'dir') continue
-      const jobs = `${data}/${plugin.name}/state/${workspace.name}/jobs`
+      const jobs = `${root}/${workspace.name}/jobs`
       for (const file of await $.fs.list(jobs).catch(() => [])) {
         if (!file.name.endsWith('.json')) continue
         const path = `${jobs}/${file.name}`
@@ -230,7 +287,7 @@ async function discoverRoots($: EngineInterface, state: State) {
       }
     }
   }
-  state.roots = roots
+  if (state.epoch === epoch) state.roots = roots
 }
 
 // Both history layouts live beside jobs/. Read the active/latest round,
@@ -304,25 +361,37 @@ function resetRows(state: State) {
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
+  const epoch = ++state.epoch
   if (state.sessionId && sessionId !== state.sessionId) {
-    await stopMonitors($, state)
+    stopMonitors($, state)
     state.opened = state.shown = false
   }
-  state.leaving = false
+  state.leaving = true
   state.sessionId = sessionId
-  state.key = `${$.plugin.name}:tasks:${sessionId}`
-  state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
-  state.saved = JSON.stringify(state.ledger)
-  state.dismissed = await $.store.get(`${state.key}:dismissed`) === true
+  state.dismissed = false
+  state.requestMtime = 0
+  const key = state.key = `${$.plugin.name}:tasks:${sessionId}`
   resetRows(state)
-  for (const id of (await $.store.get(`${state.key}:forgotten`) ?? []) as string[]) state.forgotten.add(id)
   state.pending = []
+  const ledger = (await readStore($, key) as Ledger | undefined) ?? {}
+  const dismissed = await readStore($, `${key}:dismissed`) === true
+  const forgotten = (await readStore($, `${key}:forgotten`) ?? []) as string[]
   const now = await $.clock.now()
-  state.since = (await $.session.usage()).startedAt
-  for (const id of (await $.store.get(`${state.key}:retiredMonitors`) ?? []) as string[]) state.retiredMonitors.add(id)
-  await $.store.set(`${state.key}:retiredMonitors`, [...state.retiredMonitors])
+  const since = (await $.session.usage()).startedAt
+  const retired = (await readStore($, `${key}:retiredMonitors`) ?? []) as string[]
+  const armed = await readStore($, `${key}:monitors`)
+  // Reads from an ended session must not install their cache in its successor.
+  if (epoch !== state.epoch) return
+  state.leaving = false
+  state.ledger = ledger
+  state.saved = JSON.stringify(ledger)
+  if (!state.opened && !state.dismissed) state.dismissed = dismissed
+  for (const id of forgotten) state.forgotten.add(id)
+  state.now = now
+  state.since = since
+  for (const id of retired) state.retiredMonitors.add(id)
+  writeStore($, state, `${key}:retiredMonitors`, [...state.retiredMonitors])
   state.monitors.clear()
-  const armed = await $.store.get(`${state.key}:monitors`)
   for (const [root, saved] of Object.entries((armed ?? {}) as Record<string, number | Monitor>)) {
     const monitor = typeof saved === 'number' ? { armedAt: saved } : saved
     if (now - monitor.armedAt < MONITOR_MS) state.monitors.set(root, monitor)
@@ -344,9 +413,10 @@ function poll($: EngineInterface, state: State): Promise<void> {
 async function saveLedger($: EngineInterface, state: State) {
   const text = JSON.stringify(state.ledger)
   if (text === state.saved) return
+  const key = state.key
   try {
-    await $.store.set(state.key, state.ledger)
-    state.saved = text
+    await $.store.set(key, state.ledger)
+    if (state.key === key) state.saved = text
   } catch (error) {
     $.ui.log(`Codex tasks: ledger not saved, retrying next round: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
   }
@@ -360,41 +430,48 @@ async function pollOnce($: EngineInterface, state: State) {
       state.cwd = await $.session.cwd()
       await bindSession($, state, sessionId)
     }
+    const epoch = state.epoch
+    const stale = () => state.leaving || state.epoch !== epoch || state.sessionId !== sessionId
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
+    if (stale()) return
     state.ticks += 1
     const now = await $.clock.now()
+    if (stale()) return
+    state.now = now
     const found: { thread: Thread; cwd: string }[] = []
     const returnedByRoot = new Map<string, Set<string>>()
     for (const root of state.roots) {
-      if ((state.unreadable.get(root) ?? 0) >= GIVE_UP) continue
+      if ((state.unreadable.get(root) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) continue
       // A worktree removed once its jobs ran is gone for good, and spawning the
       // companion there fails as "spawn node ENOENT", which names node instead
       // of the directory. The rescan brings it back from the job files; this
       // drops it again before anything is spawned.
-      if (!await $.fs.stat(root).then(() => true, () => false)) {
+      const exists = await $.fs.stat(root).then(() => true, () => false)
+      if (stale()) return
+      if (!exists) {
         state.roots.delete(root)
         continue
       }
       try {
         const listed = JSON.parse(await companion($, state, root,
           ['threads', '--json', '--finished-after', String(now - KEEP_MS)])) as { threads: Thread[] }
+        if (stale()) return
         state.unreadable.delete(root)
         const threads = listed.threads.filter(thread => thread.sessionIds.includes(state.sessionId))
         returnedByRoot.set(root, new Set(threads.map(thread => thread.id)))
         for (const thread of threads) found.push({ thread, cwd: root })
       } catch (error) {
-        // Said once, then the root is left alone. This runs every two seconds,
-        // and a repository whose companion cannot start -- a missing dependency
-        // in an installed copy, say -- otherwise writes the same line into the
-        // transcript for the rest of the session.
+        if (stale()) return
+        // Back off after repeated failures, but keep retrying: a companion can
+        // recover without the person having to refresh or reload the pane.
         const failures = (state.unreadable.get(root) ?? 0) + 1
         state.unreadable.set(root, failures)
-        if (failures === GIVE_UP) {
-          $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`)
+        if (failures === BACKOFF_FAILURES) {
+          $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
         }
       }
     }
-    if (state.leaving) return
+    if (stale()) return
     const returned = new Set(found.map(({ thread }) => thread.id))
     let dropped = false
     for (const [root, ids] of returnedByRoot) {
@@ -424,18 +501,19 @@ async function pollOnce($: EngineInterface, state: State) {
     // The listing is time-filtered and can stop answering after errors. Check
     // every cached live row against disk even when it no longer appears there.
     await refreshViews($, state, true)
+    if (stale()) return
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
-    if (state.leaving) return
+    if (stale()) return
     state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
     await ensureMonitors($, state, state.liveRoots, now)
-    if (state.leaving) return
+    if (stale()) return
     for (const { thread, cwd } of found) {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
-      // give up only once it has failed a few polls in a row.
-      if ((state.unreadable.get(job.id) ?? 0) >= GIVE_UP) continue
+      // back off only once it has failed a few polls in a row.
+      if ((state.unreadable.get(job.id) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) continue
       try {
         // A job already over the first time it is seen ended before this pane
         // existed, or before a reload rebuilt it: there is nothing to wake the
@@ -471,6 +549,7 @@ async function pollOnce($: EngineInterface, state: State) {
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
             .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string }] } catch { return [] } })
+          if (stale()) return
           const events = rows.filter(row => row.seq)
           // A job that is over has nothing left to wake the director for: its
           // ending is reported by the reconciliation below and the rest is read
@@ -502,16 +581,17 @@ async function pollOnce($: EngineInterface, state: State) {
           receipt.terminal = status
         }
       } catch (error) {
+        if (stale()) return
         const failures = (state.unreadable.get(job.id) ?? 0) + 1
         state.unreadable.set(job.id, failures)
-        // Said when the round gives up, not when it first fails: a job is listed
+        // Logged when the round backs off, not when it first fails: a job is listed
         // before its first event is written, so an early failure means "not yet"
         // and saying so is noise about something that fixes itself seconds later.
-        if (failures === GIVE_UP) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`)
+        if (failures === BACKOFF_FAILURES) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
       }
     }
     await refreshViews($, state)
-    if (state.leaving) return
+    if (stale()) return
     // What the pane would draw, not every view the scan loaded: a repository
     // keeps its finished jobs for weeks, so a fresh session found four threads
     // from a fortnight ago, opened the pane for them, and drew "nothing
@@ -519,7 +599,11 @@ async function pollOnce($: EngineInterface, state: State) {
     if (visibleThreads(state).length && !state.opened && !state.dismissed) {
       state.opened = true
       const opened = await $.ui.open({ id: PANE, title: 'Codex tasks', closeOnEscape: true, rows: 24 })
-        .catch(error => $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`))
+        .catch(error => {
+          state.opened = false
+          $.ui.log(`Codex tasks pane: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+        })
+      if (stale()) return
       if (opened) {
         if (opened.isPlaced === true) state.shown = true
         else $.ui.log(`Codex tasks pane: ${opened.reason}`, { to: 'debug' })
@@ -549,12 +633,13 @@ async function pollOnce($: EngineInterface, state: State) {
       // Carry those lines to the next poll rather than failing the round: the
       // cursors this round advanced are committed either way, so a refusal must
       // not make every job re-read and re-report the events already seen.
+      if (stale()) return
       if (!result.drop) state.pending = []
     }
     state.ledger = ledger
     await saveLedger($, state)
   } catch (error) {
-    $.ui.log(`Codex tasks: ${error instanceof Error ? error.message : String(error)}`)
+    $.ui.log(`Codex tasks: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
   }
 }
 
@@ -563,9 +648,11 @@ async function pollOnce($: EngineInterface, state: State) {
 async function refreshRows($: EngineInterface, state: State) {
   // Let an in-flight poll finish before clearing its maps. The generation
   // also prevents a concurrent view read from restoring the old cache.
+  const epoch = state.epoch
   await state.polling
+  if (state.leaving || epoch !== state.epoch) return
   resetRows(state)
-  await $.store.set(`${state.key}:forgotten`, [])
+  writeStore($, state, `${state.key}:forgotten`, [])
   await poll($, state)
 }
 
@@ -579,7 +666,7 @@ function findRow(threads: LiveView[], wanted: string) {
 async function forgetRow($: EngineInterface, state: State, view: LiveView) {
   const id = view.recordId ?? view.jobId
   state.forgotten.add(id)
-  await $.store.set(`${state.key}:forgotten`, [...state.forgotten])
+  writeStore($, state, `${state.key}:forgotten`, [...state.forgotten])
   if (state.selected === id) state.selected = null
   state.toEnd = true
   $.ui.invalidate('ui.render')
@@ -595,16 +682,23 @@ function channel(state: State, name: 'request' | 'reply') {
 async function answer($: EngineInterface, state: State) {
   if (state.answering) return
   state.answering = true
+  const epoch = state.epoch
+  const requestPath = channel(state, 'request')
+  const replyPath = channel(state, 'reply')
   try {
-    const stat = await $.fs.stat(channel(state, 'request')).catch(() => null)
+    const stat = await $.fs.stat(requestPath).catch(() => null)
+    if (epoch !== state.epoch || state.leaving) return
     if (!stat || stat.mtimeMs === state.requestMtime) return
-    state.requestMtime = stat.mtimeMs
-    const request = JSON.parse(await $.fs.read(channel(state, 'request'))) as { id?: unknown; action?: unknown; target?: unknown }
+    const request = JSON.parse(await $.fs.read(requestPath)) as { id?: unknown; action?: unknown; target?: unknown }
     if (typeof request.id !== 'string') return
     // A reload starts an instance that has not seen this request yet; the reply
     // on disk says whether the one before it already answered.
-    const replied = await $.fs.read(channel(state, 'reply')).then(text => (JSON.parse(text) as { id?: unknown }).id).catch(() => null)
-    if (replied === request.id) return
+    const replied = await $.fs.read(replyPath).then(text => (JSON.parse(text) as { id?: unknown }).id).catch(() => null)
+    if (epoch !== state.epoch || state.leaving) return
+    if (replied === request.id) {
+      state.requestMtime = stat.mtimeMs
+      return
+    }
     let text = ''
     if (request.action === 'refresh') {
       await refreshRows($, state)
@@ -615,14 +709,16 @@ async function answer($: EngineInterface, state: State) {
       if (match) await forgetRow($, state, match)
       text = match ? `forgot ${match.label}` : `no task matches "${wanted}"`
     }
+    if (epoch !== state.epoch || state.leaving) return
     const rows = visibleThreads(state).map((view, at) => {
       const id = view.recordId ?? view.jobId
       const path = state.paths.get(id) ?? null
       return { n: at + 1, id, label: view.label, status: view.status, view: path, job: path && jobFileOf(path, view) }
     })
-    await $.fs.write(channel(state, 'reply'), `${JSON.stringify({ id: request.id, text, rows, forgotten: [...state.forgotten] })}\n`)
+    await $.fs.write(replyPath, `${JSON.stringify({ id: request.id, text, rows, forgotten: [...state.forgotten] })}\n`)
+    if (epoch === state.epoch) state.requestMtime = stat.mtimeMs
   } catch (error) {
-    $.ui.log(`Codex tasks pane request: ${error instanceof Error ? error.message : String(error)}`)
+    $.ui.log(`Codex tasks pane request: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
   } finally {
     state.answering = false
   }
@@ -633,6 +729,7 @@ async function answer($: EngineInterface, state: State) {
 function bootstrap($: EngineInterface, state: State, push: boolean): Promise<string | undefined> {
   if (state.script) return Promise.resolve(undefined)
   if (state.booting) return state.booting
+  const epoch = state.epoch
   // A timed-out read may still settle later. It initializes only this attempt's
   // state, so it cannot overwrite a retry or install another set of timers.
   const starting: State = {
@@ -640,14 +737,14 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
     forgotten: new Set(), unreadable: new Map(), expanded: new Set(), monitors: new Map(),
   }
   async function initialize() {
-    if (!(await $.session.surfaces()).length) throw new Error('no interactive session surface')
+    if (!(await $.session.surfaces()).length) throw Object.assign(new Error('no interactive session surface'), { actionRequired: true })
     starting.push = push
     starting.cwd = await $.session.cwd()
     const home = await $.env.get('HOME')
-    if (!home) throw new Error('HOME is unavailable')
+    if (!home) throw Object.assign(new Error('HOME is unavailable'), { actionRequired: true })
     starting.home = home
     const script = `${$.plugin.root}/scripts/codex-companion.mjs`
-    if (!await $.fs.exists(script)) throw new Error(`companion is missing: ${script}`)
+    if (!await $.fs.exists(script)) throw Object.assign(new Error(`companion is missing: ${script}`), { actionRequired: true })
     // Both current and older skill installations can arm the events monitor.
     for (const worker of ['code-director/scripts/dispatch.sh', 'code-director/scripts/codex-worker.sh',
       'codex-director/scripts/codex-worker.sh'].map(path => `${home}/.claude/skills/${path}`)) {
@@ -655,7 +752,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
       starting.worker = worker
       break
     }
-    if (!starting.worker) throw new Error('dispatch.sh or codex-worker.sh is missing from the director skills')
+    if (!starting.worker) throw Object.assign(new Error('dispatch.sh or codex-worker.sh is missing from the director skills'), { actionRequired: true })
     const pane = (await $.ui.panes()).find(pane => pane.id === PANE)
     await bindSession($, starting, await $.session.id())
     starting.opened = Boolean(pane)
@@ -667,11 +764,18 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
     const timeout = new AbortController()
     try {
       const initialized = await Promise.race([initialize(), $.clock.sleep(5000, { signal: timeout.signal }).then(() => {
-        throw new Error('initialization did not finish within 5s; run /codex:tasks to retry')
+        throw new Error('initialization did not finish within 5s; retrying')
       })])
-      Object.assign(state, initialized, { script: '', busy: state.busy, booting: state.booting })
+      if (epoch !== state.epoch) {
+        $.clock.after(0, () => { if (!state.leaving) void bootstrap($, state, push) })
+        return
+      }
+      const placement = state.opened || state.dismissed
+        ? { opened: state.opened, shown: state.shown, dismissed: state.dismissed } : {}
+      Object.assign(state, initialized, placement, { script: '', busy: state.busy, booting: state.booting, writing: state.writing, startError: undefined })
+      if (placement.opened || placement.dismissed) writeStore($, state, `${state.key}:dismissed`, state.dismissed)
       $.clock.every(500, () => { void refreshViews($, state) })
-      $.clock.every(2000, () => { void poll($, state).then(() => answer($, state)) })
+      $.clock.every(2000, () => { void flushStore($, state); void poll($, state).then(() => answer($, state)) })
       // The heading's clock moves on its own, and nothing else asks for the redraw
       // that shows it: a job that is thinking writes no view file, so the pane
       // would sit at the second of the last event and then jump over the silence.
@@ -680,6 +784,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
       $.clock.every(1000, async () => {
         if (!state.opened) return
         const now = await $.clock.now()
+        state.now = now
         const clock = [...state.views.values()].filter(view => !isOver(view))
           .map(view => elapsed(latestRound(view)?.startedAt ?? view.startedAt, now)).join(' ')
         if (!clock || clock === state.clock) return
@@ -689,7 +794,18 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
       state.script = initialized.script
       void poll($, state)
     } catch (error) {
-      return error instanceof Error ? error.message : String(error)
+      if (epoch !== state.epoch) {
+        $.clock.after(0, () => { if (!state.leaving) void bootstrap($, state, push) })
+        return
+      }
+      const reason = error instanceof Error ? error.message : String(error)
+      $.ui.log(`Codex tasks start: ${reason}`, { to: 'debug' })
+      if ((error as { actionRequired?: boolean }).actionRequired) {
+        if (state.startError !== reason && state.shown) $.ui.log(`Codex tasks · could not start: ${reason}`)
+        state.startError = reason
+      }
+      else $.clock.after(2000, () => { if (!state.leaving) void bootstrap($, state, push) })
+      return reason
     } finally {
       timeout.abort()
     }
@@ -714,9 +830,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
-    answering: false, requestMtime: 0, dismissed: false,
+    answering: false, requestMtime: 0, dismissed: false, epoch: 0,
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
-    ticks: 0, since: 0, busy: false, booting: null, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
+    ticks: 0, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(),
@@ -724,28 +840,33 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    if (e.isInteractive) void bootstrap($, state, push)
+    if (e.isInteractive) $.clock.after(0, async () => {
+      if (state.script && state.leaving) await bindSession($, state, await $.session.id())
+      else {
+        state.leaving = false
+        void bootstrap($, state, push)
+      }
+    })
     return result
   })
   on('turn.start', ($, e, next) => {
     state.busy = true
-    if (!state.script) void bootstrap($, state, push)
+    if (!state.script) $.clock.after(0, () => { void bootstrap($, state, push) })
     return next(e)
   })
   on('turn.complete', ($, e, next) => {
     if (!e.agentId) {
       state.busy = false
-      void poll($, state)
+      $.clock.after(0, () => { void poll($, state) })
     }
     return next(e)
   })
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'resume') {
-      state.leaving = true
-      resetRows(state)
-      state.pending = []
-      await stopMonitors($, state)
-    }
+    state.epoch += 1
+    state.leaving = true
+    resetRows(state)
+    state.pending = []
+    stopMonitors($, state)
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
@@ -762,7 +883,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const result = await next(e)
     if (/(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)) {
       state.ticks = 0
-      void poll($, state)
+      $.clock.after(0, () => { void poll($, state) })
     }
     return result
   })
@@ -770,10 +891,11 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
-    const reason = await bootstrap($, state, push)
-    if (reason) return { text: `Codex tasks · could not start: ${reason}` }
+    const starting = !state.script
+    if (starting) $.clock.after(0, () => { void bootstrap($, state, push) })
+    if (state.startError) return { text: `Codex tasks · could not start: ${state.startError}` }
     const sessionId = await $.session.id()
-    if (sessionId !== state.sessionId) {
+    if (!starting && (state.leaving || sessionId !== state.sessionId)) {
       state.cwd = await $.session.cwd()
       await bindSession($, state, sessionId)
     }
@@ -785,6 +907,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // A poll belongs to the dispatch that started it. Joining a timer's poll
     // spends this command's own budget, even while its companion is waiting.
     if (refresh) $.clock.after(0, async () => {
+      await state.booting
+      if (!state.script || state.leaving || state.sessionId !== sessionId) return
       await refreshRows($, state)
       $.ui.invalidate('ui.render')
     })
@@ -799,7 +923,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.opened = false
       state.shown = false
       state.dismissed = true
-      await $.store.set(`${state.key}:dismissed`, true)
+      if (state.key) writeStore($, state, `${state.key}:dismissed`, true)
       await $.ui.close({ id: PANE })
       return { text: 'Codex tasks · closed' }
     }
@@ -817,9 +941,10 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     state.opened = true
     state.shown = true
     state.dismissed = false
-    await $.store.set(`${state.key}:dismissed`, false)
+    if (state.key) writeStore($, state, `${state.key}:dismissed`, false)
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
+    if (starting) return { text: 'Codex tasks · starting' }
     if (refresh) return { text: 'Codex tasks · refreshing' }
     if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
@@ -832,7 +957,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.opened = state.shown = false
       if (e.origin.kind === 'person') {
         state.dismissed = true
-        await $.store.set(`${state.key}:dismissed`, true)
+        if (state.key) writeStore($, state, `${state.key}:dismissed`, true)
       }
     }
     return next(e)
@@ -852,7 +977,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       onPress: async () => {
         state.opened = state.shown = true
         state.dismissed = false
-        await $.store.set(`${state.key}:dismissed`, false)
+        if (state.key) writeStore($, state, `${state.key}:dismissed`, false)
         await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
       },
     })] })
@@ -888,7 +1013,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (e.origin.kind === 'person') state.pinned = e.offset >= e.contentRows - e.bodyRows
     return next(e)
   })
-  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+  on('ui.render', { component: 'Pane' }, ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     // An unasked pane waiting for room may now be placed after a resize.
     state.opened = true
@@ -920,7 +1045,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       },
     }
     const tree = paneBody($.ui.resolve(e), threads, Math.max(20, e.props.bodyColumns),
-      Math.max(6, e.props.scroll?.bodyRows ?? 12), await $.clock.now(), state.selected, select, background, fold)
+      Math.max(6, e.props.scroll?.bodyRows ?? 12), state.now, state.selected, select, background, fold)
     // The status line is the tree's last row and the engine scrolls the whole
     // tree, so a trace that grows carries the status off the bottom of the
     // window. `end` keeps up with a tree that grows until something else moves

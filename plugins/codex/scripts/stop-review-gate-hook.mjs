@@ -6,12 +6,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { getCodexAvailability } from "./lib/codex.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-import { getConfig, listJobs } from "./lib/state.mjs";
-import { sortJobsNewestFirst } from "./lib/job-control.mjs";
-import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { resolveStateDirAtWorkspaceRoot } from "./lib/state.mjs";
+const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -56,7 +53,8 @@ function buildStopReviewPrompt(input = {}) {
   });
 }
 
-function buildSetupNote(cwd) {
+async function buildSetupNote(cwd) {
+  const { getCodexAvailability } = await import("./lib/codex.mjs");
   const availability = getCodexAvailability(cwd);
   if (availability.available) {
     return null;
@@ -139,13 +137,25 @@ function runStopReview(cwd, input = {}) {
   }
 }
 
-function main() {
+async function main() {
   const input = readHookInput();
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const config = getConfig(workspaceRoot);
-
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
+  // A disabled gate must not wait for Git or load the review/executor graph.
+  // The nearest .git directory or worktree file identifies the same state root.
+  let workspaceRoot;
+  try { workspaceRoot = fs.realpathSync(cwd); }
+  catch { workspaceRoot = path.resolve(cwd); }
+  while (!fs.existsSync(path.join(workspaceRoot, ".git"))) {
+    const parent = path.dirname(workspaceRoot);
+    if (parent === workspaceRoot) { workspaceRoot = path.resolve(cwd); break; }
+    workspaceRoot = parent;
+  }
+  let state;
+  try { state = JSON.parse(fs.readFileSync(path.join(resolveStateDirAtWorkspaceRoot(workspaceRoot), "state.json"), "utf8")) ?? {}; }
+  catch { state = {}; }
+  const config = state.config ?? {};
+  const jobs = filterJobsForCurrentSession(Array.isArray(state.jobs) ? state.jobs : [], input)
+    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
   const runningTaskNote = runningJob
     ? `Codex task ${runningJob.id} is still running. Check /codex:status and use /codex:cancel ${runningJob.id} if you want to stop it before ending the session.`
@@ -156,7 +166,7 @@ function main() {
     return;
   }
 
-  const setupNote = buildSetupNote(cwd);
+  const setupNote = await buildSetupNote(cwd);
   if (setupNote) {
     logNote(setupNote);
     logNote(runningTaskNote);
@@ -175,10 +185,8 @@ function main() {
   logNote(runningTaskNote);
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
-}
+});

@@ -5,15 +5,6 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { terminateProcessTree } from "./lib/process.mjs";
-import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
-import {
-  clearBrokerSession,
-  LOG_FILE_ENV,
-  loadBrokerSession,
-  PID_FILE_ENV,
-  sendBrokerShutdown,
-  teardownBrokerSession
-} from "./lib/broker-lifecycle.mjs";
 import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
@@ -74,16 +65,6 @@ function cleanupSessionJobs(cwd, sessionId) {
   });
 }
 
-function otherSessionJobRunning(cwd, sessionId) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  if (!fs.existsSync(resolveStateFile(workspaceRoot))) {
-    return false;
-  }
-  return loadState(workspaceRoot).jobs.some(
-    (job) => job.sessionId !== sessionId && (job.status === "queued" || job.status === "running")
-  );
-}
-
 export function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
@@ -96,42 +77,9 @@ export async function handleSessionEnd(input) {
 
   const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || process.env[SESSION_ID_ENV];
-  // Every session in the workspace shares one broker. Shutting it down under
-  // another session's running job aborted that job's turn; left alone, the
-  // broker exits once it is idle.
-  if (otherSessionJobRunning(cwd, sessionId)) {
-    cleanupSessionJobs(cwd, sessionId);
-    return;
-  }
-  const brokerSession =
-    loadBrokerSession(cwd) ??
-    (process.env[BROKER_ENDPOINT_ENV]
-      ? {
-          endpoint: process.env[BROKER_ENDPOINT_ENV],
-          pidFile: process.env[PID_FILE_ENV] ?? null,
-          logFile: process.env[LOG_FILE_ENV] ?? null
-        }
-      : null);
-  const brokerEndpoint = brokerSession?.endpoint ?? null;
-  const pidFile = brokerSession?.pidFile ?? null;
-  const logFile = brokerSession?.logFile ?? null;
-  const sessionDir = brokerSession?.sessionDir ?? null;
-  const pid = brokerSession?.pid ?? null;
-
-  if (brokerEndpoint) {
-    await sendBrokerShutdown(brokerEndpoint);
-  }
-
+  // The broker is shared, including with a session that has just started but
+  // has not dispatched a job yet. Its idle timeout handles its own shutdown.
   cleanupSessionJobs(cwd, sessionId);
-  teardownBrokerSession({
-    endpoint: brokerEndpoint,
-    pidFile,
-    logFile,
-    sessionDir,
-    pid,
-    killProcess: terminateProcessTree
-  });
-  clearBrokerSession(cwd);
 }
 
 async function main() {
@@ -149,8 +97,7 @@ async function main() {
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  });
+  // Lifecycle persistence/cleanup is best effort. The function hook supplies
+  // session identity, and an unused broker exits on its own idle deadline.
+  main().catch(() => {});
 }

@@ -24,7 +24,7 @@ export function test(name, fn) {
     };
     const element = type => ({ children, ...props }) => ({ type, props, children: Array.isArray(children) ? children : [children ?? ''] });
     const $ = {
-      ui: { status: text => { void dispatch('ui.status', { text }); }, toast: (text, options) => { void dispatch('ui.toast', { text, ...options }); }, render: e => dispatch('ui.render', e), resolve: () => ({ Box: element('Box'), Text: element('Text'), Markdown: element('Markdown') }), invalidate: event => { void dispatch('ui.invalidate', { event }); } },
+      ui: { log: (text, options) => { void dispatch('ui.log', { text, ...options }); }, status: text => { void dispatch('ui.status', { text }); }, toast: (text, options) => { void dispatch('ui.toast', { text, ...options }); }, render: e => dispatch('ui.render', e), resolve: () => ({ Box: element('Box'), Text: element('Text'), Markdown: element('Markdown') }), invalidate: event => { void dispatch('ui.invalidate', { event }); } },
       fs: { stat: path => dispatch('fs.stat', { path }), read: path => dispatch('fs.read', { path }) },
       process: { run: (argv, init) => dispatch('process.run', { argv, init }) },
       session: { cwd: () => dispatch('session.cwd') },
@@ -42,6 +42,15 @@ export const mock = {
     const timers = new Set();
     const settle = () => new Promise(resolve => setImmediate(resolve));
     $.clock.now = async () => now;
+    $.clock.after = (ms, callback) => {
+      if (!ms) {
+        const handle = setImmediate(callback);
+        return { cancel: () => clearImmediate(handle) };
+      }
+      const timer = { ms, due: now + ms, callback, once: true };
+      timers.add(timer);
+      return { cancel: () => timers.delete(timer) };
+    };
     $.clock.every = (ms, callback) => {
       const timer = { ms, due: now + ms, callback };
       timers.add(timer);
@@ -55,7 +64,8 @@ export const mock = {
           const timer = [...timers].sort((a, b) => a.due - b.due)[0];
           if (!timer || timer.due > target) break;
           now = timer.due;
-          timer.due += timer.ms;
+          if (timer.once) timers.delete(timer);
+          else timer.due += timer.ms;
           timer.callback();
           await settle();
         }
@@ -88,7 +98,7 @@ export function resultRow(output, props = {}) {
 export function world($, on) {
   const clock = mock.clock($);
   mock.env(on, { HOME: '/home/test' });
-  const state = { text: JSON.stringify(fixture()), mtime: 1, reads: 0, stats: 0, runs: [], invalidations: [], statuses: [], hints: [], toasts: [], missing: false, unknown: false };
+  const state = { text: JSON.stringify(fixture()), mtime: 1, reads: 0, stats: 0, runs: [], invalidations: [], statuses: [], hints: [], toasts: [], logs: [], missing: false, unknown: false };
   on('session.cwd', () => '/work');
   on('ui.render', { component: 'ToolUse' }, () => ({ type: 'Text', children: ['native Bash row'] }));
   on('ui.render', { component: 'ToolResult' }, () => ({ type: 'Text', children: ['native Bash result'] }));
@@ -96,6 +106,7 @@ export function world($, on) {
   on('ui.status', (_, e) => { state.statuses.push(e.text); });
   on('ui.toast', (_, e) => { state.toasts.push(e); });
   on('ui.invalidate', (_, e) => { state.invalidations.push(e); });
+  on('ui.log', (_, e) => { state.logs.push(e); });
   on('process.run', (_, e) => {
     state.runs.push(e);
     if (state.unknown && e.argv.includes('view-path')) return { exitCode: 1, stderr: 'UNKNOWN_JOB task-abc123-xyz789\n', stdout: '' };

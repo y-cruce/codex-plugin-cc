@@ -29,6 +29,11 @@ function defaultState() {
 
 export function resolveStateDir(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  return resolveStateDirAtWorkspaceRoot(workspaceRoot);
+}
+
+// Callers that already found the root on disk need not start Git to read config.
+export function resolveStateDirAtWorkspaceRoot(workspaceRoot) {
   let canonicalWorkspaceRoot = workspaceRoot;
   try {
     canonicalWorkspaceRoot = fs.realpathSync.native(workspaceRoot);

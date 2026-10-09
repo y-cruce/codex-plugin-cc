@@ -5,8 +5,9 @@ import { agentSummaries, liveTree, statusText, terminalTree } from './view.ts'
 import { clip, terminalOf } from './format.ts'
 import type { LiveView } from './view.ts'
 
-type Job = { follow: Follow; path?: Promise<string>; retryPolls: number; mtime?: number; data?: LiveView; error: string; finalReads?: Map<string, Promise<boolean>>; eventSeqs?: Map<string, string>; sawLive?: boolean }
+type Job = { follow: Follow; path?: Promise<string>; retryPolls: number; mtime?: number; data?: LiveView; error: string; finalReads?: Set<string>; eventSeqs?: Map<string, string>; sawLive?: boolean }
 type State = {
+  cwd?: string
   rows: Map<string, Job>
   jobs: Map<string, Job>
   terminalLabels: Map<string, { label: string; agents: string[] }>
@@ -16,6 +17,14 @@ type State = {
   now: number
   redrawnAt: number
   toasted: Set<string>
+}
+
+async function bindCwd($: EngineInterface, state: State, job: Job) {
+  state.cwd = await $.session.cwd()
+  if (!job.follow.cwd) {
+    job.follow.cwd = state.cwd
+    state.jobs.set(JSON.stringify([state.cwd, job.follow.script, job.follow.jobId]), job)
+  }
 }
 
 const LOOKUP_RETRY_POLLS = 4
@@ -65,15 +74,16 @@ export async function refresh($: EngineInterface, job: Job): Promise<boolean> {
     })
     if (stat.mtimeMs !== job.mtime) {
       const text = await $.fs.read(path)
-      job.mtime = stat.mtimeMs
       const data = JSON.parse(text) as LiveView
       if (data.schemaVersion !== 1 || data.jobId !== job.follow.jobId) throw new Error('live-view schema/job mismatch')
+      job.mtime = stat.mtimeMs
       job.data = data
       job.error = ''
       if (data.status === 'running' || data.status === 'waiting-for-answer') job.sawLive = true
     }
   } catch (error) {
     job.error = reason(error)
+    if (job.error !== oldError) $.ui.log(`Codex live view: ${job.error}`, { to: 'debug' })
   }
   return before !== job.data || oldError !== job.error
 }
@@ -110,6 +120,7 @@ async function poll($: EngineInterface, state: State) {
   if (state.polling || !state.rows.size) return
   state.polling = true
   try {
+    for (const job of new Set(state.rows.values())) await bindCwd($, state, job)
     const changed = await Promise.all([...new Set(state.rows.values())].map(job => refresh($, job)))
     state.now = await $.clock.now()
     for (const job of new Set(state.rows.values())) notices($, state, job)
@@ -119,9 +130,25 @@ async function poll($: EngineInterface, state: State) {
       // shared tick coalesces all rows, below the ordinary 10/s limit.
       $.ui.invalidate('ui.render')
     }
+  } catch (error) {
+    $.ui.log(`Codex live view: ${reason(error)}`, { to: 'debug' })
   } finally {
     state.polling = false
   }
+}
+
+// Ended cards get one final snapshot without holding a redraw. A temporary
+// read failure retries here even after the last running row released its timer.
+async function readFinal($: EngineInterface, state: State, job: Job, id: string) {
+  if (!job.finalReads?.has(id)) return
+  await bindCwd($, state, job)
+  job.mtime = undefined
+  job.retryPolls = 0
+  await refresh($, job)
+  state.now = await $.clock.now()
+  notices($, state, job)
+  $.ui.invalidate('ui.render')
+  if (job.error) $.clock.after(2000, () => { void readFinal($, state, job, id) })
 }
 
 function release(state: State, id: string, followed?: Set<string>) {
@@ -184,7 +211,7 @@ export function register(on: On, followed?: Set<string>) {
       release(state, e.props.tool_use_id, followed)
       if (!terminal) return next(e)
     }
-    const cwd = follow.cwd ?? await $.session.cwd()
+    const cwd = follow.cwd ?? state.cwd
     const key = JSON.stringify([cwd, follow.script, follow.jobId])
     let job = state.jobs.get(key)
     const ui = $.ui.resolve(e)
@@ -196,19 +223,15 @@ export function register(on: On, followed?: Set<string>) {
       return terminalTree(ui, terminal, snapshot.label, columns, snapshot.agents)
     }
     if (!job) {
-      job = { follow: { ...follow, cwd }, retryPolls: 0, error: 'loading' }
+      job = { follow: { ...follow }, retryPolls: 0, error: 'loading' }
       state.jobs.set(key, job)
     }
     if (!e.props.isRunning) {
-      job.finalReads ??= new Map()
+      job.finalReads ??= new Set()
       if (!job.finalReads.has(e.props.tool_use_id)) {
-        job.mtime = undefined
-        job.retryPolls = 0
-        job.finalReads.set(e.props.tool_use_id, refresh($, job))
+        job.finalReads.add(e.props.tool_use_id)
+        $.clock.after(0, () => { void readFinal($, state, job, e.props.tool_use_id) })
       }
-      await job.finalReads.get(e.props.tool_use_id)
-      state.now = await $.clock.now()
-      notices($, state, job)
     } else {
       job.finalReads?.delete(e.props.tool_use_id)
       state.rows.set(e.props.tool_use_id, job)
@@ -216,11 +239,9 @@ export function register(on: On, followed?: Set<string>) {
     }
     if (e.props.isRunning && !state.timer) {
       state.timer = $.clock.every(500, () => { void poll($, state) })
-      void poll($, state)
+      $.clock.after(0, () => { void poll($, state) })
     }
-    if (!job.error && job.data) return liveTree(ui, job.data, columns, state.now, e.viewport?.rows, terminal ? { kind: terminal.kind as 'DONE' | 'FAILED' } : undefined)
-    return ui.Box({ flexDirection: 'column', children: [await next(e), ui.Box({ paddingLeft: 2, children: ui.Text({
-      dimColor: true, wrap: 'truncate-end', children: clip(`codex live view unavailable: ${job.error}`, Math.max(1, columns - 2)),
-    }) })] })
+    if (job.data) return liveTree(ui, job.data, columns, state.now, e.viewport?.rows, terminal ? { kind: terminal.kind as 'DONE' | 'FAILED' } : undefined)
+    return next(e)
   })
 }

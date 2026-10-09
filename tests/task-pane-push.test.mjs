@@ -35,7 +35,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   dirs.add(workspaceRoot);
   const statPaths = [];
   const observed = [];
-  const base = "/home/test/.claude/plugins/data/codex/state/main";
+  const base = options.fallback ? "/tmp/codex-companion/main" : "/home/test/.claude/plugins/data/codex/state/main";
   const jobPath = `${base}/jobs/job-a.json`;
   const viewPath = `${base}/thread-records/record-a/live-view.json`;
   const live = {
@@ -64,17 +64,18 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const engine = {
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }) },
-    env: { get: async () => "/home/test" },
-    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(fn) },
-    store: { get: async (key) => stored.get(key), set: async (key, value) => {
+    env: { get: async (name) => name === "TMPDIR" ? "/tmp" : "/home/test" },
+    clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(fn) },
+    store: { get: async (key) => { if (options.storeRead) await options.storeRead(key); return stored.get(key); }, set: async (key, value) => {
+      if (options.storeWrite) await options.storeWrite(key, value);
       if (key === `codex:tasks:${sessionId}` && failWrites-- > 0) throw new Error("Lock file is already being held");
       stored.set(key, value);
       if (key === `codex:tasks:${sessionId}`) writes++;
     } },
     fs: {
       exists: async (path) => path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
-      list: async (path) => path.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
-        : path.endsWith("/state") ? [{ kind: "dir", name: "main" }]
+      list: async (path) => path.endsWith("plugins/data") ? options.fallback ? [] : [{ kind: "dir", name: "codex" }]
+        : path.endsWith("/state") || options.fallback && path === "/tmp/codex-companion" ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json", kind: "file", mtimeMs: mtime, isLink: false, ...options.jobEntry }] : [],
       stat: async (path) => {
         statPaths.push(path);
@@ -82,7 +83,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         await read(path);
         return { mtimeMs: mtime };
       },
-      write: async (path, text) => { files.set(path, JSON.parse(text)); },
+      write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path); files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
         if (path === viewPath && viewRead) {
@@ -93,22 +94,23 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         return text;
       },
     },
-    process: { run: async (args, options) => {
+    process: { run: async (args, init) => {
       // Node names the command, not the directory, when a spawn's cwd is gone.
-      if (!dirs.has(options.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
+      if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
-      if (args[0] === "pgrep") return { exitCode: 0, stdout: "123", stderr: "" };
-      observed.push(options.cwd);
+      if (args[0] === "pgrep") return { exitCode: options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
+      observed.push(init.cwd);
+      if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(), stderr: '' };
       if (threadRead) {
         const wait = threadRead;
         threadRead = null;
         await wait();
       }
       if (threads instanceof Error) throw threads;
-      return { exitCode: 0, stdout: JSON.stringify({ threads: options.cwd === workspaceRoot ? threads : [] }), stderr: "" };
+      return { exitCode: 0, stdout: JSON.stringify({ threads: init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
-    tool: { call: async () => assert.fail("no real monitors") },
-    ui: { panes: async () => options.panes ?? [], open: async (request) => { opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: () => {},
+    tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
+    ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: () => {},
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -145,6 +147,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
     band: async () => hooks.get("ui.render:AbovePrompt")(engine, { props: {} }, async () => {}),
     close: async (kind = "person") => hooks.get("ui.close:")(engine, { id: "codex_tasks", origin: { kind } }, async () => {}),
+    end: async (reason = "resume") => hooks.get("session.end:")(engine, { reason }, async () => {}),
     session: (value) => {
       sessionId = value;
       startedAt = now;
@@ -156,6 +159,138 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
+
+test("pane rendering uses the cached clock without I/O", async () => {
+  let reading = false;
+  const pane = await paneHarness(new Map(), undefined, "session", { clockNow: () => assert.equal(reading, false) });
+  reading = true;
+  assert.match(await pane.render(), /Alpha task/);
+});
+
+test("store lock refusals do not interrupt pane controls and pending choices are retried", async () => {
+  let locked = false;
+  const pane = await paneHarness(new Map(), undefined, "session", { storeWrite: () => {
+    if (locked) throw new Error("Lock file is already being held");
+  } });
+  locked = true;
+  assert.match((await pane.command("")).text, /Alpha task/);
+  assert.match((await pane.command("")).text, /closed/);
+  assert.match((await pane.command("forget 1")).text, /forgot/);
+  await pane.tick();
+  assert.doesNotMatch(await pane.render(), /Alpha task/);
+  await pane.close();
+  locked = false;
+  await pane.tick();
+  assert.equal(pane.stored.get("codex:tasks:session:dismissed"), true);
+  assert.deepEqual(pane.stored.get("codex:tasks:session:forgotten"), ["record-a"]);
+  assert.deepEqual(pane.logs, []);
+});
+
+test("unreadable pane store falls back to live state without a startup error", async () => {
+  const pane = await paneHarness(new Map(), undefined, "session", { storeRead: () => { throw new Error("store is unreadable"); } });
+  assert.match((await pane.command("")).text, /Alpha task/);
+  assert.deepEqual(pane.logs, []);
+  assert.match(pane.debugLogs.join("\n"), /unreadable/);
+});
+
+test("pane discovers cross-repository jobs in the temp store without a command env export", async () => {
+  const pane = await paneHarness(new Map(), undefined, "session", { fallback: true, workspaceRoot: "/work/other" });
+  assert.match(await pane.render(), /Alpha task/);
+  assert.ok(pane.observed.includes("/work/other"));
+});
+
+test("pane listings recover after five companion failures without a person-visible notice", async () => {
+  for (const source of ["threads", "replay"]) {
+    let failed = true;
+    let replays = 0;
+    const pane = await paneHarness(new Map(), undefined, "session", { replay: () => {
+      replays++;
+      if (failed) throw new Error("companion failed");
+      return '{"type":"end","nextCursor":"0"}';
+    } });
+    if (source === "threads") pane.list(new Error("companion failed"));
+    else pane.listing[0].historyAvailable = true;
+    for (let i = 0; i < 5; i++) await pane.tick();
+    const calls = source === "threads" ? pane.observed.length : replays;
+    failed = false;
+    pane.list(true);
+    for (let i = 0; i < 16; i++) await pane.tick();
+    assert.ok((source === "threads" ? pane.observed.length : replays) > calls, `${source} must be retried`);
+    assert.deepEqual(pane.logs, []);
+    assert.match(pane.debugLogs.join("\n"), /companion failed/);
+  }
+});
+
+test("pane channel retries a request after its reply write fails", async () => {
+  let fail = true;
+  const pane = await paneHarness(new Map(), undefined, "session", { fileWrite: () => {
+    if (fail) throw new Error("reply temporarily unwritable");
+  } });
+  const base = "/home/test/.claude/plugins/data/codex-tasks-pane/session";
+  pane.files.set(`${base}.request.json`, { id: "retry", action: "list" });
+  await pane.tick();
+  fail = false;
+  await pane.tick();
+  assert.equal(pane.files.get(`${base}.reply.json`)?.id, "retry");
+  assert.deepEqual(pane.logs, []);
+});
+
+test("a failed automatic pane open is retried on the next poll", async () => {
+  let fail = true;
+  const pane = await paneHarness(new Map(), undefined, "session", { open: () => {
+    if (fail) throw new Error("pane temporarily unavailable");
+  } });
+  fail = false;
+  await pane.tick();
+  assert.equal(pane.opened.length, 1);
+  assert.deepEqual(pane.logs, []);
+});
+
+test("session resume returns while a monitor stop never returns", async (t) => {
+  const stop = Promise.withResolvers();
+  t.after(stop.resolve);
+  for (const reason of ["resume", "clear"]) {
+    let monitors = 0;
+    const stopped = [];
+    const pane = await paneHarness(new Map(), undefined, "session", { watch: false, toolCall: request => {
+      if (request.tool === "Monitor") return { result: { taskId: `monitor-${++monitors}` } };
+      stopped.push(request.task_id);
+      return stop.promise;
+    } });
+    let timer;
+    await Promise.race([pane.end(reason), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("session end waited for TaskStop")), 1000);
+    })]).finally(() => clearTimeout(timer));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(pane.stored.get("codex:tasks:session:retiredMonitors"), ["monitor-1"]);
+    pane.session("next");
+    await pane.command("");
+    await pane.tick();
+    assert.deepEqual(stopped, ["monitor-1"], reason);
+    assert.equal(monitors, 2, "the next session's monitor runs while the old stop is pending");
+  }
+});
+
+test("an old replay cannot write its ledger into a new session", async () => {
+  const entered = Promise.withResolvers();
+  const replay = Promise.withResolvers();
+  const pane = await paneHarness(new Map(), undefined, "session", { replay: () => {
+    entered.resolve();
+    return replay.promise;
+  } });
+  pane.listing[0].historyAvailable = true;
+  const pending = pane.tick();
+  await entered.promise;
+  pane.session("next");
+  pane.files.delete(pane.jobPath);
+  pane.list([]);
+  assert.match((await pane.command("")).text, /nothing dispatched/);
+  replay.resolve('{"type":"end","nextCursor":"old-session"}');
+  await pending;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pane.stored.get("codex:tasks:next")?.["job-a"], undefined);
+  assert.doesNotMatch(await pane.render(), /Alpha task/);
+});
 
 test("tasks opens and answers while the background companion never returns, then fills in", async (t) => {
   const blocked = Promise.withResolvers();
@@ -195,7 +330,7 @@ test("tasks refresh opens and answers before a pending poll, then rebuilds the p
   assert.doesNotMatch(await pane.render(), /Alpha task/);
 });
 
-test("tasks reports a stalled start and retries without a companion discovery process", async () => {
+test("tasks answers during a stalled bootstrap and retries without a startup failure notice", async () => {
   const hooks = new Map();
   const timers = [];
   const stored = new Map();
@@ -203,12 +338,13 @@ test("tasks reports a stalled start and retries without a companion discovery pr
   const stalled = Promise.withResolvers();
   const sleeps = [];
   const opened = [];
+  const retries = [];
   let firstRead = true;
   const engine = {
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => "session", usage: async () => ({ startedAt: 0 }) },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => 0, every: (ms, fn) => timers.push([ms, fn]), after: (_ms, fn) => setImmediate(fn), sleep: (ms, { signal }) => {
+    clock: { now: async () => 0, every: (ms, fn) => timers.push([ms, fn]), after: (ms, fn) => ms ? retries.push(fn) : setImmediate(fn), sleep: (ms, { signal }) => {
       const wait = Promise.withResolvers();
       sleeps.push({ ms, signal, ...wait });
       signal.addEventListener("abort", () => wait.reject(signal.reason), { once: true });
@@ -235,24 +371,32 @@ test("tasks reports a stalled start and retries without a companion discovery pr
     ui: { panes: async () => [], open: async (request) => { opened.push(request); }, invalidate: () => {}, log: () => {} },
   };
   registerTaskPane((event, options, callback) => hooks.set(event, callback ?? options));
-  const command = () => hooks.get("command.run")(engine, { command: "codex:tasks", args: "" },
+  const command = (args = "") => hooks.get("command.run")(engine, { command: "codex:tasks", args },
     async () => assert.fail("command escaped to Markdown"));
   const pending = command();
+  let deadline;
+  assert.equal((await Promise.race([pending, new Promise((_, reject) => {
+    deadline = setTimeout(() => reject(new Error("command joined bootstrap")), 1000);
+  })]).finally(() => clearTimeout(deadline))).text, "Codex tasks · starting");
   await entered.promise;
   assert.equal(sleeps[0].ms, 5000);
   sleeps[0].resolve();
-  assert.match((await pending).text, /could not start: initialization did not finish within 5s/);
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(stored.size, 0);
   assert.equal(timers.length, 0);
 
-  assert.match((await command()).text, /nothing dispatched/);
+  assert.equal(retries.length, 1);
+  retries[0]();
+  for (let i = 0; i < 20 && !timers.length; i++) await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match((await command("refresh")).text, /refreshing/);
   assert.equal(stored.get("codex:tasks:session:dismissed"), false);
   assert.equal(timers.length, 3);
   assert.ok(sleeps.every((wait) => wait.signal.aborted), "each host clock wait is cancelled");
   stalled.resolve();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(timers.length, 3, "the late first attempt installs no timers");
-  assert.equal(opened.length, 1);
+  assert.equal(opened.length, 2);
   assert.ok([...stored.keys()].every((key) => key.startsWith("codex:tasks:session")));
 });
 
@@ -622,6 +766,7 @@ test("branch stops inherited pane monitors and watches only its own dispatches",
 
   assert.ok(hooks.has("session.end"), "resume must detach this process's watches");
   await hooks.get("session.end")(engine, { reason: "resume", sessionId }, async () => {});
+  await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(monitors.filter((request) => request.tool === "TaskStop"),
     [{ tool: "TaskStop", task_id: "monitor-session-a" }]);
   sessionId = "session-b";
