@@ -54,6 +54,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   let writes = 0;
   let failWrites = options.failWrites ?? 0;
   let viewRead;
+  let threadRead = options.threadRead;
   let mtime = options.mtime ?? now;
   const read = async (path) => {
     if (!files.has(path)) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
@@ -64,7 +65,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }) },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn) },
+    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => {
       if (key === `codex:tasks:${sessionId}` && failWrites-- > 0) throw new Error("Lock file is already being held");
       stored.set(key, value);
@@ -98,6 +99,11 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep") return { exitCode: 0, stdout: "123", stderr: "" };
       observed.push(options.cwd);
+      if (threadRead) {
+        const wait = threadRead;
+        threadRead = null;
+        await wait();
+      }
       if (threads instanceof Error) throw threads;
       return { exitCode: 0, stdout: JSON.stringify({ threads: options.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
@@ -126,6 +132,13 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       viewRead = () => { started(); return pending; };
       return { reading, release };
     },
+    holdThreadsRead: () => {
+      let started, release;
+      const reading = new Promise((resolve) => { started = resolve; });
+      const pending = new Promise((resolve) => { release = resolve; });
+      threadRead = () => { started(); return pending; };
+      return { reading, release };
+    },
     viewTick: () => { mtime++; timers.get(500)(); },
     touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
@@ -144,6 +157,44 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   };
 }
 
+test("tasks opens and answers while the background companion never returns, then fills in", async (t) => {
+  const blocked = Promise.withResolvers();
+  t.after(() => blocked.resolve());
+  const pane = await paneHarness(new Map(), { isPlaced: true }, "session", { threadRead: () => blocked.promise });
+  const started = performance.now();
+  let timeout;
+  const reply = await Promise.race([pane.command(""), new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("tasks waited for the background poll")), 1000);
+  })]).finally(() => clearTimeout(timeout));
+  assert.match(reply.text, /nothing dispatched/);
+  assert.ok(performance.now() - started < 1000);
+  assert.equal(pane.opened.length, 1);
+  assert.match((await pane.command("")).text, /closed/);
+  assert.match((await pane.command("")).text, /nothing dispatched/);
+  blocked.resolve();
+  await pane.tick();
+  assert.match(await pane.render(), /Alpha task/);
+});
+
+test("tasks refresh opens and answers before a pending poll, then rebuilds the pane", async (t) => {
+  const pane = await paneHarness();
+  const blocked = pane.holdThreadsRead();
+  t.after(blocked.release);
+  const pending = pane.tick();
+  await blocked.reading;
+  pane.list([]);
+  let timeout;
+  const reply = await Promise.race([pane.command("refresh"), new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("refresh waited for the background poll")), 1000);
+  })]).finally(() => clearTimeout(timeout));
+  assert.equal(reply.text, "Codex tasks · refreshing");
+  assert.equal(pane.opened.at(-1).focus, true);
+  blocked.release();
+  await pending;
+  await pane.tick();
+  assert.doesNotMatch(await pane.render(), /Alpha task/);
+});
+
 test("tasks reports a stalled start and retries without a companion discovery process", async () => {
   const hooks = new Map();
   const timers = [];
@@ -157,7 +208,7 @@ test("tasks reports a stalled start and retries without a companion discovery pr
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => "session", usage: async () => ({ startedAt: 0 }) },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => 0, every: (ms, fn) => timers.push([ms, fn]), sleep: (ms, { signal }) => {
+    clock: { now: async () => 0, every: (ms, fn) => timers.push([ms, fn]), after: (_ms, fn) => setImmediate(fn), sleep: (ms, { signal }) => {
       const wait = Promise.withResolvers();
       sleeps.push({ ms, signal, ...wait });
       signal.addEventListener("abort", () => wait.reject(signal.reason), { once: true });
@@ -375,11 +426,15 @@ test("forget uses task selectors and stays hidden until refresh rebuilds from di
     assert.doesNotMatch(await pane.render(), /Alpha task/);
     assert.equal(JSON.stringify([...pane.files]), before);
     assert.match((await pane.command("refresh")).text, /refresh/i);
+    await pane.tick();
+    await pane.tick();
     assert.match(await pane.render(), /Alpha task/);
     assert.match((await pane.command("forget absent")).text, /No task matches/);
     assert.match((await pane.command("forget")).text, /Usage/);
     pane.list([]);
     assert.match((await pane.command("refresh")).text, /refresh/i);
+    await pane.tick();
+    await pane.tick();
     assert.doesNotMatch(await pane.render(), /Alpha task/);
   }
 });
@@ -451,6 +506,7 @@ test("refresh waits for polling and refresh or pruning discards an old concurren
     read.release();
     await pending;
     await refreshed;
+    await pane.tick();
     await new Promise((resolve) => setImmediate(resolve));
     assert.doesNotMatch(await pane.render(), /Alpha task/, source);
   }
@@ -525,7 +581,7 @@ test("branch stops inherited pane monitors and watches only its own dispatches",
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work/main", id: async () => sessionId, usage: async () => { usageStarts.push(startedAt); return { startedAt }; } },
     env: { get: async () => "/home/test" },
-    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.push([ms, fn]) },
+    clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.push([ms, fn]), after: (_ms, fn) => setImmediate(fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => { stored.set(key, value); } },
     fs: {
       exists: async (path) => path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",

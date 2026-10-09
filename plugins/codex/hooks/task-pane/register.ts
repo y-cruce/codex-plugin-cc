@@ -772,16 +772,25 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
     const reason = await bootstrap($, state, push)
     if (reason) return { text: `Codex tasks · could not start: ${reason}` }
+    const sessionId = await $.session.id()
+    if (sessionId !== state.sessionId) {
+      state.cwd = await $.session.cwd()
+      await bindSession($, state, sessionId)
+    }
     const args = e.args.trim()
     const refresh = args === 'refresh'
     const forget = /^forget(?:\s|$)/.test(args)
     const wanted = forget ? args.slice('forget'.length).trim() : refresh ? '' : args
     if (forget && !wanted) return { text: 'Usage: /codex:tasks forget <number | part of a task name | task id>' }
-    if (refresh) await refreshRows($, state)
-    let threads = visibleThreads(state)
+    // A poll belongs to the dispatch that started it. Joining a timer's poll
+    // spends this command's own budget, even while its companion is waiting.
+    if (refresh) $.clock.after(0, async () => {
+      await refreshRows($, state)
+      $.ui.invalidate('ui.render')
+    })
+    const threads = visibleThreads(state)
     if (!threads.length && !refresh) {
-      await poll($, state)
-      threads = visibleThreads(state)
+      $.clock.after(0, () => { void poll($, state) })
     }
     // The pane opens whether or not anything is running: it is where tasks are
     // watched, and asking for it before dispatching one is a fair thing to do.
@@ -811,7 +820,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     await $.store.set(`${state.key}:dismissed`, false)
     await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
     $.ui.invalidate('ui.render')
-    if (refresh) return { text: `Codex tasks · refreshed · ${threads.length} tasks` }
+    if (refresh) return { text: 'Codex tasks · refreshing' }
     if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }
