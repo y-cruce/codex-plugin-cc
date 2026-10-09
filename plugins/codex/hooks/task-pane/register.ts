@@ -8,6 +8,7 @@ type Thread = { id: string; recordId: string; jobId: string; label: string | nul
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean }
 type Receipt = { cursor?: string; terminal?: string }
 type Ledger = Record<string, Receipt>
+type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
 type State = {
   cwd: string
   home: string
@@ -48,7 +49,9 @@ type State = {
   toEnd: boolean
   pinned: boolean
   clock: string
-  monitors: Map<string, { armedAt: number; checkedAt?: number }>
+  monitors: Map<string, Monitor>
+  retiredMonitors: Set<string>
+  leaving: boolean
   liveRoots: Set<string>
 }
 
@@ -112,7 +115,23 @@ const CHECK_MS = 15_000
 // entry goes and the next poll with a live job there arms a fresh one.
 function recordMonitors($: EngineInterface, state: State) {
   return $.store.set(`${state.key}:monitors`,
-    Object.fromEntries([...state.monitors].map(([root, monitor]) => [root, monitor.armedAt]))).catch(() => {})
+    Object.fromEntries(state.monitors)).catch(() => {})
+}
+
+async function stopMonitor($: EngineInterface, state: State, taskId: string) {
+  state.retiredMonitors.add(taskId)
+  await $.store.set(`${state.key}:retiredMonitors`, [...state.retiredMonitors])
+  // TaskStop addresses only this process's registry, never another session's shell.
+  await $.tool.call({ tool: 'TaskStop', task_id: taskId }).catch((error: unknown) => {
+    $.ui.log(`Codex tasks stop monitor ${taskId}: ${String(error)}`, { to: 'debug' })
+  })
+}
+
+async function stopMonitors($: EngineInterface, state: State) {
+  const monitors = [...state.monitors.values()]
+  state.monitors.clear()
+  await recordMonitors($, state)
+  await Promise.all(monitors.flatMap(monitor => monitor.taskId ? [stopMonitor($, state, monitor.taskId)] : []))
 }
 
 // The watch is a process with a command line of its own, so whether it is still
@@ -130,6 +149,7 @@ async function watching($: EngineInterface, state: State, root: string): Promise
 
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   for (const root of live) {
+    if (state.leaving) return
     const monitor = state.monitors.get(root)
     // Just armed: the process has not necessarily appeared yet, and asking now
     // would arm a second one for the same repository.
@@ -144,15 +164,25 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       await recordMonitors($, state)
       continue
     }
-    state.monitors.set(root, { armedAt: now })
+    if (state.leaving) return
+    const sessionId = state.sessionId
+    const armed: Monitor = { armedAt: now }
+    state.monitors.set(root, armed)
     // Awaited, or a reload between the arm and the write reads the old set and
     // arms a second monitor for the same repository.
     await recordMonitors($, state)
+    if (state.leaving || state.sessionId !== sessionId) return
     void $.tool.call({
       tool: 'Monitor',
-      command: `bash ${state.worker} events --cwd ${root} --session ${state.sessionId}`,
+      command: `bash ${state.worker} events --cwd ${root} --session ${sessionId}`,
       description: `Codex job events in ${root.split('/').at(-1) ?? root}`,
       timeout_ms: MONITOR_MS,
+    }).then(async result => {
+      const taskId = (result.result as { taskId?: string } | undefined)?.taskId
+      if (!taskId) return
+      if (state.leaving || state.sessionId !== sessionId) return stopMonitor($, state, taskId)
+      armed.taskId = taskId
+      await recordMonitors($, state)
     }).catch((error: unknown) => {
       $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     })
@@ -272,7 +302,11 @@ function resetRows(state: State) {
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
-  if (state.sessionId && sessionId !== state.sessionId) state.opened = state.shown = false
+  if (state.sessionId && sessionId !== state.sessionId) {
+    await stopMonitors($, state)
+    state.opened = state.shown = false
+  }
+  state.leaving = false
   state.sessionId = sessionId
   state.key = `${$.plugin.name}:tasks:${sessionId}`
   state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
@@ -282,11 +316,13 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   state.pending = []
   const now = await $.clock.now()
   state.since = (await $.session.usage()).startedAt
-  // A reload or /clear may leave an earlier session's watches running.
+  for (const id of (await $.store.get(`${state.key}:retiredMonitors`) ?? []) as string[]) state.retiredMonitors.add(id)
+  await $.store.set(`${state.key}:retiredMonitors`, [...state.retiredMonitors])
   state.monitors.clear()
   const armed = await $.store.get(`${state.key}:monitors`)
-  for (const [root, at] of Object.entries((armed ?? {}) as Record<string, number>)) {
-    if (now - at < MONITOR_MS) state.monitors.set(root, { armedAt: at })
+  for (const [root, saved] of Object.entries((armed ?? {}) as Record<string, number | Monitor>)) {
+    const monitor = typeof saved === 'number' ? { armedAt: saved } : saved
+    if (now - monitor.armedAt < MONITOR_MS) state.monitors.set(root, monitor)
   }
   $.ui.invalidate('ui.render')
 }
@@ -300,6 +336,7 @@ function poll($: EngineInterface, state: State): Promise<void> {
 async function pollOnce($: EngineInterface, state: State) {
   try {
     const sessionId = await $.session.id()
+    if (state.leaving && sessionId === state.sessionId) return
     if (sessionId !== state.sessionId) {
       state.cwd = await $.session.cwd()
       await bindSession($, state, sessionId)
@@ -338,6 +375,7 @@ async function pollOnce($: EngineInterface, state: State) {
         }
       }
     }
+    if (state.leaving) return
     const returned = new Set(found.map(({ thread }) => thread.id))
     let dropped = false
     for (const [root, ids] of returnedByRoot) {
@@ -369,8 +407,10 @@ async function pollOnce($: EngineInterface, state: State) {
     await refreshViews($, state, true)
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
+    if (state.leaving) return
     state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
     await ensureMonitors($, state, state.liveRoots, now)
+    if (state.leaving) return
     for (const { thread, cwd } of found) {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
       // A job dispatched seconds ago is listed before its event history is
@@ -452,6 +492,7 @@ async function pollOnce($: EngineInterface, state: State) {
       }
     }
     await refreshViews($, state)
+    if (state.leaving) return
     // What the pane would draw, not every view the scan loaded: a repository
     // keeps its finished jobs for weeks, so a fresh session found four threads
     // from a fortnight ago, opened the pane for them, and drew "nothing
@@ -658,7 +699,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     views: new Map<string, LiveView>(), ledger: {},
     ticks: 0, since: 0, busy: false, booting: null, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
-    monitors: new Map<string, { armedAt: number; checkedAt?: number }>(),
+    monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(),
   }
 
@@ -679,9 +720,20 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     return next(e)
   })
-  on('prompt.submit', ($, e, next) => {
-    if (e.origin.kind !== 'task-notification'
-      || !shouldDropMonitorExpiry(e.text, state.monitors.keys(), state.liveRoots, Boolean(state.script))) return next(e)
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'resume') {
+      state.leaving = true
+      resetRows(state)
+      state.pending = []
+      await stopMonitors($, state)
+    }
+    return next(e)
+  })
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind !== 'task-notification') return next(e)
+    const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
+    if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
+    if (!shouldDropMonitorExpiry(e.text, state.monitors.keys(), state.liveRoots, Boolean(state.script))) return next(e)
     return { drop: 'Codex tasks monitor expiry is re-armed by the pane' }
   })
   // A dispatch creates its job in whatever repository the brief names; waiting

@@ -489,7 +489,7 @@ test("terminal receipts do not seed rows or prevent disk reconciliation", async 
   }
 });
 
-test("task pane follows the new session after clear on the first Bash dispatch", async () => {
+test("branch stops inherited pane monitors and watches only its own dispatches", async () => {
   const hooks = new Map();
   const timers = [];
   const observed = [];
@@ -531,7 +531,10 @@ test("task pane follows the new session after clear on the first Bash dispatch",
         ? [{ id: `job-${id}`, recordId: `job-${id}`, jobId: `job-${id}`, label: `job ${id}`,
           status: "running", sessionIds: [`session-${id}`], viewPath: `/view/${id}`, historyAvailable: false }] : [] }), stderr: "" };
     } },
-    tool: { call: async (request) => { monitors.push(request); } },
+    tool: { call: async (request) => {
+      monitors.push(request);
+      return request.tool === "Monitor" ? { result: { taskId: `monitor-${sessionId}` } } : {};
+    } },
     ui: { panes: async () => [], open: async (request) => { opened.push(request); return { isPlaced: true }; }, invalidate: () => {}, log: () => {}, toast: () => {} },
   };
   const on = (event, options, callback) => hooks.set(event, callback ?? options);
@@ -545,21 +548,33 @@ test("task pane follows the new session after clear on the first Bash dispatch",
   registerTaskPane(on);
   await hooks.get("session.start")(engine, { isInteractive: true }, async () => {});
   await until(() => stored.has("codex:tasks:session-a"));
-  assert.ok(monitors.some((request) => request.command.includes("--session session-a")));
+  assert.ok(monitors.some((request) => request.command?.includes("--session session-a")));
 
+  assert.ok(hooks.has("session.end"), "resume must detach this process's watches");
+  await hooks.get("session.end")(engine, { reason: "resume", sessionId }, async () => {});
+  assert.deepEqual(monitors.filter((request) => request.tool === "TaskStop"),
+    [{ tool: "TaskStop", task_id: "monitor-session-a" }]);
   sessionId = "session-b";
   startedAt = now;
+  const stale = await hooks.get("prompt.submit")(engine, {
+    origin: { kind: "task-notification" },
+    text: '<task-notification><task-id>monitor-session-a</task-id><event>QUESTION job=job-a</event></task-notification>',
+  }, async () => assert.fail("inherited Monitor event reached the branch"));
+  assert.ok(stale.drop);
+  assert.equal(monitors.filter((request) => request.tool === "Monitor").length, 1);
+  assert.match((await hooks.get("command.run")(engine, { command: "tasks", args: "" }, async () => {})).text,
+    /nothing dispatched/);
   jobs = ["a.json", "b.json"];
   observed.length = 0;
   await hooks.get("tool.call")(engine, { command: "bash dispatch.sh" }, async () => {});
-  await until(() => stored.has("codex:tasks:session-b"));
+  await until(() => monitors.some((request) => request.command?.includes("events --cwd /work/b --session session-b")));
 
   assert.equal(timers.length, 3);
   assert.deepEqual(usageStarts, [now - 3_600_000, now]);
   assert.equal(stored.has("codex:tasks:session-b:since"), false);
   assert.ok(observed.some((call) => call.cwd === "/work/b" && call.sessionId === "session-b"));
   assert.equal(observed.some((call) => call.cwd === "/work/a"), false);
-  assert.ok(monitors.some((request) => request.command.includes("events --cwd /work/b --session session-b")));
+  assert.ok(monitors.some((request) => request.command?.includes("events --cwd /work/b --session session-b")));
   assert.match((await hooks.get("command.run")(engine, { command: "tasks", args: "a" }, async () => {})).text,
     /No task matches/);
   assert.equal(opened.at(-1)?.id, "codex_tasks");

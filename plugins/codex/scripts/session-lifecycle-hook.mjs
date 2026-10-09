@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
@@ -83,13 +84,16 @@ function otherSessionJobRunning(cwd, sessionId) {
   );
 }
 
-function handleSessionStart(input) {
+export function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
-async function handleSessionEnd(input) {
+export async function handleSessionEnd(input) {
+  // /branch and /resume leave the original session resumable, with its jobs.
+  if (input.reason === "resume") return;
+
   const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || process.env[SESSION_ID_ENV];
   // Every session in the workspace shares one broker. Shutting it down under
@@ -144,7 +148,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
