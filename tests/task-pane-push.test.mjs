@@ -52,6 +52,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false }];
   let threads = listing;
   let writes = 0;
+  let failWrites = options.failWrites ?? 0;
   let viewRead;
   let mtime = options.mtime ?? now;
   const read = async (path) => {
@@ -65,6 +66,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     env: { get: async () => "/home/test" },
     clock: { now: async () => now, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn) },
     store: { get: async (key) => stored.get(key), set: async (key, value) => {
+      if (key === `codex:tasks:${sessionId}` && failWrites-- > 0) throw new Error("Lock file is already being held");
       stored.set(key, value);
       if (key === `codex:tasks:${sessionId}`) writes++;
     } },
@@ -104,17 +106,18 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
+  // A round writes the ledger only when it changed, so one that changed nothing
+  // is done once its queued work has drained.
   const settle = async (previous) => {
     for (let i = 0; i < 100; i++) {
       await new Promise((resolve) => setImmediate(resolve));
       if (writes > previous) return;
     }
-    assert.fail("poll did not complete");
   };
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, statPaths, observed,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, statPaths, observed, writes: () => writes,
     removeDir: (path) => { dirs.delete(path); },
     holdViewRead: () => {
       let started, release;
@@ -342,6 +345,17 @@ test("live rows reconcile with disk even after dropping out or exhausting the qu
       else assert.match(rendered, new RegExp(["view", "inactive"].includes(ending) ? "completed" : ending), `${query}: ${ending}`);
     }
   }
+});
+
+test("the ledger is written only when it changed, and a failed write is retried without a log line", async () => {
+  const pane = await paneHarness(new Map(), undefined, "session", { failWrites: 1 });
+  assert.equal(pane.stored.has("codex:tasks:session"), false);
+  assert.deepEqual(pane.logs, []);
+  assert.match(pane.debugLogs.join("\n"), /Lock file is already being held/);
+  await pane.tick();
+  assert.deepEqual(pane.stored.get("codex:tasks:session"), { "job-a": {} });
+  await pane.tick();
+  assert.equal(pane.writes(), 1);
 });
 
 test("a repository deleted after its jobs ran stops being polled without a log line", async () => {

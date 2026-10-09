@@ -21,6 +21,8 @@ type State = {
   mtimes: Map<string, number>
   views: Map<string, LiveView>
   ledger: Ledger
+  // The ledger as the store last took it.
+  saved: string
   ticks: number
   since: number
   busy: boolean
@@ -310,6 +312,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   state.sessionId = sessionId
   state.key = `${$.plugin.name}:tasks:${sessionId}`
   state.ledger = (await $.store.get(state.key) as Ledger | undefined) ?? {}
+  state.saved = JSON.stringify(state.ledger)
   state.dismissed = await $.store.get(`${state.key}:dismissed`) === true
   resetRows(state)
   for (const id of (await $.store.get(`${state.key}:forgotten`) ?? []) as string[]) state.forgotten.add(id)
@@ -331,6 +334,22 @@ function poll($: EngineInterface, state: State): Promise<void> {
   if (!state.script) return Promise.resolve()
   state.polling ??= pollOnce($, state).finally(() => { state.polling = null })
   return state.polling
+}
+
+// Every session's ledger lives in one store file, and a dozen sessions each
+// rewriting it every two seconds kept the host's lock busy enough that writes
+// failed with "Lock file is already being held". Most rounds change nothing, so
+// only a changed ledger is written; a failed write leaves it unsaved and the
+// next round tries again, since the ledger in memory is still right.
+async function saveLedger($: EngineInterface, state: State) {
+  const text = JSON.stringify(state.ledger)
+  if (text === state.saved) return
+  try {
+    await $.store.set(state.key, state.ledger)
+    state.saved = text
+  } catch (error) {
+    $.ui.log(`Codex tasks: ledger not saved, retrying next round: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
 }
 
 async function pollOnce($: EngineInterface, state: State) {
@@ -510,7 +529,7 @@ async function pollOnce($: EngineInterface, state: State) {
       // Written even with nothing to say: this round still moved cursors and
       // claimed endings, and losing them makes the next round report twice.
       state.ledger = ledger
-      await $.store.set(state.key, ledger)
+      await saveLedger($, state)
       return
     }
     for (const line of lines) $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
@@ -533,7 +552,7 @@ async function pollOnce($: EngineInterface, state: State) {
       if (!result.drop) state.pending = []
     }
     state.ledger = ledger
-    await $.store.set(state.key, ledger)
+    await saveLedger($, state)
   } catch (error) {
     $.ui.log(`Codex tasks: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -696,7 +715,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false,
-    views: new Map<string, LiveView>(), ledger: {},
+    views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
     ticks: 0, since: 0, busy: false, booting: null, polling: null, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), leaving: false,
