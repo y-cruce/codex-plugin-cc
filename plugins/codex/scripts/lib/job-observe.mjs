@@ -272,7 +272,9 @@ export async function handleObserve(argv) {
   });
   const cwd = resolveWorkspaceRoot(path.resolve(options.cwd ?? process.cwd()));
   try {
-    await cleanupHistory(cwd);
+    // Frequent pane reads must not sweep every workspace or race its writers.
+    // The broker owns periodic and terminal-event history cleanup.
+    if (command !== "threads" && command !== "replay") await cleanupHistory(cwd);
     if (command === "list") {
       const roots = process.env.CLAUDE_PLUGIN_DATA ? [resolveStateDir(cwd)] : await observationRoots(cwd);
       const selected = new Map();

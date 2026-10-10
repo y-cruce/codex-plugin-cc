@@ -26,7 +26,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const timers = new Map();
   const opened = [];
   const files = new Map();
-  const dirs = new Set(["/work"]);
+  const dirs = new Set(["/work", ...(options.dirs ?? [])]);
   const logs = [];
   const debugLogs = [];
   const now = options.now ?? Date.now();
@@ -54,6 +54,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   let writes = 0;
   let failWrites = options.failWrites ?? 0;
   let viewRead;
+  let viewReadPath = viewPath;
   let threadRead = options.threadRead;
   let mtime = options.mtime ?? now;
   const read = async (path) => {
@@ -73,8 +74,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (key === `codex:tasks:${sessionId}`) writes++;
     } },
     fs: {
-      exists: async (path) => path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
-      list: async (path) => path.endsWith("plugins/data") ? options.fallback ? [] : [{ kind: "dir", name: "codex" }]
+      exists: async (path) => files.has(path) || path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
+      list: async (path) => options.fsList ? options.fsList(path, files) : path.endsWith("plugins/data") ? options.fallback ? [] : [{ kind: "dir", name: "codex" }]
         : path.endsWith("/state") || options.fallback && path === "/tmp/codex-companion" ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json", kind: "file", mtimeMs: mtime, isLink: false, ...options.jobEntry }] : [],
       stat: async (path) => {
@@ -86,7 +87,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path); files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
-        if (path === viewPath && viewRead) {
+        if (path === viewReadPath && viewRead) {
           const wait = viewRead;
           viewRead = null;
           await wait();
@@ -127,7 +128,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   return {
     files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, statPaths, observed, writes: () => writes,
     removeDir: (path) => { dirs.delete(path); },
-    holdViewRead: () => {
+    holdViewRead: (path = viewPath) => {
+      viewReadPath = path;
       let started, release;
       const reading = new Promise((resolve) => { started = resolve; });
       const pending = new Promise((resolve) => { release = resolve; });
@@ -141,10 +143,14 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       threadRead = () => { started(); return pending; };
       return { reading, release };
     },
-    viewTick: () => { mtime++; timers.get(500)(); },
+    viewTick: (unchanged = false) => { if (!unchanged) mtime++; timers.get(500)(); },
     touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
     tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
+    dispatched: async (command) => {
+      await hooks.get("tool.call:")(engine, { command }, async () => ({ stdout: "STATUS: started JOB: new-job NAME: New job" }));
+      await settle(writes);
+    },
     band: async () => hooks.get("ui.render:AbovePrompt")(engine, { props: {} }, async () => {}),
     close: async (kind = "person") => hooks.get("ui.close:")(engine, { id: "codex_tasks", origin: { kind } }, async () => {}),
     end: async (reason = "resume") => hooks.get("session.end:")(engine, { reason }, async () => {}),
@@ -301,11 +307,11 @@ test("tasks opens and answers while the background companion never returns, then
   const reply = await Promise.race([pane.command(""), new Promise((_, reject) => {
     timeout = setTimeout(() => reject(new Error("tasks waited for the background poll")), 1000);
   })]).finally(() => clearTimeout(timeout));
-  assert.match(reply.text, /nothing dispatched/);
+  assert.match(reply.text, /job-a/, "the job file is visible before the companion returns");
   assert.ok(performance.now() - started < 1000);
   assert.equal(pane.opened.length, 1);
   assert.match((await pane.command("")).text, /closed/);
-  assert.match((await pane.command("")).text, /nothing dispatched/);
+  assert.match((await pane.command("")).text, /job-a/);
   blocked.resolve();
   await pane.tick();
   assert.match(await pane.render(), /Alpha task/);
@@ -328,6 +334,58 @@ test("tasks refresh opens and answers before a pending poll, then rebuilds the p
   await pending;
   await pane.tick();
   assert.doesNotMatch(await pane.render(), /Alpha task/);
+});
+
+test("refresh starts a new rebuild immediately and retains rows until it is ready or fails", async (t) => {
+  isolateTestEnvironment(t);
+  for (const outcome of ["ready", "failed"]) {
+    const pane = await paneHarness();
+    const old = pane.holdThreadsRead();
+    t.after(old.release);
+    const oldPoll = pane.tick();
+    await old.reading;
+    const fresh = pane.holdThreadsRead();
+    t.after(fresh.release);
+    const betaJob = pane.jobPath.replace("job-a.json", "job-b.json");
+    const betaView = pane.viewPath.replace("record-a/", "record-b/");
+    pane.files.set(betaJob, { id: "job-b", status: "running" });
+    pane.files.set(betaView, { ...pane.live, jobId: "job-b", recordId: "record-b", label: "Beta task", activeRoundId: "job-b", latestRoundId: "job-b" });
+    const listing = [{ ...pane.listing[0], id: "record-b", recordId: "record-b", jobId: "job-b", label: "Beta task", viewPath: betaView }];
+    const result = outcome === "ready" ? listing : new Error("rebuild failed");
+    pane.list(result);
+    assert.equal((await pane.command("refresh")).text, "Codex tasks · refreshing");
+    let timeout;
+    const started = await Promise.race([fresh.reading.then(() => true), new Promise(resolve => {
+      timeout = setTimeout(() => resolve(false), 1000);
+    })]).finally(() => clearTimeout(timeout));
+    assert.equal(started, true, "refresh does not join the held old poll");
+    assert.match(await pane.render(), /Alpha task/, "the rebuilding pane keeps its previous rows");
+    pane.list([{ ...pane.listing[0], status: "queued" }]);
+    old.release();
+    await oldPoll;
+    await new Promise(resolve => setImmediate(resolve));
+    pane.list(result);
+    const requests = pane.observed.length;
+    await pane.tick();
+    assert.equal(pane.observed.length, requests, "the old poll cannot release the fresh poll's slot");
+    assert.match(await pane.render(), /Alpha task/);
+    const replacement = outcome === "ready" ? pane.holdViewRead(betaView) : null;
+    if (replacement) t.after(replacement.release);
+    fresh.release();
+    if (replacement) {
+      const reading = await Promise.race([replacement.reading.then(() => true), new Promise(resolve => {
+        timeout = setTimeout(() => resolve(false), 1000);
+      })]).finally(() => clearTimeout(timeout));
+      assert.equal(reading, true);
+      assert.match(await pane.render(), /Alpha task/, "old rows stay on screen while replacement files are being read");
+      assert.doesNotMatch(await pane.render(), /Beta task/, "partial rebuilt rows stay off-screen");
+      replacement.release();
+    }
+    for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+    const rendered = await pane.render();
+    assert.match(rendered, outcome === "ready" ? /Beta task/ : /Alpha task/);
+    if (outcome === "ready") assert.doesNotMatch(rendered, /Alpha task/, "rows are replaced only after the rebuilt view is loaded");
+  }
 });
 
 test("tasks answers during a stalled bootstrap and retries without a startup failure notice", async () => {
@@ -542,6 +600,71 @@ test("live rows reconcile with disk even after dropping out or exhausting the qu
   }
 });
 
+test("an older queued listing cannot roll an active round back", async (t) => {
+  isolateTestEnvironment(t);
+  const pane = await paneHarness();
+  pane.list([{ ...pane.listing[0], status: "queued" }]);
+  await pane.tick();
+  assert.match(await pane.render(), /running/);
+  assert.doesNotMatch(await pane.render(), /queued/);
+});
+
+test("the independent view timer reconciles a job while a poll waits and mtime stays unchanged", async (t) => {
+  isolateTestEnvironment(t);
+  const pane = await paneHarness();
+  const held = pane.holdThreadsRead();
+  const polling = pane.tick();
+  await held.reading;
+  pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed", completedAt: new Date().toISOString() });
+  pane.viewTick(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(await pane.render(), /completed/);
+  assert.doesNotMatch(await pane.render(), /running/);
+  held.release();
+  await polling;
+});
+
+test("discovery drops seventy old roots and finds a piped dispatch while the current poll waits", async (t) => {
+  isolateTestEnvironment(t);
+  const now = Date.now();
+  const base = "/home/test/.claude/plugins/data/codex/state";
+  const old = Array.from({ length: 70 }, (_, i) => `/work/old-${i}`);
+  const pane = await paneHarness(new Map(), undefined, "session", {
+    now, dirs: [...old, "/work/new"],
+    fsList: (directory, files) => {
+      if (directory.endsWith("plugins/data")) return [{ kind: "dir", name: "codex" }];
+      if (directory === `${base}`) return ["main", "new", ...old.map((_, i) => `old-${i}`)].map(name => ({ kind: "dir", name }));
+      if (!directory.endsWith("/jobs")) return [];
+      if (directory.includes("/old-")) {
+        const id = directory.split("/").at(-2);
+        files.set(`${directory}/${id}.json`, { id, sessionId: "session", workspaceRoot: `/work/${id}`, status: "completed", completedAt: new Date(now - 3600000).toISOString() });
+      }
+      return [...files.keys()].filter(file => file.startsWith(`${directory}/`)).map(file => ({ kind: "file", name: file.split("/").at(-1), mtimeMs: now, isLink: false }));
+    },
+  });
+  assert.equal(pane.observed.some(root => old.includes(root)), false, "old roots never spawn a listing");
+  const held = pane.holdThreadsRead();
+  const polling = pane.tick();
+  await held.reading;
+  pane.files.set(`${base}/new/jobs/new-job.json`, { id: "new-job", label: "New job", sessionId: "session", workspaceRoot: "/work/new", status: "queued", createdAt: new Date(now).toISOString() });
+  await pane.tick();
+  assert.match(await pane.render(), /New job/, "the independent discovery timer does not join the pending poll");
+  await pane.dispatched("bash dispatch.sh dispatch < brief | tr '\\n' ' '; cd /work; git status");
+  assert.match(await pane.render(), /New job/);
+  assert.match(await pane.render(), /queued/);
+  pane.files.set(`${base}/new/job-history/new-job/live-view.json`, { ...pane.live, jobId: "new-job", recordId: undefined, label: "New job", activeRoundId: undefined, latestRoundId: undefined, history: { continuity: "legacy", committedSeq: "0" } });
+  await pane.dispatched("bash dispatch.sh dispatch < brief");
+  pane.files.set(`${base}/new/job-index/new-job.json`, { schemaVersion: 1, jobId: "new-job", roundId: "new-job", recordId: "record-new" });
+  pane.files.set(`${base}/new/thread-records/record-new/live-view.json`, { ...pane.live, jobId: "new-job", recordId: "record-new", label: "New job", activeRoundId: "new-job", latestRoundId: "new-job" });
+  pane.files.set(`${base}/new/jobs/new-job.json`, { ...pane.files.get(`${base}/new/jobs/new-job.json`), status: "running" });
+  await pane.dispatched("bash dispatch.sh dispatch < brief | tr '\\n' ' '");
+  const rendered = await pane.render();
+  assert.match(rendered, /codex_tab_record-new/);
+  assert.doesNotMatch(rendered, /codex_tab_new-job/, "binding replaces the provisional row even at the same job mtime");
+  held.release();
+  await polling;
+});
+
 test("the ledger is written only when it changed, and a failed write is retried without a log line", async () => {
   const pane = await paneHarness(new Map(), undefined, "session", { failWrites: 1 });
   assert.equal(pane.stored.has("codex:tasks:session"), false);
@@ -638,7 +761,7 @@ test("askPane waits for the pane's reply and marks rows the disk has already end
   }
 });
 
-test("refresh waits for polling and refresh or pruning discards an old concurrent view read", async () => {
+test("refresh or pruning discards an old concurrent view read", async () => {
   for (const source of ["poll", "view", "prune"]) {
     const pane = await paneHarness();
     const read = pane.holdViewRead();

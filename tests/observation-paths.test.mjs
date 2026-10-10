@@ -77,6 +77,19 @@ test("observationThreads applies finishedAfter only to old terminal threads", as
     ["old-active", "recent-terminal"]);
 });
 
+test("pane listing and replay do not sweep unrelated workspace histories", async (t) => {
+  const h = await setup(t);
+  const entry = await h.put("codex-inline", "task-read", "read", 100);
+  const unrelated = path.join(path.dirname(entry.stateDir), "unrelated", "job-history", "partial");
+  fs.mkdirSync(unrelated, { recursive: true });
+  fs.writeFileSync(path.join(unrelated, "manifest.json"), "{");
+  for (const args of [["threads", "--json"], ["replay", entry.job.id, "--jsonl"]]) {
+    const result = await h.cli(args, { CLAUDE_PLUGIN_DATA: path.dirname(path.dirname(entry.stateDir)) });
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+  }
+  assert.equal(fs.readFileSync(path.join(unrelated, "manifest.json"), "utf8"), "{");
+});
+
 test("observe falls back to HOME data root, pins history/result reads, and merges newest jobs", async (t) => {
   const h = await setup(t);
   const old = await h.put("codex-inline", "task-shared", "old", 100);

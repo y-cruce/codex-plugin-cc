@@ -6,6 +6,8 @@ import { paneBody } from './pane.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean }
+type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
+  startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
 type Receipt = { cursor?: string; terminal?: string }
 type Ledger = Record<string, Receipt>
 type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
@@ -16,6 +18,9 @@ type State = {
   sessionId: string
   key: string
   push: boolean
+  discovering: Promise<void> | null
+  jobFiles: Map<string, { mtime: number; job: Job }>
+  provisional: Set<string>
   roots: Set<string>
   paths: Map<string, string>
   mtimes: Map<string, number>
@@ -198,24 +203,28 @@ async function watching($: EngineInterface, state: State, root: string): Promise
 
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   const epoch = state.epoch
+  const generation = state.generation
   const key = state.key
   for (const root of live) {
-    if (state.leaving || state.epoch !== epoch) return
+    if (state.leaving || state.epoch !== epoch || generation !== state.generation) return
     const monitor = state.monitors.get(root)
     // Just armed: the process has not necessarily appeared yet, and asking now
     // would arm a second one for the same repository.
     if (monitor && now - monitor.armedAt < SETTLE_MS) continue
     if (monitor && now - monitor.armedAt < MONITOR_MS) {
       if (now - (monitor.checkedAt ?? 0) < CHECK_MS) continue
+      const present = await watching($, state, root)
+      if (generation !== state.generation) return
       monitor.checkedAt = now
-      if (await watching($, state, root)) continue
+      if (present) continue
     }
     if (!monitor && await watching($, state, root)) {
+      if (generation !== state.generation) return
       state.monitors.set(root, { armedAt: now })
       await recordMonitors($, state)
       continue
     }
-    if (state.leaving || state.epoch !== epoch) return
+    if (state.leaving || state.epoch !== epoch || generation !== state.generation) return
     const sessionId = state.sessionId
     const armed: Monitor = { armedAt: now }
     state.monitors.set(root, armed)
@@ -242,7 +251,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
   const result = await $.process.run(['node', state.script, 'observe', ...args, '--cwd', cwd], {
-    cwd, env: { CODEX_COMPANION_SESSION_ID: state.sessionId }, timeoutMs: 20000,
+    cwd, env: { CODEX_COMPANION_SESSION_ID: state.sessionId }, timeoutMs: 5000,
   })
   // observe reports an error as JSON on stdout and leaves stderr empty, so a
   // message taken from stderr alone would name the command and nothing else.
@@ -253,41 +262,101 @@ async function companion($: EngineInterface, state: State, cwd: string, args: st
   return result.stdout
 }
 
-// A job lives under the state directory of the repository it was dispatched
-// into, which is rarely the session's own cwd. Job files carry the Claude
-// session and the repository, so a scan finds every repository this session
-// dispatched to; mtimes keep it cheap once hundreds of jobs have accumulated.
-async function discoverRoots($: EngineInterface, state: State) {
+// Bound external calls so one slow root cannot hold every other root behind it.
+async function each<T>(items: T[], visit: (item: T) => Promise<void>) {
+  let at = 0
+  await Promise.all(Array.from({ length: Math.min(4, items.length) }, async () => {
+    while (at < items.length) await visit(items[at++]!)
+  }))
+}
+
+function discoverRoots($: EngineInterface, state: State): Promise<void> {
+  if (!state.discovering) {
+    const pending = scanRoots($, state).catch(error => {
+      $.ui.log(`Codex tasks discovery: ${String(error)}`, { to: 'debug' })
+    }).finally(() => { if (state.discovering === pending) state.discovering = null })
+    state.discovering = pending
+  }
+  return state.discovering
+}
+
+// Discover from job files independently of the companion poll and Bash output.
+// Old session jobs stay cached, but only active/recent roots need another listing.
+async function scanRoots($: EngineInterface, state: State) {
   const epoch = state.epoch
-  const roots = new Set<string>([...state.roots, state.cwd])
+  const generation = state.generation
+  const stale = () => state.leaving || epoch !== state.epoch || generation !== state.generation
+  const now = await $.clock.now()
+  const roots = new Set<string>([state.cwd])
   const data = `${state.home}/.claude/plugins/data`
   const stateRoots: string[] = []
   for (const plugin of await $.fs.list(data).catch(() => [])) {
-    if (plugin.kind !== 'dir') continue
-    stateRoots.push(`${data}/${plugin.name}/state`)
+    if (plugin.kind === 'dir') stateRoots.push(`${data}/${plugin.name}/state`)
   }
-  // Without a SessionStart env export the companion uses its supported temp
-  // store; jobs in another repository still belong to this session's pane.
   stateRoots.push(`${(await $.env.get('TMPDIR')) ?? '/tmp'}/codex-companion`)
+  const workspaces: string[] = []
   for (const root of stateRoots) {
     for (const workspace of await $.fs.list(root).catch(() => [])) {
-      if (workspace.kind !== 'dir') continue
-      const jobs = `${root}/${workspace.name}/jobs`
-      for (const file of await $.fs.list(jobs).catch(() => [])) {
-        if (!file.name.endsWith('.json')) continue
-        const path = `${jobs}/${file.name}`
-        try {
-          const mtimeMs = file.kind === 'file' && !file.isLink ? file.mtimeMs : (await $.fs.stat(path)).mtimeMs
-          if (mtimeMs < state.since) continue
-          // A pane follows only work this session dispatched; sharing the
-          // repository is not ownership, and another session arms its own watch.
-          const job = JSON.parse(await $.fs.read(path)) as { sessionId?: string; workspaceRoot?: string }
-          if (job.sessionId === state.sessionId && job.workspaceRoot) roots.add(job.workspaceRoot)
-        } catch { /* a half-written or foreign job file is skipped */ }
-      }
+      if (workspace.kind === 'dir') workspaces.push(`${root}/${workspace.name}`)
     }
   }
-  if (state.epoch === epoch) state.roots = roots
+  await each(workspaces, async directory => {
+    for (const file of await $.fs.list(`${directory}/jobs`).catch(() => [])) {
+      if (stale()) return
+      if (!file.name.endsWith('.json')) continue
+      const path = `${directory}/jobs/${file.name}`
+      try {
+        const mtime = file.kind === 'file' && !file.isLink ? file.mtimeMs : (await $.fs.stat(path)).mtimeMs
+        if (mtime < state.since) continue
+        const cached = state.jobFiles.get(path)
+        const job = cached?.mtime === mtime ? cached.job : JSON.parse(await $.fs.read(path)) as Job
+        if (stale()) return
+        state.jobFiles.set(path, { mtime, job })
+        if (job.sessionId !== state.sessionId || !job.workspaceRoot) continue
+        if (DONE.includes(job.status) && job.completedAt && Date.parse(job.completedAt) <= now - KEEP_MS) continue
+        roots.add(job.workspaceRoot)
+        if (!job.id) continue
+        const index = await $.fs.read(`${directory}/job-index/${job.id}.json`)
+          .then(text => JSON.parse(text) as { schemaVersion: number; jobId: string; roundId: string; recordId: string }).catch(() => null)
+        if (stale()) return
+        const bound = index?.schemaVersion === 1 && index.jobId === job.id && index.roundId === job.id && typeof index.recordId === 'string'
+        const id = bound ? index.recordId : job.id
+        const known = [...state.views].find(([, view]) => view.jobId === job.id || view.latestRoundId === job.id || view.activeRoundId === job.id)
+        const viewPath = `${directory}/${bound ? 'thread-records' : 'job-history'}/${id}/live-view.json`
+        if (bound || await $.fs.exists(viewPath)) {
+          if (stale()) return
+          if (id !== job.id) {
+            state.views.delete(job.id)
+            state.paths.delete(job.id)
+            state.mtimes.delete(job.id)
+            state.owners.delete(job.id)
+            state.provisional.delete(job.id)
+          }
+          state.provisional.delete(id)
+          if (state.paths.get(id) !== viewPath) state.mtimes.delete(id)
+          state.paths.set(id, viewPath)
+          state.owners.set(id, [state.sessionId])
+        } else if (!known || state.provisional.has(job.id)) {
+          if (stale()) return
+          // Before identity binds there is no view file yet. Show the dispatch
+          // immediately, then replace this row with its authoritative record.
+          state.provisional.add(job.id)
+          state.views.set(job.id, {
+            schemaVersion: 1, jobId: job.id, label: job.label ?? job.title ?? job.id, status: job.status,
+            startedAt: job.startedAt ?? job.createdAt ?? new Date(now).toISOString(), endedAt: job.completedAt ?? null,
+            threadId: null, turnId: null, prompt: job.request?.prompt?.split('---- Brief ----').at(-1)?.trim() ?? null, activeCommands: [], lastMessage: null,
+            files: [], usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false },
+            pendingQuestion: null, history: { continuity: 'legacy', committedSeq: '0' }, tail: [],
+          })
+          $.ui.invalidate('ui.render')
+        }
+      } catch { /* a half-written or foreign job file is retried next scan */ }
+    }
+  })
+  if (!stale()) {
+    state.roots = roots
+    await refreshViews($, state, true)
+  }
 }
 
 // Both history layouts live beside jobs/. Read the active/latest round,
@@ -325,6 +394,7 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
       if (generation !== state.generation) return
       const owners = state.owners.get(id) ?? (view.rounds ?? []).map(round => round.sessionId).filter((sessionId): sessionId is string => Boolean(sessionId))
       const foreign = owners.length > 0 && !owners.includes(state.sessionId)
+      if (state.paths.get(id) !== path) continue
       state.mtimes.set(id, stat.mtimeMs)
       state.views.set(id, { ...view, foreign })
       changed = true
@@ -346,6 +416,8 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
 function resetRows(state: State) {
   state.generation += 1
   state.roots = new Set([state.cwd])
+  state.jobFiles.clear()
+  state.provisional.clear()
   state.paths.clear()
   state.mtimes.clear()
   state.views.clear()
@@ -401,7 +473,10 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
 
 function poll($: EngineInterface, state: State): Promise<void> {
   if (!state.script) return Promise.resolve()
-  state.polling ??= pollOnce($, state).finally(() => { state.polling = null })
+  if (!state.polling) {
+    const pending = pollOnce($, state).finally(() => { if (state.polling === pending) state.polling = null })
+    state.polling = pending
+  }
   return state.polling
 }
 
@@ -424,14 +499,17 @@ async function saveLedger($: EngineInterface, state: State) {
 
 async function pollOnce($: EngineInterface, state: State) {
   try {
+    let generation = state.generation
     const sessionId = await $.session.id()
+    if (generation !== state.generation) return
     if (state.leaving && sessionId === state.sessionId) return
     if (sessionId !== state.sessionId) {
       state.cwd = await $.session.cwd()
       await bindSession($, state, sessionId)
+      generation = state.generation
     }
     const epoch = state.epoch
-    const stale = () => state.leaving || state.epoch !== epoch || state.sessionId !== sessionId
+    const stale = () => state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || generation !== state.generation
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     if (stale()) return
     state.ticks += 1
@@ -440,8 +518,8 @@ async function pollOnce($: EngineInterface, state: State) {
     state.now = now
     const found: { thread: Thread; cwd: string }[] = []
     const returnedByRoot = new Map<string, Set<string>>()
-    for (const root of state.roots) {
-      if ((state.unreadable.get(root) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) continue
+    await each([...state.roots], async root => {
+      if ((state.unreadable.get(root) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) return
       // A worktree removed once its jobs ran is gone for good, and spawning the
       // companion there fails as "spawn node ENOENT", which names node instead
       // of the directory. The rescan brings it back from the job files; this
@@ -450,7 +528,7 @@ async function pollOnce($: EngineInterface, state: State) {
       if (stale()) return
       if (!exists) {
         state.roots.delete(root)
-        continue
+        return
       }
       try {
         const listed = JSON.parse(await companion($, state, root,
@@ -470,8 +548,50 @@ async function pollOnce($: EngineInterface, state: State) {
           $.ui.log(`Codex tasks ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
         }
       }
-    }
+    })
     if (stale()) return
+    // Load replacements off-screen. A slow or failed read must not empty the
+    // current pane between removing old rows and reading their replacements.
+    const beforeViews = new Map(state.views)
+    const beforePaths = new Map(state.paths)
+    const rows: State = { ...state, views: new Map(beforeViews), paths: new Map(beforePaths),
+      mtimes: new Map(state.mtimes), owners: new Map(state.owners), provisional: new Set(state.provisional) }
+    for (const { thread } of found) {
+      if (thread.id !== thread.jobId && rows.provisional.delete(thread.jobId)) rows.views.delete(thread.jobId)
+      rows.provisional.delete(thread.id)
+      if (rows.paths.get(thread.id) !== thread.viewPath) rows.mtimes.delete(thread.id)
+      rows.paths.set(thread.id, thread.viewPath)
+      rows.owners.set(thread.id, thread.sessionIds)
+    }
+    await refreshViews($, rows, true)
+    if (stale()) return
+    for (const [root, ids] of returnedByRoot) {
+      if ([...ids].every(id => rows.views.has(id))) continue
+      returnedByRoot.delete(root)
+      for (const id of state.rootIds.get(root) ?? []) {
+        const view = state.views.get(id)
+        const path = state.paths.get(id)
+        if (view) rows.views.set(id, view)
+        if (path) rows.paths.set(id, path)
+      }
+    }
+    // Independent discovery can add or bind a job while these reads await.
+    for (const [id, view] of state.views) {
+      if (beforeViews.has(id) && beforePaths.get(id) === state.paths.get(id)) continue
+      rows.views.set(id, view)
+      const path = state.paths.get(id)
+      if (path) rows.paths.set(id, path)
+      rows.mtimes.delete(id)
+      rows.owners.set(id, state.owners.get(id) ?? [])
+      if (state.provisional.has(id)) rows.provisional.add(id)
+    }
+    for (const id of beforeViews.keys()) {
+      if (state.views.has(id) || rows.paths.get(id) !== beforePaths.get(id)) continue
+      rows.views.delete(id)
+      rows.paths.delete(id)
+      rows.mtimes.delete(id)
+      rows.owners.delete(id)
+    }
     const returned = new Set(found.map(({ thread }) => thread.id))
     let dropped = false
     for (const [root, ids] of returnedByRoot) {
@@ -479,41 +599,32 @@ async function pollOnce($: EngineInterface, state: State) {
       state.rootIds.set(root, ids)
       for (const id of previous) {
         if (ids.has(id) || returned.has(id) || [...state.rootIds].some(([other, owned]) => other !== root && owned.has(id))) continue
-        const existed = state.paths.has(id) || state.owners.has(id) || state.mtimes.has(id) || state.views.has(id)
-        state.paths.delete(id)
-        state.owners.delete(id)
-        state.mtimes.delete(id)
-        state.views.delete(id)
+        const existed = rows.paths.has(id) || rows.owners.has(id) || rows.mtimes.has(id) || rows.views.has(id)
+        rows.paths.delete(id)
+        rows.owners.delete(id)
+        rows.mtimes.delete(id)
+        rows.views.delete(id)
         dropped ||= existed
       }
     }
-    if (dropped) {
-      state.generation += 1
-      $.ui.invalidate('ui.render')
-    }
-    for (const { thread } of found) {
-      state.paths.set(thread.id, thread.viewPath)
-      state.owners.set(thread.id, thread.sessionIds)
-    }
-    // Before the loop, not after: the reconciliation below reads these views for
-    // the text it reports, and a round that refreshed them afterwards had none
-    // to read on its first pass and sent an empty line.
-    // The listing is time-filtered and can stop answering after errors. Check
-    // every cached live row against disk even when it no longer appears there.
-    await refreshViews($, state, true)
-    if (stale()) return
+    const changed = dropped || state.views.size !== rows.views.size
+      || [...rows.views].some(([id, view]) => state.views.get(id) !== view)
+    if (dropped) generation = ++state.generation
+    Object.assign(state, { views: rows.views, paths: rows.paths, mtimes: rows.mtimes,
+      owners: rows.owners, provisional: rows.provisional })
+    if (changed) $.ui.invalidate('ui.render')
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
     if (stale()) return
     state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
     await ensureMonitors($, state, state.liveRoots, now)
     if (stale()) return
-    for (const { thread, cwd } of found) {
+    await each(found, async ({ thread, cwd }) => {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
       // back off only once it has failed a few polls in a row.
-      if ((state.unreadable.get(job.id) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) continue
+      if ((state.unreadable.get(job.id) ?? 0) >= BACKOFF_FAILURES && state.ticks % RESCAN_TICKS !== 0) return
       try {
         // A job already over the first time it is seen ended before this pane
         // existed, or before a reload rebuilt it: there is nothing to wake the
@@ -526,9 +637,6 @@ async function pollOnce($: EngineInterface, state: State) {
         const receipt = ledger[job.id]!
         const view = state.views.get(thread.id)
         if (view && Boolean(view.foreign) !== foreign) state.views.set(thread.id, { ...view, foreign })
-        if (view && job.status === 'queued' && view.status !== 'queued' && !isOver(view)) {
-          state.views.set(thread.id, { ...view, status: 'queued', endedAt: null })
-        }
         // The owner process writes the ending, so a job whose owner died never
         // wrote one and its view says running for ever -- the pane kept a task
         // killed an hour ago in its tabs and counted it among the live ones.
@@ -589,7 +697,7 @@ async function pollOnce($: EngineInterface, state: State) {
         // and saying so is noise about something that fixes itself seconds later.
         if (failures === BACKOFF_FAILURES) $.ui.log(`Codex tasks ${job.id}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
       }
-    }
+    })
     await refreshViews($, state)
     if (stale()) return
     // What the pane would draw, not every view the scan loaded: a repository
@@ -646,12 +754,17 @@ async function pollOnce($: EngineInterface, state: State) {
 // What /codex:tasks and `dispatch.sh pane` share: rebuild the rows from disk,
 // find a row, hide one.
 async function refreshRows($: EngineInterface, state: State) {
-  // Let an in-flight poll finish before clearing its maps. The generation
-  // also prevents a concurrent view read from restoring the old cache.
-  const epoch = state.epoch
-  await state.polling
-  if (state.leaving || epoch !== state.epoch) return
-  resetRows(state)
+  if (state.leaving) return
+  // Invalidate the old readers, but keep their displayed rows until replacements
+  // are ready. Its eventual completion cannot release the new poll's slot.
+  state.generation += 1
+  state.polling = null
+  state.discovering = null
+  state.jobFiles.clear()
+  state.mtimes.clear()
+  state.unreadable.clear()
+  state.forgotten.clear()
+  state.ticks = 0
   writeStore($, state, `${state.key}:forgotten`, [])
   await poll($, state)
 }
@@ -733,7 +846,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
   // A timed-out read may still settle later. It initializes only this attempt's
   // state, so it cannot overwrite a retry or install another set of timers.
   const starting: State = {
-    ...state, paths: new Map(), mtimes: new Map(), views: new Map(), owners: new Map(), rootIds: new Map(),
+    ...state, jobFiles: new Map(), provisional: new Set(), discovering: null, paths: new Map(), mtimes: new Map(), views: new Map(), owners: new Map(), rootIds: new Map(),
     forgotten: new Set(), unreadable: new Map(), expanded: new Set(), monitors: new Map(),
   }
   async function initialize() {
@@ -774,8 +887,8 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
         ? { opened: state.opened, shown: state.shown, dismissed: state.dismissed } : {}
       Object.assign(state, initialized, placement, { script: '', busy: state.busy, booting: state.booting, writing: state.writing, startError: undefined })
       if (placement.opened || placement.dismissed) writeStore($, state, `${state.key}:dismissed`, state.dismissed)
-      $.clock.every(500, () => { void refreshViews($, state) })
-      $.clock.every(2000, () => { void flushStore($, state); void poll($, state).then(() => answer($, state)) })
+      $.clock.every(500, () => { void refreshViews($, state, true) })
+      $.clock.every(2000, () => { void flushStore($, state); void discoverRoots($, state).then(() => poll($, state)).then(() => answer($, state)) })
       // The heading's clock moves on its own, and nothing else asks for the redraw
       // that shows it: a job that is thinking writes no view file, so the pane
       // would sit at the second of the last event and then jump over the silence.
@@ -828,7 +941,7 @@ function visibleThreads(state: State): LiveView[] {
 export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
-    roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
+    discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false, epoch: 0,
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
@@ -883,7 +996,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const result = await next(e)
     if (/(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)) {
       state.ticks = 0
-      $.clock.after(0, () => { void poll($, state) })
+      $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
     }
     return result
   })
