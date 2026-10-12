@@ -349,7 +349,7 @@ describe('live row polish', () => {
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
     data.tail = [
       { type: 'question.opened', text: 'Question request=1: Which color?' },
-      { type: 'question.resolved', text: 'director → answer delivered request=1' },
+      { type: 'question.resolved', text: 'director → answer delivered request=1', answer: 'color: Blue\nKeep the existing theme.' },
       { type: 'question.closed', text: 'Question resolved request=1' },
       { type: 'tool.started', text: 'regular tool started' },
       { type: 'tool.completed', text: 'regular tool completed' },
@@ -364,8 +364,9 @@ describe('live row polish', () => {
     assert.equal(textOf(question), '? Question request=1: Which color?');
     assert.equal(question.props.color, 'magenta');
     const answer = nodes.find(node => textOf(node).startsWith('→'));
-    assert.equal(textOf(answer), '→ answer delivered');
+    assert.equal(textOf(answer), '→ color: Blue\nKeep the existing theme.');
     assert.equal(answer.props.color, 'cyan');
+    assert.equal(answer.props.wrap, 'wrap');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
     assert.match(textOf(tree), /● Calling 2 tools…\n  ⎿  regular tool completed/);
     assert.equal(nodes.filter(node => node.props.color === 'magenta').length, 1);
@@ -387,8 +388,9 @@ describe('live row polish', () => {
     assert.equal(tokens(82400), '82.4k');
     assert.equal(tokens(999), '999');
     assert.equal(tokens(1000), '1k');
-    assert.equal(duration(1234), '1.2s');
-    assert.equal(duration(61000), '1m1s');
+    for (const [ms, text] of [[-100, '0s'], [400, '0s'], [1234, '1s'], [59999, '59s'], [60000, '1m0s'], [61000, '1m1s']]) {
+      assert.equal(duration(ms), text);
+    }
     // Past a minute the live clock drops to minutes, so a redraw that could not
     // happen does not read as the task jumping forward.
     assert.equal(elapsed('2026-09-15T00:00:00Z', Date.parse('2026-09-15T00:00:03Z')), '3s');
@@ -630,7 +632,7 @@ describe('live row polish', () => {
     data.tail.push(...['message.completed', 'reasoning.completed', 'question.opened', 'director.notified', 'source.error', 'fileChange.completed', 'control.message.updated'].map(type => ({ type, text: 'body' })));
     const tree = liveTree($.ui.resolve(row()), data, 120, 0, 48);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s']);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1s']);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
     for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['→', 'cyan', false]]) {
@@ -879,7 +881,7 @@ describe('Markdown and prompt footer', () => {
     data.tail.push({ type: 'command.completed', text: "$ apply_patch <<'PATCH' ⏎ *** Begin Patch ⏎ PATCH", exitCode: 0, durationMs: 1200 });
     const tree = liveTree($.ui.resolve(row()), data, 40, 0);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1.2s', "  ⎿  $ apply_patch <<'PATCH' …"]);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1s', "  ⎿  $ apply_patch <<'PATCH' …"]);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Ran 1 shell command'));
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands…'));
@@ -967,7 +969,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0.4s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '→ answer delivered',
+      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '→ answer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',

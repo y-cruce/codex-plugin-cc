@@ -1003,6 +1003,10 @@ test("task pane renders one thread row with both rounds in trace order", () => {
     return (value.children ?? []).map(visit).join("\n");
   };
   const text = visit(tree);
+  assert.equal(tree.props.paddingRight, 2);
+  assert.ok(nodes.filter((node) => node !== tree && typeof node.props.width === "number").every((node) => node.props.width <= 98));
+  const empty = paneBody(ui, [], 100, 20, Date.parse(data.endedAt), null, () => {});
+  assert.equal(empty.props.paddingRight, 2);
   assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
   assert.equal(nodes.find((node) => node.type === "Button").props.key, "codex_tab_task-old");
   // The row is named by the round that opened the thread, not by the newest one.
@@ -1032,4 +1036,7 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   };
   collect(paneBody(ui, [withFold], 100, 20, Date.parse(data.endedAt), null, () => {}, undefined, { isOpen: () => false, toggle: () => {} }));
   assert.deepEqual(keys.map((key) => key.split("_")[1]), ["tab", "fold"]);
+  nodes.length = 0;
+  visit(paneBody(ui, [data], 20, 20, Date.parse(data.endedAt), null, () => {}));
+  assert.ok(nodes.slice(1).filter((node) => typeof node.props.width === "number").every((node) => node.props.width <= 18));
 });

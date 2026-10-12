@@ -233,6 +233,12 @@ function updateTail(view, event, text, key = null) {
   // splits on to draw its failing output.
   const row = { seq: String(event.seq), at: event.occurredAt, type: event.type,
     text: PROSE.test(event.type) ? String(text ?? "") : oneLine(text) };
+  if (event.type === "question.resolved" && event.payload.values) {
+    row.answer = Object.entries(event.payload.values).map(([id, value]) => {
+      const answers = Array.isArray(value?.answers) ? value.answers : Array.isArray(value) ? value : [value];
+      return `${id}: ${answers.join("\n")}`;
+    }).join("\n");
+  }
   // A row holds a preview; lastMessage holds the whole answer. Writing that
   // resumed after a tool has a row per stretch, so a row says where its own
   // stretch begins and the reader takes the rest from lastMessage.

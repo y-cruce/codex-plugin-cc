@@ -31,8 +31,8 @@ export function clean(text: string): string {
 }
 
 export function duration(ms: number): string {
-  const seconds = Math.max(0, ms / 1000)
-  return seconds < 60 ? `${Number(seconds.toFixed(1))}s` : `${Math.floor(seconds / 60)}m${Math.floor(seconds % 60)}s`
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${seconds % 60}s`
 }
 
 // A live clock only moves when something asks for a redraw, and nothing can

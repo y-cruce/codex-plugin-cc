@@ -51,7 +51,7 @@ export type LiveView = {
   }[]
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
-  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
+  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; answer?: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
     files?: { path: string; kind: string; additions: number | null; deletions: number | null }[]; status?: string; failed?: boolean
     items?: LiveView['tail']; foldKey?: string }[]
 }
@@ -425,7 +425,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       return
     }
     if (type === 'question.resolved') {
-      add('→ answer delivered', { color: 'cyan' })
+      prose(`→ ${event.answer || 'answer delivered'}`, { color: 'cyan' })
       return
     }
     if (fullTrace && type === 'prompt') {

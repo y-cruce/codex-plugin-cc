@@ -58,9 +58,9 @@ export function paneBody(
   fold?: Omit<Fold, 'Button'>,
 ) {
   const { Box, Text, Button } = ui
-  const width = Math.max(24, columns)
+  const width = Math.max(1, columns - 2)
   if (!threads.length) {
-    return Box({ flexDirection: 'column', backgroundColor: background, width: columns, height: rows, children: [
+    return Box({ flexDirection: 'column', backgroundColor: background, width: columns, height: rows, paddingRight: 2, children: [
       Text({ dimColor: true, children: 'No tasks dispatched from this session yet.' }),
       Box({ flexGrow: 1 }),
     ] })
@@ -120,7 +120,7 @@ export function paneBody(
   // switching to a task whose trace has more folds left the ring on a fold.
   // The list goes first in the tree and column-reverse draws it at the foot,
   // so its rows keep their places whatever the trace does.
-  return Box({ flexDirection: 'column-reverse', backgroundColor: background, width: columns, minHeight: rows, children: [
+  return Box({ flexDirection: 'column-reverse', backgroundColor: background, width: columns, minHeight: rows, paddingRight: 2, children: [
     // The list would otherwise sit against the pane's bottom edge, which the
     // engine draws in its own grey.
     Text({ children: ' ' }),

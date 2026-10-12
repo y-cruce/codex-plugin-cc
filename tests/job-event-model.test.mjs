@@ -299,8 +299,9 @@ test("director controls and delivered answers appear in default output and tail"
   accept("companion/question", { requestId: 4, questions: [{ question: "Which?" }] });
   assert.equal(view.status, "waiting-for-answer");
   assert.deepEqual(view.pendingQuestion, { requestId: "4", text: "Which?", openedAt: "1970-01-01T00:00:01.000Z", expiresAt: "1970-01-01T00:10:01.000Z" });
-  const answer = accept("companion/answer-delivered", { requestId: 4 });
+  const answer = accept("companion/answer-delivered", { requestId: 4, answers: { source: { answers: ["Use the latest plan.", "Keep the tests."] } } });
   assert.equal(renderJobEvent(answer), "director → answer delivered request=4");
+  assert.equal(view.tail.at(-1).answer, "source: Use the latest plan.\nKeep the tests.");
   assert.equal(view.pendingQuestion, null);
   assert.equal(view.status, "running");
   const text = "x".repeat(300);
@@ -308,6 +309,12 @@ test("director controls and delivered answers appear in default output and tail"
   assert.equal(control.source.raw.params.message, text);
   assert.equal(renderJobEvent(control), `director → interrupt: ${"x".repeat(200)}`);
   assert.equal(view.tail.at(-1).text, renderJobEvent(control));
+  const acpAnswer = createCanonicalEvent({ job: { id: "job-1", streamId: "stream-1" }, executor: "acp", type: "question.resolved",
+    identity: { sessionId: "thread-1", turnId: "turn-1", requestId: "acp-question" },
+    payload: { requestId: "acp-question", action: "accept", values: { plan: "First step\nSecond step", enabled: false, count: 0, choices: ["A", "B"] } } });
+  acpAnswer.seq = String(BigInt(view.history.committedSeq) + 1n);
+  applyJobEvent(view, acpAnswer);
+  assert.equal(view.tail.at(-1).answer, "plan: First step\nSecond step\nenabled: false\ncount: 0\nchoices: A\nB");
 });
 
 test("tail is bounded and terminal snapshot settles fields", () => {

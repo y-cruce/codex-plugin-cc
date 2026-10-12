@@ -161,6 +161,11 @@ Opens or closes the tasks pane for this session. Select a task by its row number
 or a case-insensitive part of its name. Live rows are reconciled with job files
 and live views on each poll.
 
+The pane leaves two columns of space on the right, shows the director's delivered
+answers after the questions, and displays durations in whole seconds.
+
+面板右侧保留两个字符的空白；提问后显示主 agent 送达的回复内容，耗时显示到整秒。
+
 ```text
 /codex:tasks
 /codex:tasks 2
