@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release the plugin: build, bump, commit, push both branches, reinstall.
+# Release the plugin: build, bump, commit, push the working branch and main, reinstall.
 #
 #   npm run deploy -- <message-file>
 #
@@ -35,12 +35,12 @@ RUN="env -u CLAUDE_PLUGIN_DATA -u CODEX_COMPANION_SESSION_ID -u CODEX_COMPANION_
 unset npm_config_allow_scripts
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-# codex-director is what the marketplace serves. Fast-forward only: a diverged
+# main is what the marketplace serves. Fast-forward only: a diverged
 # branch means someone released from elsewhere, and overwriting that is not
 # this script's call.
 git fetch -q origin
-if ! git merge-base --is-ancestor origin/codex-director HEAD; then
-  echo "codex-director has diverged from $BRANCH; reconcile it by hand" >&2
+if ! git merge-base --is-ancestor origin/main HEAD; then
+  echo "main has diverged from $BRANCH; reconcile it by hand" >&2
   exit 1
 fi
 
@@ -59,8 +59,9 @@ git commit -q -F "$MESSAGE"
 
 echo "── push"
 git push -q origin "$BRANCH"
-git branch -f codex-director HEAD
-git push -q origin codex-director
+if [ "$BRANCH" != "main" ]; then
+  git push -q origin HEAD:main
+fi
 
 echo "── install"
 claude plugin update codex@y-cruce-codex
