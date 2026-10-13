@@ -57,8 +57,43 @@ test("session monitors catch terminals in the re-arm gap once across restarts", 
     ["DONE job=after-restart thread=thread-1"]);
 });
 
+test("a first session watch baselines old terminals even without emitting anything", async () => {
+  const terminalReportsFile = path.join(makeTempDir(), "terminal-reports.json");
+  const mine = { ...job, sessionId: "session" };
+  const old = ["completed", "failed", "cancelled"].map((status, index) => ({ ...mine, id: `old-${index}`, status }));
+  const handlers = { terminalReportsFile, status: async () => assert.fail("historical terminals must not read live state") };
+  const report = { latestFinished: old[0], recent: old.slice(1) };
+  assert.deepEqual(await monitor([report], handlers, { session: "session" }), []);
+  assert.ok(fs.existsSync(terminalReportsFile), "the baseline must survive a restart with no output");
+  const gap = { ...mine, id: "gap-job", status: "completed" };
+  assert.deepEqual(await monitor([{ ...report, recent: [...report.recent, gap] }],
+    { terminalReportsFile }, { session: "session" }), ["DONE job=gap-job thread=thread-1"]);
+  assert.deepEqual(await monitor([report], handlers, { session: "session" }), []);
+});
+
+test("first watch still reports a running job that finishes after its baseline", async () => {
+  const mine = { ...job, sessionId: "session" };
+  const old = { ...mine, id: "old-job", status: "completed" };
+  assert.deepEqual(await monitor([
+    { running: [mine], latestFinished: old },
+    { latestFinished: { ...mine, status: "completed" }, recent: [old] }
+  ], {}, { session: "session" }), ["DONE job=job-1 thread=thread-1"]);
+});
+
+test("an existing 1.4.35 receipt retains deduplication and catches the re-arm gap", async () => {
+  const terminalReportsFile = path.join(makeTempDir(), "terminal-reports.json");
+  const mine = { ...job, sessionId: "session", status: "completed" };
+  fs.writeFileSync(terminalReportsFile, JSON.stringify([mine.id]));
+  const gap = { ...mine, id: "gap-job" };
+  const report = { latestFinished: gap, recent: [mine] };
+  assert.deepEqual(await monitor([report], { terminalReportsFile }, { session: "session" }),
+    ["DONE job=gap-job thread=thread-1"]);
+  assert.deepEqual(await monitor([report], { terminalReportsFile }, { session: "session" }), []);
+});
+
 test("a terminal output failure is retried by the next session monitor", async () => {
   const terminalReportsFile = path.join(makeTempDir(), "terminal-reports.json");
+  await monitor([{ running: [{ ...job, sessionId: "session" }] }], { terminalReportsFile }, { session: "session" });
   const report = { latestFinished: { ...job, sessionId: "session", status: "completed" } };
   await assert.rejects(monitor([report], { terminalReportsFile, writeLine: async () => { throw new Error("output failed"); } },
     { session: "session" }), /output failed/);

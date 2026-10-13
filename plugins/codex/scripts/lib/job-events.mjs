@@ -29,13 +29,15 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const progressAt = dependencies.progressAt ?? lastJobProgressAt;
   const claim = dependencies.claimQuestion ?? ((cwd, jobId, requestId) => claimQuestion(resolveStateDir(cwd), jobId, requestId));
   const roundContext = dependencies.roundContext ?? ((cwd, jobId) => readRoundContext(cwd, jobId));
-  // Monitor processes expire; a session's terminal output receipts must not.
+  // Monitor processes expire; a session's baseline and terminal receipts must not.
   const terminalReportsFile = session === undefined ? null : dependencies.terminalReportsFile
     ?? path.join(resolveStateDir(cwd), "event-monitors", `${createHash("sha256").update(session).digest("hex")}.json`);
   let reported = new Set();
+  let initialized = !terminalReportsFile;
   if (terminalReportsFile) {
     try {
       reported = new Set(JSON.parse(await fs.readFile(terminalReportsFile, "utf8")));
+      initialized = true;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -50,12 +52,23 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
     const report = snapshot(cwd, { all: true, threadRecords: false });
     const jobs = [...report.running, report.latestFinished, ...report.recent]
       .filter((job) => job && (session === undefined || job.sessionId === session));
+    if (signal?.aborted) break;
+    // The first snapshot establishes what was already over before this watch.
+    // Save even an empty baseline, or a restart would silently reset its scope.
+    if (!initialized) {
+      for (const job of jobs) {
+        if (job.status !== "queued" && job.status !== "running") reported.add(job.id);
+      }
+      await fs.mkdir(path.dirname(terminalReportsFile), { recursive: true });
+      await atomicJson(terminalReportsFile, [...reported]);
+      initialized = true;
+    }
     for (let job of jobs) {
       if (signal?.aborted) break;
       let running = job.status === "queued" || job.status === "running";
       if (running) active.add(job.id);
-      // Scoped watches also catch jobs that finished before this process started,
-      // including jobs dispatched and completed entirely between two watches.
+      // A replacement catches terminals after the persisted baseline, including
+      // jobs dispatched and completed entirely between two watches.
       else if (terminalReportsFile && !reported.has(job.id)) active.add(job.id);
       if (!active.has(job.id)) continue;
       const context = threadRecords ? await roundContext(report.workspaceRoot ?? cwd, job.id) : null;

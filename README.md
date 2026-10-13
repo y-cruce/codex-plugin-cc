@@ -286,14 +286,17 @@ node plugins/codex/scripts/codex-companion.mjs observe view-path JOB --cwd /path
 
 `QUESTION job=<id> request=<id> ...` is emitted only while that request remains pending. If the same request is encountered again while still pending, `follow` and `events` emit `QUESTION_PENDING job=<id> request=<id> still unanswered: ...` (periodic `events` reminders retain their elapsed-time format). Answered requests are skipped. `NOTIFIED job=<id> thread=<id> pending_request=<id> <note>` includes the request pending when the notification was created; the field is omitted when there was none. Explicit `--after` cursors continue to select their exact history position.
 
-`events --session <id>` keeps terminal output receipts in the repository's state
-directory. A replacement Monitor reports completed, failed or cancelled jobs from
-that session even if they finished between watches, and skips terminal lines already
-output by an earlier watch. The pane also re-arms repositories with recently finished
-tasks so the last task's completion is caught. Watches without `--session` continue
-to report only jobs they observed active.
+`events --session <id>` saves the first snapshot's already finished jobs as a
+historical baseline, even when it emits no notification. It keeps that baseline
+and terminal output receipts across restarts in the repository's state directory.
+A replacement Monitor reports later completions, failures and cancellations from
+that session, including jobs finished between watches, and skips historical and
+already reported terminals. Existing 1.4.35 receipt files keep their deduplication
+state. The pane also re-arms repositories with recently finished tasks so the last
+task's completion is caught. Watches without `--session` continue to report only
+jobs they observed active.
 
-`events --session <id>` 在仓库状态目录保存已输出的终态记录；监听重挂时补报当前会话在空档中完成、失败或取消的任务，跳过此前已输出的终态。pane 对近期已结束任务所在的仓库也会重挂监听，保证最后一个任务能补报。未指定会话的监听继续只报告自己见过运行中的任务。
+`events --session <id>` 首次读取任务状态时，把已结束任务保存为历史基线，即使没有通知输出也保存；基线和后续已输出终态的记录在仓库状态目录跨重启保留。监听重挂时补报当前会话在基线之后完成、失败或取消的任务，包括监听空档内结束的任务，跳过历史和已报告终态。已有 1.4.35 回执继续去重。pane 对近期已结束任务所在的仓库也会重挂监听。未指定会话的监听继续只报告自己见过运行中的任务。
 
 Use `--quiet` for relay agents: only the cursor and terminal line are emitted, with a one-line heartbeat every 60 seconds while waiting. DONE does not include result text in this mode; read it separately with `result`. Default display hides token updates, user-message echoes and empty reasoning, and bounds command output previews to 120 characters and assistant rows to 300. Full event payloads and `lastMessage.text` remain unchanged; `--verbose` retains full output.
 
