@@ -29,6 +29,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const dirs = new Set(["/work", ...(options.dirs ?? [])]);
   const logs = [];
   const debugLogs = [];
+  const toasts = [];
   let now = options.now ?? Date.now();
   let startedAt = options.startedAt ?? now;
   const workspaceRoot = options.workspaceRoot ?? "/work";
@@ -101,7 +102,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep") return { exitCode: options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
       observed.push(init.cwd);
-      if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(), stderr: '' };
+      if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(args), stderr: '' };
       if (threadRead) {
         const wait = threadRead;
         threadRead = null;
@@ -111,7 +112,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       return { exitCode: 0, stdout: JSON.stringify({ threads: init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
     tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
-    ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: () => {},
+    ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -126,7 +127,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, statPaths, observed, writes: () => writes,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, statPaths, observed, writes: () => writes,
     removeDir: (path) => { dirs.delete(path); },
     holdViewRead: (path = viewPath) => {
       viewReadPath = path;
@@ -843,6 +844,36 @@ test("terminal receipts do not seed rows or prevent disk reconciliation", async 
     assert.match(await pane.render(), /completed/);
     assert.doesNotMatch(await pane.render(), /running|queued/);
   }
+});
+
+test("a cursor rebuilt after reload does not replay a terminal already in history", async () => {
+  // After /reload-plugins the ledger can come back without this job, and the
+  // cursor is rebuilt from the round's first event. A follow-up queued on the
+  // thread lists it as queued while its latest round is the one that failed.
+  const failed = { type: "job.failed", seq: "3", text: "old failure" };
+  let pages = [[{ type: "job.started", seq: "1" }, { type: "director.notified", seq: "2", text: "old note" }, failed]];
+  let committedSeq = "3";
+  const afters = [];
+  const pane = await paneHarness(new Map(), undefined, "session", { replay: (args) => {
+    const at = args.indexOf("--after");
+    afters.push(at < 0 ? null : args[at + 1]);
+    const events = pages.shift() ?? [];
+    return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? committedSeq}`, committedSeq }]
+      .map((row) => JSON.stringify(row)).join("\n");
+  } });
+  pane.list([{ ...pane.listing[0], status: "queued", historyAvailable: true }]);
+  await pane.tick();
+  assert.deepEqual(pane.toasts.filter((text) => /job\.failed/.test(text)), [], "history is not news");
+  assert.equal(pane.stored.get("codex:tasks:session")?.["job-a"]?.cursor, "c3");
+  assert.equal(afters.at(-1), null, "the first read rebuilt the cursor from the start");
+
+  // An ending committed after the rebuild is still reported once.
+  pages = [[{ type: "job.started", seq: "4" }, { type: "job.failed", seq: "5", text: "new failure" }]];
+  committedSeq = "5";
+  pane.list([{ ...pane.listing[0], status: "running", historyAvailable: true }]);
+  await pane.tick();
+  assert.deepEqual(pane.toasts.filter((text) => /job\.failed/.test(text)), ["Alpha task · job.failed: new failure"]);
+  assert.equal(afters.at(-1), "c3");
 });
 
 test("branch stops inherited pane monitors and watches only its own dispatches", async () => {

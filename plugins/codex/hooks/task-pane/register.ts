@@ -8,7 +8,9 @@ type Thread = { id: string; recordId: string; jobId: string; label: string | nul
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean }
 type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
   startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
-type Receipt = { cursor?: string; terminal?: string }
+// `floor` is the committed seq when this ledger rebuilt the job's cursor from
+// the start: an ending at or below it was already history then.
+type Receipt = { cursor?: string; terminal?: string; floor?: string }
 type Ledger = Record<string, Receipt>
 type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
 type State = {
@@ -658,9 +660,17 @@ async function pollOnce($: EngineInterface, state: State) {
           const args = ['replay', job.id, '--limit', '8']
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
-            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string }] } catch { return [] } })
+            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string }] } catch { return [] } })
           if (stale()) return
           const events = rows.filter(row => row.seq)
+          // A reload whose ledger lost this job rebuilds its cursor from the
+          // round's first event, and an old job.failed in that replay read as a
+          // new ending. What was committed when the rebuild began is history.
+          if (!receipt.cursor && receipt.floor === undefined) {
+            const committed = rows.find(row => row.type === 'end')?.committedSeq
+            if (committed !== undefined) receipt.floor = committed
+          }
+          const historical = (seq: string) => receipt.floor !== undefined && BigInt(seq) <= BigInt(receipt.floor)
           // A job that is over has nothing left to wake the director for: its
           // ending is reported by the reconciliation below and the rest is read
           // with `result`. Its events are still consumed so the cursor moves
@@ -669,6 +679,8 @@ async function pollOnce($: EngineInterface, state: State) {
           // and question it ever wrote as though they had just arrived.
           const announce = !DONE.includes(job.status) && !foreign
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
+            // Left unclaimed: the reconciliation below still settles the ending.
+            if (event.type.startsWith('job.') && historical(event.seq!)) continue
             const line = pushLine(job.label ?? job.id, event, view)
             if (announce && line) lines.push({ jobId: job.id, cwd, text: line })
             // Claimed here as well, or the reconciliation below reports the same
