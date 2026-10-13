@@ -65,6 +65,9 @@ type State = {
   clock: string
   monitors: Map<string, Monitor>
   retiredMonitors: Set<string>
+  // Every watch this pane armed in this session, ended or not: its idle exit is
+  // reported after the entry in `monitors` may already have been replaced.
+  ownedMonitors: Set<string>
   leaving: boolean
   liveRoots: Set<string>
 }
@@ -107,6 +110,18 @@ export function shouldDropMonitorExpiry(
     if (text.includes(`<summary>Monitor event: "Codex job events in ${escaped}"</summary>`)) return true
   }
   return false
+}
+
+// An `events` stream the pane armed ends on its own once the repository has been
+// quiet: it prints IDLE_EXIT, and the host then reports the stream ended. Both
+// woke the director, and IDLE_EXIT tells it to re-arm -- a second watch beside
+// the one the pane arms again on its next live job, so every event came twice.
+// A failed script or a stop is still reported.
+export function shouldDropMonitorEnd(text: string, owned: ReadonlySet<string>): boolean {
+  const taskId = /<task-id>([^<]+)<\/task-id>/.exec(text)?.[1]
+  if (!taskId || !owned.has(taskId)) return false
+  return /<event>IDLE_EXIT /.test(text)
+    || /<summary>Monitor ".*" (?:stream ended|ended without producing output)/.test(text)
 }
 const RESCAN_TICKS = 15
 // Consecutive failures before retrying only on the periodic rescan.
@@ -169,6 +184,17 @@ function recordMonitors($: EngineInterface, state: State) {
     $.ui.log(`Codex tasks store: ${String(error)}`, { to: 'debug' })
     $.clock.after(0, () => { void flushStore($, state) })
   })
+}
+
+const OWNED_LIMIT = 50
+
+function recordOwned($: EngineInterface, state: State, taskId: string, key = state.key) {
+  state.ownedMonitors.add(taskId)
+  for (const old of state.ownedMonitors) {
+    if (state.ownedMonitors.size <= OWNED_LIMIT) break
+    state.ownedMonitors.delete(old)
+  }
+  writeStore($, state, `${key}:ownedMonitors`, [...state.ownedMonitors])
 }
 
 function stopMonitor($: EngineInterface, state: State, taskId: string, key = state.key) {
@@ -244,6 +270,7 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       if (!taskId) return
       if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId) return stopMonitor($, state, taskId, key)
       armed.taskId = taskId
+      recordOwned($, state, taskId)
       await recordMonitors($, state)
     }).catch((error: unknown) => {
       $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
@@ -454,6 +481,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const since = (await $.session.usage()).startedAt
   const retired = (await readStore($, `${key}:retiredMonitors`) ?? []) as string[]
   const armed = await readStore($, `${key}:monitors`)
+  const owned = (await readStore($, `${key}:ownedMonitors`) ?? []) as string[]
   // Reads from an ended session must not install their cache in its successor.
   if (epoch !== state.epoch) return
   state.leaving = false
@@ -469,7 +497,9 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   for (const [root, saved] of Object.entries((armed ?? {}) as Record<string, number | Monitor>)) {
     const monitor = typeof saved === 'number' ? { armedAt: saved } : saved
     if (now - monitor.armedAt < MONITOR_MS) state.monitors.set(root, monitor)
+    if (monitor.taskId) state.ownedMonitors.add(monitor.taskId)
   }
+  for (const id of owned) state.ownedMonitors.add(id)
   $.ui.invalidate('ui.render')
 }
 
@@ -961,7 +991,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
     ticks: 0, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
-    monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), leaving: false,
+    monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(),
   }
 
@@ -1000,6 +1030,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (e.origin.kind !== 'task-notification') return next(e)
     const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
     if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
+    if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
     if (!shouldDropMonitorExpiry(e.text, state.monitors.keys(), state.liveRoots, Boolean(state.script))) return next(e)
     return { drop: 'Codex tasks monitor expiry is re-armed by the pane' }
   })

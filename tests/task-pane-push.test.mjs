@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pushLine, registerTaskPane, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
+import { pushLine, registerTaskPane, shouldDropMonitorEnd, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
 import { askPane, renderPaneReply } from "../plugins/codex/scripts/lib/pane-channel.mjs";
@@ -936,6 +936,12 @@ test("branch stops inherited pane monitors and watches only its own dispatches",
   await hooks.get("session.start")(engine, { isInteractive: true }, async () => {});
   await until(() => stored.has("codex:tasks:session-a"));
   assert.ok(monitors.some((request) => request.command?.includes("--session session-a")));
+  await until(() => stored.get("codex:tasks:session-a:ownedMonitors")?.includes("monitor-session-a"));
+  const ended = await hooks.get("prompt.submit")(engine, {
+    origin: { kind: "task-notification" },
+    text: '<task-notification><task-id>monitor-session-a</task-id><status>completed</status><summary>Monitor "Codex job events in a" stream ended</summary></task-notification>',
+  }, async () => assert.fail("the pane's own idle exit reached the director"));
+  assert.ok(ended.drop);
 
   assert.ok(hooks.has("session.end"), "resume must detach this process's watches");
   await hooks.get("session.end")(engine, { reason: "resume", sessionId }, async () => {});
@@ -1004,6 +1010,34 @@ test("only expiry notices for monitors owned by the task pane are dropped", () =
   ];
   for (const [text, liveRoots, canRearm, expected] of cases) {
     assert.equal(shouldDropMonitorExpiry(text, watched, liveRoots, canRearm), expected, text);
+  }
+});
+
+test("only idle exits of monitors the task pane armed are dropped", () => {
+  const owned = new Set(["monitor-1"]);
+  const end = (taskId, status, summary) => `<task-notification>
+<task-id>${taskId}</task-id>
+<status>${status}</status>
+<summary>${summary}</summary>
+</task-notification>`;
+  const event = (taskId, line) => `<task-notification>
+<task-id>${taskId}</task-id>
+<summary>Monitor event: "Codex job events in alpha"</summary>
+<event>${line}</event>
+</task-notification>`;
+  const cases = [
+    [end("monitor-1", "completed", 'Monitor "Codex job events in alpha" stream ended'), true],
+    [end("monitor-1", "completed", 'Monitor "Codex job events in alpha" ended without producing output (exit 0)'), true],
+    [event("monitor-1", "IDLE_EXIT no active job for 60m; re-arm the monitor before the next dispatch"), true],
+    [end("monitor-1", "failed", 'Monitor "Codex job events in alpha" script failed (exit 2)'), false],
+    [end("monitor-1", "killed", 'Monitor "Codex job events in alpha" stopped'), false],
+    [event("monitor-1", "DONE job=job-1 [alpha] finished"), false],
+    [end("monitor-2", "completed", 'Monitor "Codex job events in alpha" stream ended'), false],
+    [event("monitor-2", "IDLE_EXIT no active job for 60m; re-arm the monitor before the next dispatch"), false],
+    ['<task-notification><summary>Monitor "Codex job events in alpha" stream ended</summary></task-notification>', false],
+  ];
+  for (const [text, expected] of cases) {
+    assert.equal(shouldDropMonitorEnd(text, owned), expected, text);
   }
 });
 
