@@ -12,7 +12,7 @@ they already have.
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:transfer`, `/codex:status`, `/codex:result`, `/codex:answer`, `/codex:message`, and `/codex:cancel` to hand off sessions and steer or manage background jobs
-- delegation itself is driven by the [codex-director](https://github.com/y-cruce/codex-director) workflow: it starts a Codex task through the companion and leaves it running, while the `task-pane` mod watches every job of the session, draws its live trace and raises the events the director must act on
+- delegation itself is driven by the [code-director](https://github.com/y-cruce/code-director) workflow: it starts a Codex task through the companion and leaves it running, while the `task-pane` mod watches every job of the session, draws its live trace and raises the events the director must act on
 
 ## Requirements
 
@@ -25,13 +25,13 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add y-cruce/codex-plugin-cc
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install codex@y-cruce-codex
 ```
 
 Reload plugins:
