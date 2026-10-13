@@ -616,7 +616,9 @@ async function pollOnce($: EngineInterface, state: State) {
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string }[] = []
     if (stale()) return
-    state.liveRoots = new Set(found.filter(entry => !DONE.includes(entry.thread.status)).map(entry => entry.cwd))
+    // A watch that expired just before the last job finished still needs to
+    // restart and catch its terminal. Recent finished rows keep that root watched.
+    state.liveRoots = new Set(found.map(entry => entry.cwd))
     await ensureMonitors($, state, state.liveRoots, now)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {

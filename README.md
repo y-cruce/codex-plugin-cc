@@ -286,6 +286,15 @@ node plugins/codex/scripts/codex-companion.mjs observe view-path JOB --cwd /path
 
 `QUESTION job=<id> request=<id> ...` is emitted only while that request remains pending. If the same request is encountered again while still pending, `follow` and `events` emit `QUESTION_PENDING job=<id> request=<id> still unanswered: ...` (periodic `events` reminders retain their elapsed-time format). Answered requests are skipped. `NOTIFIED job=<id> thread=<id> pending_request=<id> <note>` includes the request pending when the notification was created; the field is omitted when there was none. Explicit `--after` cursors continue to select their exact history position.
 
+`events --session <id>` keeps terminal output receipts in the repository's state
+directory. A replacement Monitor reports completed, failed or cancelled jobs from
+that session even if they finished between watches, and skips terminal lines already
+output by an earlier watch. The pane also re-arms repositories with recently finished
+tasks so the last task's completion is caught. Watches without `--session` continue
+to report only jobs they observed active.
+
+`events --session <id>` 在仓库状态目录保存已输出的终态记录；监听重挂时补报当前会话在空档中完成、失败或取消的任务，跳过此前已输出的终态。pane 对近期已结束任务所在的仓库也会重挂监听，保证最后一个任务能补报。未指定会话的监听继续只报告自己见过运行中的任务。
+
 Use `--quiet` for relay agents: only the cursor and terminal line are emitted, with a one-line heartbeat every 60 seconds while waiting. DONE does not include result text in this mode; read it separately with `result`. Default display hides token updates, user-message echoes and empty reasoning, and bounds command output previews to 120 characters and assistant rows to 300. Full event payloads and `lastMessage.text` remain unchanged; `--verbose` retains full output.
 
 The live view unwraps recognized `zsh/bash/sh -lc/-c` command wrappers for active commands and tail rows. Completed command rows carry `exitCode` and `durationMs` instead of embedding the exit code in text. Pending questions include ISO `openedAt` and `expiresAt` (the broker's actual deadline, or the shared ten-minute default when absent). Turn lifecycle lines remain in follow output but not in the tail. Raw event payloads are unchanged.

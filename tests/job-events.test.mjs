@@ -25,14 +25,46 @@ async function monitor(reports, handlers = {}, options = {}) {
     readJob: () => null,
     acknowledge: async () => assert.fail("Unexpected acknowledgement"),
     claimQuestion: async () => true,
+    terminalReportsFile: path.join(makeTempDir(), "terminal-reports.json"),
     ...handlers,
     writeLine: (line) => {
       lines.push(line);
-      handlers.writeLine?.(line);
+      return handlers.writeLine?.(line);
     }
   });
   return lines;
 }
+
+test("session monitors catch terminals in the re-arm gap once across restarts", async () => {
+  const terminalReportsFile = path.join(makeTempDir(), "terminal-reports.json");
+  const mine = { ...job, sessionId: "session-a" };
+  const handlers = { terminalReportsFile };
+  await monitor([{ running: [mine] }], handlers, { session: "session-a" });
+  const finished = ["completed", "failed", "cancelled"].map((status, index) => ({
+    ...mine, id: `gap-${index}`, status, errorMessage: "Stopped"
+  }));
+  const report = { latestFinished: { ...mine, status: "completed" }, recent: [...finished,
+    { ...mine, id: "foreign", sessionId: "session-b", status: "completed" }] };
+  assert.deepEqual(await monitor([report, report], handlers, { session: "session-a" }), [
+    "DONE job=job-1 thread=thread-1",
+    "DONE job=gap-0 thread=thread-1",
+    "FAILED job=gap-1 thread=thread-1 Stopped",
+    "FAILED job=gap-2 thread=thread-1 Stopped"
+  ]);
+  assert.deepEqual(await monitor([report], handlers, { session: "session-a" }), []);
+  const extra = { ...mine, id: "after-restart", status: "completed" };
+  assert.deepEqual(await monitor([{ ...report, recent: [...report.recent, extra] }], handlers, { session: "session-a" }),
+    ["DONE job=after-restart thread=thread-1"]);
+});
+
+test("a terminal output failure is retried by the next session monitor", async () => {
+  const terminalReportsFile = path.join(makeTempDir(), "terminal-reports.json");
+  const report = { latestFinished: { ...job, sessionId: "session", status: "completed" } };
+  await assert.rejects(monitor([report], { terminalReportsFile, writeLine: async () => { throw new Error("output failed"); } },
+    { session: "session" }), /output failed/);
+  assert.deepEqual(await monitor([report], { terminalReportsFile }, { session: "session" }),
+    ["DONE job=job-1 thread=thread-1"]);
+});
 
 for (const exitIdleMs of [undefined, 60000]) {
   test(`events exits after idle time with no jobs (${exitIdleMs ?? "default"}ms)`, async () => {

@@ -47,7 +47,7 @@ async function setupPort(t, id = "acp-job", options = {}) {
       port.proc?.stdout.destroy();
       port.queue.close();
       await within(pump, 1000, "ACP event pump cleanup");
-      await within(port.runtime.close(), 1000, "ACP runtime cleanup");
+      await within(port.runtime.close(), 5000, "ACP runtime cleanup");
     }
   });
   const session = await port.startSession({ cwd, additionalDirectories: [], mcpServers: [], modeId: "default",

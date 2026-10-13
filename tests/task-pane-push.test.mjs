@@ -29,7 +29,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const dirs = new Set(["/work", ...(options.dirs ?? [])]);
   const logs = [];
   const debugLogs = [];
-  const now = options.now ?? Date.now();
+  let now = options.now ?? Date.now();
   let startedAt = options.startedAt ?? now;
   const workspaceRoot = options.workspaceRoot ?? "/work";
   dirs.add(workspaceRoot);
@@ -147,6 +147,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
     tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
+    advance: (ms) => { now += ms; },
     dispatched: async (command) => {
       await hooks.get("tool.call:")(engine, { command }, async () => ({ stdout: "STATUS: started JOB: new-job NAME: New job" }));
       await settle(writes);
@@ -275,6 +276,24 @@ test("session resume returns while a monitor stop never returns", async (t) => {
     assert.deepEqual(stopped, ["monitor-1"], reason);
     assert.equal(monitors, 2, "the next session's monitor runs while the old stop is pending");
   }
+});
+
+test("an expired monitor is re-armed even when its last task finished in the gap", async () => {
+  const calls = [];
+  const pane = await paneHarness(new Map(), undefined, "session", { watch: false, toolCall: request => {
+    calls.push(request);
+    return { result: { taskId: `monitor-${calls.length}` } };
+  } });
+  assert.equal(calls.length, 1);
+  pane.advance(1800001);
+  pane.list([{ ...pane.listing[0], status: "completed" }]);
+  pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed" });
+  pane.files.set(pane.viewPath, { ...pane.live, status: "completed", activeRoundId: null, endedAt: new Date().toISOString() });
+  await pane.tick();
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].command, /events --cwd \/work --session session/);
+  await pane.tick();
+  assert.equal(calls.length, 2, "the replacement keeps its settling window");
 });
 
 test("an old replay cannot write its ledger into a new session", async () => {
