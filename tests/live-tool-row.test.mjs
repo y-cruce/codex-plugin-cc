@@ -12,29 +12,31 @@ import { createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-
 
 tier('user');
 describe('live ToolUse row', () => {
-  test('shows active context compaction and elapsed time in the trace, hint and task list until it ends', ($, on) => {
+  test('shows context compaction once in the trace and in the prompt hint until it ends', ($, on) => {
     world($, on);
     const data = fixture();
     data.compactingSince = data.startedAt;
     data.thinkingSince = data.startedAt;
     const now = Date.parse(data.startedAt) + 180000;
-    const ui = { ...$.ui.resolve(row()), Button: props => ({ type: 'Button', props, children: [props.label] }) };
+    const ui = { ...$.ui.resolve(row()), Button: props => ({ type: 'Button', props, children: props.children ?? [props.label] }) };
     const draw = result => textOf(liveTree(ui, data, 160, now, 48, result));
-    assert.match(draw(), /● 正在压缩上下文 · 3m…/);
+    assert.match(draw(), /● Compacting context · 3m…/);
     assert.doesNotMatch(draw(), /Thinking|no progress/);
-    assert.match(statusText([data], now), /正在压缩上下文 3m/);
+    assert.match(statusText([data], now), /Compacting context 3m/);
     const pane = () => textOf(paneBody(ui, [data], 160, 30, now, null, () => {}));
-    assert.match(pane(), /1 fixture task[\s\S]* · 正在压缩上下文/);
+    assert.match(pane(), /1 fixture task[\s\S]* · running/);
+    assert.equal((draw().match(/Compacting context/g) ?? []).length, 1);
+    assert.equal((pane().match(/Compacting context/g) ?? []).length, 1);
     data.label = 'context-heavy task '.repeat(8);
     const taskLine = paneBody(ui, [data], 60, 30, now, null, () => {}).children[1].children[0];
-    assert.ok(cellWidth(textOf(taskLine)) <= 58, 'reserves terminal cells for the Chinese state label');
+    assert.ok(cellWidth(textOf(taskLine)) <= 58, 'reserves terminal cells for the state label');
     data.label = 'fixture task';
-    assert.doesNotMatch(draw({ kind: 'DONE' }), /正在压缩上下文/);
+    assert.doesNotMatch(draw({ kind: 'DONE' }), /Compacting context/);
     data.status = 'completed'; data.endedAt = data.startedAt;
-    assert.doesNotMatch(pane(), /正在压缩上下文/);
+    assert.doesNotMatch(pane(), /Compacting context/);
     data.status = 'running'; data.endedAt = null; data.compactingSince = null;
-    assert.doesNotMatch(draw(), /正在压缩上下文/);
-    assert.doesNotMatch(statusText([data], now), /正在压缩上下文/);
+    assert.doesNotMatch(draw(), /Compacting context/);
+    assert.doesNotMatch(statusText([data], now), /Compacting context/);
     assert.match(pane(), /1 fixture task[\s\S]* · running/);
   });
   test('distinguishes director replies from executor notifications in inline and full traces', ($, on) => {

@@ -646,7 +646,7 @@ async function pollOnce($: EngineInterface, state: State) {
       owners: rows.owners, provisional: rows.provisional })
     if (changed) $.ui.invalidate('ui.render')
     const ledger: Ledger = { ...state.ledger }
-    const lines: { jobId: string; cwd: string; text: string }[] = []
+    const lines: { jobId: string; cwd: string; text: string; type: string }[] = []
     if (stale()) return
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
@@ -712,7 +712,7 @@ async function pollOnce($: EngineInterface, state: State) {
             // Left unclaimed: the reconciliation below still settles the ending.
             if (event.type.startsWith('job.') && historical(event.seq!)) continue
             const line = pushLine(job.label ?? job.id, event, view)
-            if (announce && line) lines.push({ jobId: job.id, cwd, text: line })
+            if (announce && line) lines.push({ jobId: job.id, cwd, text: line, type: event.type })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -728,7 +728,7 @@ async function pollOnce($: EngineInterface, state: State) {
         state.unreadable.delete(job.id)
         if (status && receipt.terminal !== status) {
           if (!first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
-            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}` })
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}` })
           }
           receipt.terminal = status
         }
@@ -768,7 +768,14 @@ async function pollOnce($: EngineInterface, state: State) {
       await saveLedger($, state)
       return
     }
-    for (const line of lines) $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
+    for (const line of lines) {
+      $.ui.toast(clip(line.text, 140), { timeoutMs: 6000 })
+      if (['question.opened', 'job.completed', 'job.failed'].includes(line.type)) {
+        void $.ui.notify(clip(line.text, 300), { title: 'Codex tasks' }).catch(error => {
+          $.ui.log(`Codex tasks notification: ${String(error)}`, { to: 'debug' })
+        })
+      }
+    }
     // A job whose follow row is on screen is reported by its own agent; pushing
     // it again would wake the director twice for one event.
     const mine = [...state.pending, ...lines.filter(line =>
@@ -1007,9 +1014,25 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return result
   })
   on('turn.start', ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
     state.busy = true
     if (!state.script) $.clock.after(0, () => { void bootstrap($, state, push) })
     return next(e)
+  })
+  on('prompt.autocomplete', ($, e, next) => {
+    const prefix = e.text.slice(0, e.start)
+    const message = /^\/codex:message\s+$/.test(prefix)
+    if (!message && !/^\/codex:tasks\s+(?:forget\s+)?$/.test(prefix)) return next(e)
+    const token = e.token.toLowerCase()
+    const suggestions = visibleThreads(state)
+      .filter(view => !message || view.status === 'running' && !view.pendingQuestion && !isOver(view))
+      .map(view => ({
+        text: message ? view.activeRoundId ?? view.jobId : view.recordId ?? view.jobId,
+        label: view.rounds?.[0]?.label ?? view.label,
+        description: view.status,
+      }))
+      .filter(row => row.text.toLowerCase().includes(token) || row.label.toLowerCase().includes(token))
+    return { suggestions }
   })
   on('turn.complete', ($, e, next) => {
     if (!e.agentId) {
@@ -1097,11 +1120,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.toEnd = true
     }
     state.opened = true
-    state.shown = true
     state.dismissed = false
     if (state.key) writeStore($, state, `${state.key}:dismissed`, false)
-    await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
+    const opened = await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
+    state.shown = opened.isPlaced === true
     $.ui.invalidate('ui.render')
+    if (opened.isPlaced === false) return { text: `Codex tasks · could not show pane: ${opened.reason}` }
     if (starting) return { text: 'Codex tasks · starting' }
     if (refresh) return { text: 'Codex tasks · refreshing' }
     if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
@@ -1133,10 +1157,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       key: 'codex_tasks_open', plain: true,
       label: `Codex tasks${activity ? ` · ${activity}` : ''}`,
       onPress: async () => {
-        state.opened = state.shown = true
+        state.opened = true
         state.dismissed = false
         if (state.key) writeStore($, state, `${state.key}:dismissed`, false)
-        await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
+        const opened = await $.ui.open({ id: PANE, title: 'Codex tasks', focus: true, closeOnEscape: true, rows: 24 })
+        state.shown = opened.isPlaced === true
+        if (opened.isPlaced === false) $.ui.toast(`Codex tasks · could not show pane: ${opened.reason}`)
       },
     })] })
   })

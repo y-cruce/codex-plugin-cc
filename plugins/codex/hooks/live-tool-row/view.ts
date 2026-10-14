@@ -127,7 +127,7 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
   const executor = running[0]?.executor?.label ?? 'Codex'
   return `${executor} · ${running.length} running · ${running.map(data => {
     const command = data.activeCommands.find(command => !command.agentThreadId)
-    const detail = isCompacting(data) ? `正在压缩上下文 ${elapsed(data.compactingSince!, now)}` : command ? `$ ${clip(command.command, 30)}`
+    const detail = isCompacting(data) ? `Compacting context ${elapsed(data.compactingSince!, now)}` : command ? `$ ${clip(command.command, 30)}`
       : data.files.length ? `✎ ${data.files.length} files` : clip(data.tail.at(-1)?.text ?? '', 30)
     return `${clip(data.label, 80)} ${elapsed(latestRound(data)?.startedAt ?? data.startedAt, now)}${detail ? ` ${detail}` : ''}`
   }).join(' · ')}`
@@ -207,7 +207,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const header = [
     { text: `● ${executor} · ` },
     { text: data.label, bold: true },
-    { text: ` · ${compacting ? '正在压缩上下文' : status}`, color: colors[status] },
+    { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
@@ -535,7 +535,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   })
   if (compacting) {
     entry = true
-    add(`● 正在压缩上下文 · ${elapsed(compacting, now)}…`, { color: 'cyan' })
+    add(`● Compacting context · ${elapsed(compacting, now)}…`, { color: 'cyan' })
   } else if (thinking) {
     entry = true
     add(`● Thinking · ${elapsed(thinking, now)}…`, { dimColor: true })

@@ -74,6 +74,10 @@ One simple first run is:
 
 ### Live task input
 
+With Claude Code 2.1.299 or later, task completion, failure and pending questions use your notification channel. The task name and status in the pane are one clickable control. Sessions without a drawing surface report why the pane cannot be shown.
+
+When entering a target for `/codex:tasks`, `/codex:tasks forget` or `/codex:message`, type part of its name or ID and press Tab to insert its ID. Message suggestions include only running tasks; answer pending questions with `/codex:answer`.
+
 Use the job ID from `/codex:status` to control an already running task:
 
 ```text

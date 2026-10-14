@@ -30,6 +30,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const logs = [];
   const debugLogs = [];
   const toasts = [];
+  const notices = [];
   let now = options.now ?? Date.now();
   let startedAt = options.startedAt ?? now;
   const workspaceRoot = options.workspaceRoot ?? "/work";
@@ -112,7 +113,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       return { exitCode: 0, stdout: JSON.stringify({ threads: init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
     tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
-    ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
+    ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return request.focus ? options.focusResult ?? { isPlaced: true } : openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
+      notify: async (text) => { notices.push(text); if (options.notify) return options.notify(); return { isSent: true, channel: "terminal_bell" }; },
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
@@ -127,7 +129,9 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, statPaths, observed, writes: () => writes,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, observed, writes: () => writes,
+    autocomplete: async (text) => { const token = /\S*$/.exec(text)[0]; return hooks.get("prompt.autocomplete:")(engine,
+      { text, token, cursor: text.length, start: text.length - token.length }, async () => ({ suggestions: [] })); },
     removeDir: (path) => { dirs.delete(path); },
     holdViewRead: (path = viewPath) => {
       viewReadPath = path;
@@ -167,6 +171,60 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
+
+test("subagent turns leave director bootstrap and completion polling alone", async () => {
+  const hooks = new Map();
+  registerTaskPane((event, matcher, callback) => hooks.set(event, callback ?? matcher));
+  const scheduled = [];
+  const engine = { clock: { after: (_ms, callback) => scheduled.push(callback) } };
+  const next = async () => {};
+  await hooks.get("turn.start")(engine, { agentId: "child" }, next);
+  await hooks.get("turn.complete")(engine, { agentId: "child" }, next);
+  assert.equal(scheduled.length, 0);
+  await hooks.get("turn.start")(engine, {}, next);
+  await hooks.get("turn.complete")(engine, {}, next);
+  assert.equal(scheduled.length, 2);
+});
+
+test("task completion notifies once even when the notification channel fails", async () => {
+  const pane = await paneHarness(new Map(), undefined, "session", { notify: async () => { throw new Error("channel failed"); } });
+  pane.listing[0].status = "completed";
+  pane.live.status = "completed";
+  pane.live.activeRoundId = null;
+  pane.live.endedAt = new Date().toISOString();
+  pane.touch();
+  await pane.tick();
+  await pane.tick();
+  assert.equal(pane.notices.length, 1);
+  assert.match(pane.notices[0], /job.completed/);
+  assert.equal(pane.stored.get("codex:tasks:session")["job-a"].terminal, "completed");
+});
+
+test("task selectors complete record IDs while messages complete only running job IDs", async () => {
+  const pane = await paneHarness();
+  const observed = pane.observed.length;
+  for (const [text, id] of [["/codex:tasks Alp", "record-a"], ["/codex:tasks forget record", "record-a"], ["/codex:message Alp", "job-a"]]) {
+    const result = await pane.autocomplete(text);
+    assert.equal(result.suggestions[0].text, id);
+    assert.equal(result.suggestions[0].label, "Alpha task");
+  }
+  assert.equal(pane.observed.length, observed, "completion reads the cached rows without a process call");
+  assert.deepEqual((await pane.autocomplete("/codex:message job-a revise Alp")).suggestions, []);
+  pane.live.pendingQuestion = { requestId: "request", text: "Choose", openedAt: "", expiresAt: null };
+  pane.touch();
+  await pane.tick();
+  assert.deepEqual((await pane.autocomplete("/codex:message Alp")).suggestions, []);
+  pane.live.status = "waiting-for-answer";
+  pane.touch();
+  await pane.tick();
+  assert.deepEqual((await pane.autocomplete("/codex:message Alp")).suggestions, []);
+});
+
+test("an unplaced tasks command keeps its open control available", async () => {
+  const pane = await paneHarness(new Map(), undefined, "session", { focusResult: { isPlaced: false, reason: "no-surface" } });
+  assert.match((await pane.command("")).text, /no-surface/);
+  assert.equal((await pane.band()).children[0].key, "codex_tasks_open");
+});
 
 test("pane rendering uses the cached clock without I/O", async () => {
   let reading = false;
@@ -446,7 +504,7 @@ test("tasks answers during a stalled bootstrap and retries without a startup fai
       assert.equal(args[1], "/plugin/scripts/codex-companion.mjs");
       return { exitCode: 0, stdout: '{"threads":[]}', stderr: "" };
     } },
-    ui: { panes: async () => [], open: async (request) => { opened.push(request); }, invalidate: () => {}, log: () => {} },
+    ui: { panes: async () => [], open: async (request) => { opened.push(request); return { isPlaced: true }; }, invalidate: () => {}, log: () => {} },
   };
   registerTaskPane((event, options, callback) => hooks.set(event, callback ?? options));
   const command = (args = "") => hooks.get("command.run")(engine, { command: "codex:tasks", args },
@@ -1078,7 +1136,8 @@ test("task pane renders one thread row with both rounds in trace order", () => {
       { seq: "4", at: "2026-09-21T02:00:00Z", type: "message.delta", text: "the answer", from: "0" },
     ],
   };
-  const tree = paneBody(ui, [data], 100, 20, Date.parse(data.endedAt), null, () => {});
+  let selected;
+  const tree = paneBody(ui, [data], 100, 20, Date.parse(data.endedAt), null, (id) => { selected = id; });
   const nodes = [];
   const visit = (value) => {
     if (typeof value === "string") return value;
@@ -1093,6 +1152,11 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   assert.equal(empty.props.paddingRight, 2);
   assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
   assert.equal(nodes.find((node) => node.type === "Button").props.key, "codex_tab_task-old");
+  const button = nodes.find((node) => node.type === "Button");
+  assert.equal(button.children[1].type, "Text");
+  assert.match(button.children[1].children[0], /completed/);
+  button.props.onPress();
+  assert.equal(selected, "task-old");
   // The row is named by the round that opened the thread, not by the newest one.
   assert.match(nodes.find((node) => node.type === "Button").props.label, /opening round/);
   assert.ok(text.indexOf("first round trace") < text.indexOf("second round trace"), text);
