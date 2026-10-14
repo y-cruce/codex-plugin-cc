@@ -136,7 +136,7 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
 function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, kind: 'reply' | 'message' | 'interrupt' | 'notification', text: string, columns: number) {
   const { Box, Text } = ui
   const notified = kind === 'notification'
-  const color = notified ? 'cyan' : undefined
+  const color = notified || kind === 'reply' ? 'cyan' : undefined
   return Box({ flexDirection: 'column', paddingLeft: 0, width: columns, children: [
     Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ Executor notification' : `◆ ↓ Director ${kind}` }),
     Box({ paddingLeft: 2, children: Text({ color, wrap: 'wrap', children: clean(text) }) }),

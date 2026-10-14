@@ -168,9 +168,10 @@ answers after the questions, and displays durations in whole seconds.
 
 The pane and inline traces use the same block layout for `◆ ↓ Director reply`,
 `◆ ↓ Director message`, `◆ ↓ Director interrupt` and `◇ ↑ Executor notification`.
-Headings align on the left and bodies indent two columns. Director text uses the
-default color; executor notifications use cyan, including completed notification
-cards. Messages retain their complete text and wrap in traces.
+Headings align on the left and bodies indent two columns. Director replies and
+executor notifications use cyan for both headings and bodies, including completed
+notification cards. Messages and interrupts use the default color. Messages retain
+their complete text and wrap in traces.
 Completed Markdown tables use bordered columns with wrapping cells, or labelled
 rows when the viewport is too narrow. Cell formatting and links use native Markdown.
 While Codex compacts its context, the trace, task list and status hint show
@@ -179,7 +180,8 @@ compaction completes or the turn or task ends.
 
 面板与内联轨迹用统一块式布局显示 `◆ ↓ Director reply`、`◆ ↓ Director message`、
 `◆ ↓ Director interrupt` 和 `◇ ↑ Executor notification`。英文标题左对齐，正文统一缩进两列；
-主 agent 使用默认正文色，执行者通知使用青色，已结束的通知卡片也使用同一样式。
+主 agent 回复和执行者通知的标题与正文统一使用青色，已结束的通知卡片也使用同一样式；
+直接消息和中断消息使用默认正文色。
 消息保留完整正文，在轨迹中换行显示。
 完整 Markdown 表格显示为带边框且单元格换行的分列布局；窗口过窄时按列名逐条展示。
 单元格内的格式和链接继续使用宿主 Markdown 渲染。

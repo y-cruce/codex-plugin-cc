@@ -58,7 +58,7 @@ describe('live ToolUse row', () => {
     for (const maxTail of [undefined, 200]) {
       const nodes = rowsOf(liveTree($.ui.resolve(row()), data, 40, 0, 48, undefined, maxTail));
       for (const [title, body, indent, color] of [
-        ['◆ ↓ Director reply', answer, 0, undefined],
+        ['◆ ↓ Director reply', answer, 0, 'cyan'],
         ['◇ ↑ Executor notification', notification, 0, 'cyan'],
         ['◆ ↓ Director message', controlText, 0, undefined],
         ['◆ ↓ Director interrupt', controlText, 0, undefined],
@@ -438,7 +438,7 @@ describe('live row polish', () => {
     assert.equal(question.props.color, 'magenta');
     const answer = nodes.find(node => textOf(node).startsWith('◆ ↓'));
     assert.equal(textOf(answer), '◆ ↓ Director reply\ncolor: Blue\nKeep the existing theme.');
-    assert.equal(answer.children[0].props.color, undefined);
+    assert.equal(answer.children[0].props.color, 'cyan');
     assert.equal(answer.children[1].children[0].props.wrap, 'wrap');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
     assert.match(textOf(tree), /● Calling 2 tools…\n  ⎿  regular tool completed/);
