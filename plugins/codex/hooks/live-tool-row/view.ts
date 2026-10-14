@@ -133,11 +133,12 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
   }).join(' · ')}`
 }
 
-function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, notified: boolean, text: string, columns: number) {
+function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, kind: 'reply' | 'message' | 'interrupt' | 'notification', text: string, columns: number) {
   const { Box, Text } = ui
+  const notified = kind === 'notification'
   const color = notified ? 'cyan' : undefined
-  return Box({ flexDirection: 'column', paddingLeft: notified ? 2 : 0, width: columns, children: [
-    Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ 执行者通知' : '◆ ↓ 主 agent 回复' }),
+  return Box({ flexDirection: 'column', paddingLeft: 0, width: columns, children: [
+    Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ Executor notification' : `◆ ↓ Director ${kind}` }),
     Box({ paddingLeft: 2, children: Text({ color, wrap: 'wrap', children: clean(text) }) }),
   ] })
 }
@@ -150,7 +151,7 @@ export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, ter
   return Box({ flexDirection: 'column', children: [
     Text({ color, dimColor, wrap: 'truncate-end', children: clip(`● Codex · ${label} · ${status}`, columns) }),
     ...agents.map(text => Box({ paddingLeft: 2, children: Text({ dimColor: true, wrap: 'truncate-end', children: clip(text, Math.max(1, columns - 2)) }) })),
-    ...(terminal.kind === 'NOTIFIED' ? [communicationTree(ui, true, terminal.text, columns)]
+    ...(terminal.kind === 'NOTIFIED' ? [communicationTree(ui, 'notification', terminal.text, columns)]
       : terminal.kind !== 'TIMEOUT' && terminal.text ? [Box({ paddingLeft: 2, width: columns, children: Text({
       dimColor, wrap: 'wrap', children: clean(terminal.text),
     }) })] : []),
@@ -441,12 +442,18 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     }
     if (type === 'question.resolved') {
       separate(true)
-      lines.push(communicationTree(ui, false, event.answer || 'answer delivered', columns))
+      lines.push(communicationTree(ui, 'reply', event.answer || 'answer delivered', columns))
       return
     }
     if (type === 'director.notified') {
       separate(true)
-      lines.push(communicationTree(ui, true, event.text.replace(/^notify_director:\s*/, ''), columns))
+      lines.push(communicationTree(ui, 'notification', event.text.replace(/^notify_director:\s*/, ''), columns))
+      return
+    }
+    if (type === 'control.message.updated') {
+      separate(true)
+      const kind = event.text.startsWith('director → interrupt:') ? 'interrupt' : 'message'
+      lines.push(communicationTree(ui, kind, event.text.replace(/^director → (message|interrupt): /, ''), columns))
       return
     }
     if (fullTrace && type === 'prompt') {

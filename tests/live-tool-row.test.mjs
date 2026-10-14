@@ -48,16 +48,20 @@ describe('live ToolUse row', () => {
       { type: 'message.completed', text: 'assistant: Ordinary executor message.' },
     ].map((event, index) => ({ ...event, seq: String(index + 1), at: data.startedAt }));
     const controlText = `${'补充背景核对🙂'.repeat(50)}\n完整结尾 orderFreightCost`;
-    const control = normalizeJobEvent({ method: 'companion/control-message', params: {
-      threadId: 'thread-1', turnId: 'turn-1', message: controlText, status: 'accepted',
-    } }, { id: data.jobId, streamId: 'stream-1' });
-    control.seq = '4';
-    applyJobEvent(data, control);
+    for (const [seq, interrupt] of [['4', false], ['5', true]]) {
+      const control = normalizeJobEvent({ method: 'companion/control-message', params: {
+        threadId: 'thread-1', turnId: 'turn-1', message: controlText, interrupt, status: 'accepted',
+      } }, { id: data.jobId, streamId: 'stream-1' });
+      control.seq = seq;
+      applyJobEvent(data, control);
+    }
     for (const maxTail of [undefined, 200]) {
       const nodes = rowsOf(liveTree($.ui.resolve(row()), data, 40, 0, 48, undefined, maxTail));
       for (const [title, body, indent, color] of [
-        ['◆ ↓ 主 agent 回复', answer, 0, undefined],
-        ['◇ ↑ 执行者通知', notification, 2, 'cyan'],
+        ['◆ ↓ Director reply', answer, 0, undefined],
+        ['◇ ↑ Executor notification', notification, 0, 'cyan'],
+        ['◆ ↓ Director message', controlText, 0, undefined],
+        ['◆ ↓ Director interrupt', controlText, 0, undefined],
       ]) {
         const block = nodes.find(node => textOf(node).startsWith(title));
         assert.ok(block, title);
@@ -72,9 +76,7 @@ describe('live ToolUse row', () => {
         assert.equal(textOf(content), body);
       }
       assert.ok(nodes.some(node => textOf(node) === '› Ordinary executor message.'));
-      const message = nodes.find(node => textOf(node).startsWith('→ director → message:'));
-      assert.equal(message.props.wrap, 'wrap');
-      assert.equal(textOf(message), `→ director → message: ${controlText}`);
+      assert.doesNotMatch(textOf(nodes.find(node => textOf(node).startsWith('◆ ↓ Director message'))), /director → message:/);
     }
   });
   test('renders cached rows while a final read hangs, without render I/O', async ($, on) => {
@@ -347,11 +349,11 @@ describe('live row polish', () => {
       const input = row(undefined, { isRunning: false, output: terminalOutput(kind, body) });
       input.viewport.columns = 40;
       const tree = await $.ui.render(input);
-      assert.equal(textOf(tree), `● Codex · row label · ${status}${kind === 'TIMEOUT' ? '' : `\n${kind === 'NOTIFIED' ? '◇ ↑ 执行者通知\n' : ''}${body}`}`);
+      assert.equal(textOf(tree), `● Codex · row label · ${status}${kind === 'TIMEOUT' ? '' : `\n${kind === 'NOTIFIED' ? '◇ ↑ Executor notification\n' : ''}${body}`}`);
       assert.equal(tree.children[0].props.color, color);
       assert.equal(tree.children[0].props.dimColor, dim);
       if (kind !== 'TIMEOUT') {
-        assert.equal(tree.children[1].props.paddingLeft, 2);
+        assert.equal(tree.children[1].props.paddingLeft, kind === 'NOTIFIED' ? 0 : 2);
         assert.equal(tree.children[1].children[0].props.wrap, 'wrap');
         if (kind === 'NOTIFIED') {
           assert.equal(tree.children[1].children[0].props.color, 'cyan');
@@ -388,7 +390,7 @@ describe('live row polish', () => {
     const question = row(undefined, { tool_use_id: 'question', isRunning: false, output: terminalOutput('QUESTION', 'Which color?') });
     const first = await $.ui.render(notified);
     const second = await $.ui.render(question);
-    assert.equal(textOf(first), '● Codex · fixture task · notified\n◇ ↑ 执行者通知\ncolor received: green');
+    assert.equal(textOf(first), '● Codex · fixture task · notified\n◇ ↑ Executor notification\ncolor received: green');
     assert.equal(textOf(second), '● Codex · fixture task · question\nWhich color?');
     assert.equal(state.reads, 1);
     const data = fixture(); data.label = 'latest label'; data.lastMessage.text = 'FINAL FULL ANSWER';
@@ -435,7 +437,7 @@ describe('live row polish', () => {
     assert.equal(textOf(question), '? Question request=1: Which color?');
     assert.equal(question.props.color, 'magenta');
     const answer = nodes.find(node => textOf(node).startsWith('◆ ↓'));
-    assert.equal(textOf(answer), '◆ ↓ 主 agent 回复\ncolor: Blue\nKeep the existing theme.');
+    assert.equal(textOf(answer), '◆ ↓ Director reply\ncolor: Blue\nKeep the existing theme.');
     assert.equal(answer.children[0].props.color, undefined);
     assert.equal(answer.children[1].children[0].props.wrap, 'wrap');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
@@ -706,10 +708,10 @@ describe('live row polish', () => {
     assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1s']);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
-    for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['→', 'cyan', false]]) {
+    for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['◆', undefined, false], ['◇', 'cyan', false]]) {
       const row = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
       const node = row.type === 'Box' ? row.children[0] : row;
-      assert.equal(node.props.color, color); assert.equal(node.props.dimColor, dim);
+      assert.equal(node.props.color, color); assert.equal(node.props.dimColor ?? false, dim);
     }
     // reasoning.completed is in the tail above and must not reach the tree.
     assert.equal(rowsOf(tree).find(node => textOf(node).startsWith('…')), undefined);
@@ -1077,7 +1079,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '◆ ↓ 主 agent 回复\nanswer delivered',
+      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '◆ ↓ Director reply\nanswer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',
