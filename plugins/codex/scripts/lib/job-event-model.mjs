@@ -119,7 +119,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "question.resolved": text = `director → answer delivered request=${p.requestId}`; break;
     case "question.closed": text = `Question resolved request=${p.requestId}`; break;
     case "director.notified": text = `notify_director: ${p.message ?? ""}`; break;
-    case "control.message.updated": text = `director → ${p.mode === "interrupt" ? "interrupt" : "message"}: ${[...String(p.message ?? "")].slice(0, 200).join("")}`; break;
+    case "control.message.updated": text = `director → ${p.mode === "interrupt" ? "interrupt" : "message"}: ${p.message ?? ""}`; break;
     case "tool.started": case "tool.updated": case "tool.completed": {
       const tool = p.tool;
       if (!verbose && tool.name === "userMessage") return null;
@@ -528,6 +528,11 @@ export function applyJobEvent(view, event, options = {}) {
   // stalled. The stretch runs from the first of them to the next row the agent
   // writes, or to the end of its turn.
   if (!child) {
+    if (p.tool?.name === "contextCompaction") {
+      if (event.type === "tool.started" && !terminal(view.status)) view.compactingSince ??= event.occurredAt;
+      else if (event.type === "tool.completed") view.compactingSince = null;
+    }
+    if (["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.compactingSince = null;
     if (event.type === "reasoning.started") view.thinkingSince ??= event.occurredAt;
     else if ((text != null && !event.type.startsWith("reasoning.") && event.type !== "agent.activity")
       || ["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.thinkingSince = null;

@@ -169,6 +169,35 @@ test("an item that names no tool says what it is doing instead of its id", () =>
   assert.deepEqual(view.tail.map((row) => row.text), items.map(([item, expected]) => `${item.type} completed: ${expected}`));
 });
 
+test("context compaction tracks its start until completion or turn termination and stays local to its agent", () => {
+  for (const finish of ["item/completed", "turn/completed", "companion/job-completed"]) {
+    const { view, accept } = harness();
+    const item = { type: "contextCompaction", id: "compact-1" };
+    const started = accept("item/started", { item });
+    assert.equal(view.compactingSince, started.occurredAt);
+    accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 42 } } });
+    assert.equal(view.compactingSince, started.occurredAt);
+    const child = normalizeJobEvent({ method: "item/completed", params: { threadId: "child", turnId: "child-turn", item } },
+      { id: "job-1", streamId: "stream-1" }, { id: "child", path: "review" });
+    child.seq = String(BigInt(view.history.committedSeq) + 1n);
+    applyJobEvent(view, child);
+    assert.equal(view.compactingSince, started.occurredAt);
+    const completed = normalizeJobEvent({ method: finish, params: {
+      threadId: "thread-1", turnId: "turn-1", item, turn: { id: "turn-1", status: "failed" }, job: { status: "cancelled" },
+    } }, { id: "job-1", streamId: "stream-1" });
+    completed.seq = String(BigInt(view.history.committedSeq) + 1n);
+    applyJobEvent(view, completed);
+    assert.equal(view.compactingSince, null);
+  }
+  const { view } = harness();
+  const child = normalizeJobEvent({ method: "item/started", params: {
+    threadId: "child", turnId: "child-turn", item: { type: "contextCompaction", id: "compact-child" },
+  } }, { id: "job-1", streamId: "stream-1" }, { id: "child", path: "review" });
+  child.seq = "1";
+  applyJobEvent(view, child);
+  assert.equal(view.compactingSince ?? null, null);
+});
+
 test("a view opens with the brief the job was given, without the note around it", () => {
   // The brief travels in a file and the trace starts at what the agent did, so
   // the pane never showed what it was asked. The worker prepends a fixed note
@@ -304,11 +333,15 @@ test("director controls and delivered answers appear in default output and tail"
   assert.equal(view.tail.at(-1).answer, "source: Use the latest plan.\nKeep the tests.");
   assert.equal(view.pendingQuestion, null);
   assert.equal(view.status, "running");
-  const text = "x".repeat(300);
-  const control = accept("companion/control-message", { message: text, interrupt: true, status: "accepted" });
-  assert.equal(control.source.raw.params.message, text);
-  assert.equal(renderJobEvent(control), `director → interrupt: ${"x".repeat(200)}`);
-  assert.equal(view.tail.at(-1).text, renderJobEvent(control));
+  const text = `${"补充背景核对🙂".repeat(50)}\n完整结尾 orderFreightCost`;
+  for (const interrupt of [false, true]) {
+    const control = accept("companion/control-message", { message: text, interrupt, status: "accepted" });
+    const prefix = `director → ${interrupt ? "interrupt" : "message"}: `;
+    assert.equal(control.source.raw.params.message, text);
+    assert.equal(renderJobEvent(control), `${prefix}${text.replace(/\n/g, " ⏎ ")}`);
+    assert.equal(renderJobEvent(control, { verbose: true, tail: true }), `${prefix}${text}`);
+    assert.equal(view.tail.at(-1).text, `${prefix}${text}`);
+  }
   const acpAnswer = createCanonicalEvent({ job: { id: "job-1", streamId: "stream-1" }, executor: "acp", type: "question.resolved",
     identity: { sessionId: "thread-1", turnId: "turn-1", requestId: "acp-question" },
     payload: { requestId: "acp-question", action: "accept", values: { plan: "First step\nSecond step", enabled: false, count: 0, choices: ["A", "B"] } } });

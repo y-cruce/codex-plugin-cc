@@ -2,15 +2,81 @@ import assert from 'node:assert/strict';
 import { describe, test, tier, fixture, row, resultRow, world, textOf, hint, rowsOf, terminalOutput } from './fixtures/live-tool-row.mjs';
 import { followOf } from '../plugins/codex/hooks/live-tool-row/command.ts';
 import { refresh } from '../plugins/codex/hooks/live-tool-row/register.ts';
-import { terminalOf, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
+import { terminalOf, cellWidth, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
 import { clip, liveTree, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
 import { markdown } from '../plugins/codex/hooks/live-tool-row/markdown.ts';
+import { paneBody } from '../plugins/codex/hooks/task-pane/pane.ts';
 
 import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
 import { createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 
 tier('user');
 describe('live ToolUse row', () => {
+  test('shows active context compaction and elapsed time in the trace, hint and task list until it ends', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.compactingSince = data.startedAt;
+    data.thinkingSince = data.startedAt;
+    const now = Date.parse(data.startedAt) + 180000;
+    const ui = { ...$.ui.resolve(row()), Button: props => ({ type: 'Button', props, children: [props.label] }) };
+    const draw = result => textOf(liveTree(ui, data, 160, now, 48, result));
+    assert.match(draw(), /● 正在压缩上下文 · 3m…/);
+    assert.doesNotMatch(draw(), /Thinking|no progress/);
+    assert.match(statusText([data], now), /正在压缩上下文 3m/);
+    const pane = () => textOf(paneBody(ui, [data], 160, 30, now, null, () => {}));
+    assert.match(pane(), /1 fixture task[\s\S]* · 正在压缩上下文/);
+    data.label = 'context-heavy task '.repeat(8);
+    const taskLine = paneBody(ui, [data], 60, 30, now, null, () => {}).children[1].children[0];
+    assert.ok(cellWidth(textOf(taskLine)) <= 58, 'reserves terminal cells for the Chinese state label');
+    data.label = 'fixture task';
+    assert.doesNotMatch(draw({ kind: 'DONE' }), /正在压缩上下文/);
+    data.status = 'completed'; data.endedAt = data.startedAt;
+    assert.doesNotMatch(pane(), /正在压缩上下文/);
+    data.status = 'running'; data.endedAt = null; data.compactingSince = null;
+    assert.doesNotMatch(draw(), /正在压缩上下文/);
+    assert.doesNotMatch(statusText([data], now), /正在压缩上下文/);
+    assert.match(pane(), /1 fixture task[\s\S]* · running/);
+  });
+  test('distinguishes director replies from executor notifications in inline and full traces', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const answer = 'color: Blue\nKeep the existing theme.';
+    const notification = 'Read-only SQL is ready.\n' + 'Complete notification text. '.repeat(20);
+    data.tail = [
+      { type: 'question.resolved', text: 'director → answer delivered request=1', answer },
+      { type: 'director.notified', text: `notify_director: ${notification}` },
+      { type: 'message.completed', text: 'assistant: Ordinary executor message.' },
+    ].map((event, index) => ({ ...event, seq: String(index + 1), at: data.startedAt }));
+    const controlText = `${'补充背景核对🙂'.repeat(50)}\n完整结尾 orderFreightCost`;
+    const control = normalizeJobEvent({ method: 'companion/control-message', params: {
+      threadId: 'thread-1', turnId: 'turn-1', message: controlText, status: 'accepted',
+    } }, { id: data.jobId, streamId: 'stream-1' });
+    control.seq = '4';
+    applyJobEvent(data, control);
+    for (const maxTail of [undefined, 200]) {
+      const nodes = rowsOf(liveTree($.ui.resolve(row()), data, 40, 0, 48, undefined, maxTail));
+      for (const [title, body, indent, color] of [
+        ['◆ ↓ 主 agent 回复', answer, 0, undefined],
+        ['◇ ↑ 执行者通知', notification, 2, 'cyan'],
+      ]) {
+        const block = nodes.find(node => textOf(node).startsWith(title));
+        assert.ok(block, title);
+        assert.equal(block.props.paddingLeft, indent);
+        assert.equal(block.props.width, 38);
+        assert.equal(block.children[0].props.color, color);
+        assert.equal(block.children[0].props.wrap, 'wrap');
+        const content = block.children[1];
+        assert.equal(content.props.paddingLeft, 2);
+        assert.equal(content.children[0].props.color, color);
+        assert.equal(content.children[0].props.wrap, 'wrap');
+        assert.equal(textOf(content), body);
+      }
+      assert.ok(nodes.some(node => textOf(node) === '› Ordinary executor message.'));
+      const message = nodes.find(node => textOf(node).startsWith('→ director → message:'));
+      assert.equal(message.props.wrap, 'wrap');
+      assert.equal(textOf(message), `→ director → message: ${controlText}`);
+    }
+  });
   test('renders cached rows while a final read hangs, without render I/O', async ($, on) => {
     const { state, clock } = world($, on);
     await $.ui.render(row()); await clock.settle();
@@ -281,12 +347,17 @@ describe('live row polish', () => {
       const input = row(undefined, { isRunning: false, output: terminalOutput(kind, body) });
       input.viewport.columns = 40;
       const tree = await $.ui.render(input);
-      assert.equal(textOf(tree), `● Codex · row label · ${status}${kind === 'TIMEOUT' ? '' : `\n${body}`}`);
+      assert.equal(textOf(tree), `● Codex · row label · ${status}${kind === 'TIMEOUT' ? '' : `\n${kind === 'NOTIFIED' ? '◇ ↑ 执行者通知\n' : ''}${body}`}`);
       assert.equal(tree.children[0].props.color, color);
       assert.equal(tree.children[0].props.dimColor, dim);
       if (kind !== 'TIMEOUT') {
         assert.equal(tree.children[1].props.paddingLeft, 2);
         assert.equal(tree.children[1].children[0].props.wrap, 'wrap');
+        if (kind === 'NOTIFIED') {
+          assert.equal(tree.children[1].children[0].props.color, 'cyan');
+          assert.equal(textOf(tree.children[1].children[1]), body);
+          assert.equal(tree.children[1].children[1].children[0].props.wrap, 'wrap');
+        }
       }
       await clock.advance(2000);
       assert.equal(state.runs.length, 0);
@@ -317,7 +388,7 @@ describe('live row polish', () => {
     const question = row(undefined, { tool_use_id: 'question', isRunning: false, output: terminalOutput('QUESTION', 'Which color?') });
     const first = await $.ui.render(notified);
     const second = await $.ui.render(question);
-    assert.equal(textOf(first), '● Codex · fixture task · notified\ncolor received: green');
+    assert.equal(textOf(first), '● Codex · fixture task · notified\n◇ ↑ 执行者通知\ncolor received: green');
     assert.equal(textOf(second), '● Codex · fixture task · question\nWhich color?');
     assert.equal(state.reads, 1);
     const data = fixture(); data.label = 'latest label'; data.lastMessage.text = 'FINAL FULL ANSWER';
@@ -344,7 +415,7 @@ describe('live row polish', () => {
     assert.equal(clock.timers.size, 0);
     assert.equal(state.reads, 1);
   });
-  test('shows one magenta question and cyan answer, filters closed and dynamic tool lifecycle before tail limiting', ($, on) => {
+  test('shows one magenta question and director reply, filters closed and dynamic tool lifecycle before tail limiting', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
     data.tail = [
@@ -363,10 +434,10 @@ describe('live row polish', () => {
     const question = nodes.find(node => textOf(node).startsWith('?'));
     assert.equal(textOf(question), '? Question request=1: Which color?');
     assert.equal(question.props.color, 'magenta');
-    const answer = nodes.find(node => textOf(node).startsWith('→'));
-    assert.equal(textOf(answer), '→ color: Blue\nKeep the existing theme.');
-    assert.equal(answer.props.color, 'cyan');
-    assert.equal(answer.props.wrap, 'wrap');
+    const answer = nodes.find(node => textOf(node).startsWith('◆ ↓'));
+    assert.equal(textOf(answer), '◆ ↓ 主 agent 回复\ncolor: Blue\nKeep the existing theme.');
+    assert.equal(answer.children[0].props.color, undefined);
+    assert.equal(answer.children[1].children[0].props.wrap, 'wrap');
     assert.doesNotMatch(textOf(tree), /Question resolved|dynamicToolCall|director →/);
     assert.match(textOf(tree), /● Calling 2 tools…\n  ⎿  regular tool completed/);
     assert.equal(nodes.filter(node => node.props.color === 'magenta').length, 1);
@@ -758,6 +829,40 @@ describe('live row polish', () => {
 });
 
 describe('Markdown and prompt footer', () => {
+  test('renders completed tables as bordered wrapping cells or labelled rows without changing fenced code', ($, on) => {
+    world($, on);
+    const table = '| 时间节点，北京时间 | 本轮 | 第53轮 |\n|---|---|---|\n'
+      + '| SC 收到 FULFILLED 事件 | **14:11:55.976** | `13:40:51.117` |\n'
+      + '| 生成物流单 | [完整单号](https://example.com/order) | ALS02023677001 \\| 完整结尾 |';
+    const code = '```text\n| example | value |\n|---|---|\n| keep | literal |\n```';
+    const source = `前文\n\n${table}\n\n后文\n\n${code}`;
+    const walk = node => [node, ...(node.children ?? []).filter(child => typeof child !== 'string').flatMap(walk)];
+    for (const columns of [120, 24]) {
+      const tree = markdown($.ui.resolve(row()), source, {}, '› ', columns)[0];
+      const nodes = walk(tree);
+      const fragments = nodes.filter(node => node.type === 'Markdown').map(node => node.props.text);
+      assert.ok(fragments.some(text => text.includes('前文')));
+      assert.ok(fragments.some(text => text.includes(`后文\n\n${code}`)));
+      assert.ok(fragments.some(text => text.includes('ALS02023677001 \\| 完整结尾')));
+      assert.ok(fragments.every(text => !text.includes('| 时间节点，北京时间 |')));
+      if (columns === 120) {
+        const grid = nodes.find(node => node.props?.borderStyle === 'single');
+        assert.ok(grid);
+        assert.equal(grid.props.width, columns - 2);
+        assert.ok(fragments.includes('**14:11:55.976**'));
+        assert.ok(fragments.includes('[完整单号](https://example.com/order)'));
+        const rows = grid.children.filter(node => node.props.flexDirection === 'row');
+        assert.equal(rows.length, 3);
+        for (const cells of rows) assert.equal(cells.children.reduce((sum, cell) => sum + (cell.props.width ?? 1), 0), columns - 4);
+      } else {
+        assert.ok(!nodes.some(node => node.props?.borderStyle));
+        assert.ok(fragments.some(text => text.includes('**本轮**: **14:11:55.976**')));
+      }
+    }
+    const streaming = markdown($.ui.resolve(row()), table, {}, '› ', 120, true);
+    assert.equal(streaming[0].children[1].children[0].type, 'Text');
+    assert.equal(textOf(streaming[0]), `› ${table}`);
+  });
   test('shows unfinished Markdown as sanitized plain text until the message pauses', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
@@ -782,7 +887,7 @@ describe('Markdown and prompt footer', () => {
     assert.equal(textOf(rowsOf(tree).at(-1)), '…');
     assert.equal(rowsOf(tree).find(node => node.type === 'Box').children[1].children[0].type, 'Markdown');
     const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
-    assert.equal(rowsOf(result).find(node => node.type === 'Markdown').props.text, data.lastMessage.text);
+    assert.match(textOf(rowsOf(result).find(node => node.type === 'Box')), /Name[\s\S]*Detail[\s\S]*file[\s\S]*\[a\]\(\/x\/y\)/);
     data.tail.at(-1).type = 'message.completed';
     state.text = JSON.stringify(data); state.mtime++;
     await clock.advance(500);
@@ -913,9 +1018,12 @@ describe('body indent and startup noise', () => {
       const body = tree.children[1];
       assert.equal(body.props.paddingLeft, 2);
       assert.equal(body.children[0].props.width, 24);
-      const message = result ? rowsOf(tree).find(node => node.type === 'Markdown')
+      const message = result ? rowsOf(tree).find(node => node.type === 'Box')
         : rowsOf(tree).find(node => node.type === 'Box').children[1].children[0];
-      assert.equal(message.props.text, source);
+      assert.match(textOf(message), /\*\*Name\*\*/);
+      assert.match(textOf(message), /中文😀/);
+      assert.ok(textOf(message).includes('**bold** *italic* `code` [link](https://example.com)'));
+      assert.match(textOf(message), /final cell/);
       if (!result) {
         assert.equal(textOf(rowsOf(tree).at(-1)), 'x'.repeat(24));
         assert.ok(rowsOf(tree).some(node => textOf(node) === ' '));
@@ -969,7 +1077,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '→ answer delivered',
+      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '◆ ↓ 主 agent 回复\nanswer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',

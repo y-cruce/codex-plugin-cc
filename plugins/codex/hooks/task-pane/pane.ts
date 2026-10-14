@@ -1,6 +1,6 @@
 import type { Elements } from 'claude-code'
-import { clip } from '../live-tool-row/format.ts'
-import { isOver, liveTree } from '../live-tool-row/view.ts'
+import { cellWidth, clip } from '../live-tool-row/format.ts'
+import { isCompacting, isOver, liveTree } from '../live-tool-row/view.ts'
 import type { Fold, LiveView } from '../live-tool-row/view.ts'
 
 const DOT: Record<string, string> = {
@@ -75,18 +75,19 @@ export function paneBody(
     const recordId = data.recordId ?? data.jobId
     const isFocused = recordId === (focused.recordId ?? focused.jobId)
     const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
-    const state = `${isOver(data) ? data.status : data.status === 'waiting-for-answer' ? 'waiting' : data.status}${data.foreign ? ' · other' : ''}`
+    const compacting = isCompacting(data)
+    const state = `${isOver(data) ? data.status : compacting ? '正在压缩上下文' : data.status === 'waiting-for-answer' ? 'waiting' : data.status}${data.foreign ? ' · other' : ''}`
     return Box({ flexDirection: 'row', children: [
       Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸ ' : '  ' }),
       Button({
         key: `codex_tab_${recordId}`,
-        label: taskLabel(index + 1, data, executor, Math.max(8, width - state.length - 7)),
+        label: taskLabel(index + 1, data, executor, Math.max(8, width - cellWidth(state) - 7)),
         // No `autoFocus`: the ring is drawn inverse, so starting it on the task
         // in view leaves a highlighted row sitting there when nobody is walking
         // the list. The marker already says which task the trace belongs to.
         plain: true, dimColor: !isFocused, onPress: () => onSelect(recordId),
       }),
-      Text({ dimColor: true, children: ` · ${state}` }),
+      Text({ color: compacting ? 'cyan' : undefined, dimColor: !compacting, children: ` · ${state}` }),
     ] })
   })
 

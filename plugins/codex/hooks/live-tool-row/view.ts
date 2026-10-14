@@ -26,6 +26,7 @@ export type LiveView = {
   // When the agent began the thinking it is still doing; absent on views
   // written before the pane showed it.
   thinkingSince?: string | null
+  compactingSince?: string | null
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
@@ -73,6 +74,9 @@ export function isOver(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundI
   if (view.status === 'queued') return false
   if (Object.hasOwn(view, 'activeRoundId')) return view.activeRoundId === null
   return Boolean(view.endedAt) || ['completed', 'failed', 'cancelled'].includes(view.status)
+}
+export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundId' | 'compactingSince'>): boolean {
+  return !isOver(view) && Boolean(view.compactingSince)
 }
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
 // A command that failed keeps a row of its own with its output: the reason it
@@ -123,10 +127,19 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
   const executor = running[0]?.executor?.label ?? 'Codex'
   return `${executor} · ${running.length} running · ${running.map(data => {
     const command = data.activeCommands.find(command => !command.agentThreadId)
-    const detail = command ? `$ ${clip(command.command, 30)}`
+    const detail = isCompacting(data) ? `正在压缩上下文 ${elapsed(data.compactingSince!, now)}` : command ? `$ ${clip(command.command, 30)}`
       : data.files.length ? `✎ ${data.files.length} files` : clip(data.tail.at(-1)?.text ?? '', 30)
     return `${clip(data.label, 80)} ${elapsed(latestRound(data)?.startedAt ?? data.startedAt, now)}${detail ? ` ${detail}` : ''}`
   }).join(' · ')}`
+}
+
+function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, notified: boolean, text: string, columns: number) {
+  const { Box, Text } = ui
+  const color = notified ? 'cyan' : undefined
+  return Box({ flexDirection: 'column', paddingLeft: notified ? 2 : 0, width: columns, children: [
+    Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ 执行者通知' : '◆ ↓ 主 agent 回复' }),
+    Box({ paddingLeft: 2, children: Text({ color, wrap: 'wrap', children: clean(text) }) }),
+  ] })
 }
 
 export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, terminal: Terminal, label: string, columns: number, agents: string[] = []) {
@@ -137,7 +150,8 @@ export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, ter
   return Box({ flexDirection: 'column', children: [
     Text({ color, dimColor, wrap: 'truncate-end', children: clip(`● Codex · ${label} · ${status}`, columns) }),
     ...agents.map(text => Box({ paddingLeft: 2, children: Text({ dimColor: true, wrap: 'truncate-end', children: clip(text, Math.max(1, columns - 2)) }) })),
-    ...(terminal.kind !== 'TIMEOUT' && terminal.text ? [Box({ paddingLeft: 2, width: columns, children: Text({
+    ...(terminal.kind === 'NOTIFIED' ? [communicationTree(ui, true, terminal.text, columns)]
+      : terminal.kind !== 'TIMEOUT' && terminal.text ? [Box({ paddingLeft: 2, width: columns, children: Text({
       dimColor, wrap: 'wrap', children: clean(terminal.text),
     }) })] : []),
   ] })
@@ -178,8 +192,9 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const fullTrace = maxTail !== undefined
   const executor = data.executor?.label ?? 'Codex'
   const status = result ? result.kind === 'DONE' ? 'completed' : 'failed' : data.status
-  const thinking = !result && !isOver(data) && data.thinkingSince ? data.thinkingSince : null
-  const stalled = data.status === 'running' && data.tail.length && !thinking ? now - Date.parse(data.tail.at(-1)!.at) : 0
+  const compacting = !result && isCompacting(data) ? data.compactingSince : null
+  const thinking = !compacting && !result && !isOver(data) && data.thinkingSince ? data.thinkingSince : null
+  const stalled = data.status === 'running' && data.tail.length && !thinking && !compacting ? now - Date.parse(data.tail.at(-1)!.at) : 0
   // A thread's own clock and counts run across every round it has had, which
   // says nothing about the question in hand: the header measures the newest round.
   const current = latestRound(data)
@@ -191,7 +206,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const header = [
     { text: `● ${executor} · ` },
     { text: data.label, bold: true },
-    { text: ` · ${status}`, color: colors[status] },
+    { text: ` · ${compacting ? '正在压缩上下文' : status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
@@ -425,7 +440,13 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       return
     }
     if (type === 'question.resolved') {
-      prose(`→ ${event.answer || 'answer delivered'}`, { color: 'cyan' })
+      separate(true)
+      lines.push(communicationTree(ui, false, event.answer || 'answer delivered', columns))
+      return
+    }
+    if (type === 'director.notified') {
+      separate(true)
+      lines.push(communicationTree(ui, true, event.text.replace(/^notify_director:\s*/, ''), columns))
       return
     }
     if (fullTrace && type === 'prompt') {
@@ -505,7 +526,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     else if (PROSE.test(type)) prose(`${prefix} ${text}`.trimStart(), props, /^(reasoning|question|director|control\.message)/.test(type))
     else add(`${prefix} ${text}`.trimStart(), props)
   })
-  if (thinking) {
+  if (compacting) {
+    entry = true
+    add(`● 正在压缩上下文 · ${elapsed(compacting, now)}…`, { color: 'cyan' })
+  } else if (thinking) {
     entry = true
     add(`● Thinking · ${elapsed(thinking, now)}…`, { dimColor: true })
   }
