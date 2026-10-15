@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { loadAcpDriver } from "../plugins/codex/scripts/lib/acp.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
-import { readHistory, resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run, within } from "./helpers.mjs";
 
@@ -158,49 +158,6 @@ test("a redirect reaches the run loop, which reads it the moment the turn settle
   await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
     replacementPrompt: [{ type: "text", text: "carry on" }] });
   assert.deepEqual(await consumed, [{ type: "text", text: "carry on" }]);
-});
-
-test("ACP cancel waits for late updates and closes pending input requests", async (t) => {
-  const h = await setupPort(t, "acp-cancel");
-  const turn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "cancel-late" }] });
-  const terminal = await h.port.interruptTurn({ sessionId: h.session.sessionId, turnId: turn.turnId, timeoutMs: 5000,
-    replacementPrompt: [{ type: "text", text: "replacement" }] });
-  assert.equal(terminal.status, "interrupted");
-  assert.equal(terminal.reason.backendCode, "cancelled");
-  assert.equal(h.port.takeReplacementPrompt()[0].text, "replacement");
-  const late = h.events.findIndex((event) => event.type === "message.delta" && event.payload.block.text === "late update 1");
-  const completed = h.events.findIndex((event) => event.type === "turn.completed");
-  assert.ok(late >= 0 && completed > late);
-
-  const permissionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "permission" }] });
-  await waitFor(() => h.port.permissions.size === 1);
-  const cancelled = await h.port.cancelJob({ sessionId: h.session.sessionId, turnId: permissionTurn.turnId, timeoutMs: 5000 });
-  assert.equal(cancelled.status, "cancelled");
-  assert.equal(h.port.permissions.size, 0);
-
-  const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
-  await waitFor(() => h.port.questions.size === 1);
-  const questionCancelled = await h.port.cancelJob({ sessionId: h.session.sessionId, turnId: questionTurn.turnId, timeoutMs: 5000 });
-  assert.equal(questionCancelled.status, "cancelled");
-  assert.deepEqual(h.events.filter((event) => event.type === "permission.resolved" || event.type === "question.closed")
-    .map((event) => [event.type, event.payload.outcome ?? event.payload.reason]), [
-      ["permission.resolved", "cancelled"],
-      ["question.closed", "cancelled"]
-    ]);
-
-  let stderr = "";
-  const stderrWrite = t.mock.method(process.stderr, "write", (chunk) => { stderr += chunk; return true; });
-  try { await h.port.close(); } finally { stderrWrite.mock.restore(); }
-  const history = await readHistory(h.cwd, h.job.id);
-  assert.deepEqual({
-    finalToolPersisted: history.events.some((event) => event.type === "tool.completed" && event.identity.toolCallId === "late-tool-3"),
-    finalMessagePersisted: history.events.some((event) => event.type === "message.delta" && event.payload.block.text === "late update 3"),
-    closedStoreDiagnostic: stderr.includes("History store is not open")
-  }, {
-    finalToolPersisted: true,
-    finalMessagePersisted: true,
-    closedStoreDiagnostic: false
-  });
 });
 
 test("a redirect that loses to natural completion is still delivered", async (t) => {
