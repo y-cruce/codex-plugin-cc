@@ -271,12 +271,15 @@ async function seedUnfinishedHistory(h) {
 
 test("startup reconciliation fails unfinished history whose owner exited", async (t) => {
   const h = fixture(t, "running");
-  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-  await once(dead, "exit");
-  h.job.pid = dead.pid;
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (owner.exitCode === null && owner.signalCode === null) owner.kill(); });
+  h.job.pid = owner.pid;
   writeJobFile(h.cwd, h.job.id, h.job);
   upsertJob(h.cwd, h.job);
   await seedUnfinishedHistory(h);
+  const exited = once(owner, "exit");
+  owner.kill();
+  await exited;
 
   const before = await h.cli("observe", "list", "--json");
   assert.equal(JSON.parse(before.stdout).jobs[0].status, "running");
