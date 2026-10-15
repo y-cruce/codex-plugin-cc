@@ -79,8 +79,7 @@ export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'active
   return !isOver(view) && Boolean(view.compactingSince)
 }
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
-// A command that failed keeps a row of its own with its output: the reason it
-// failed is what the reader needs, and a fold would hide it.
+// Nonzero exits keep a visible command row; their output has a separate fold.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
   || (event.type === 'command.completed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
@@ -386,13 +385,25 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       Text({ color, children: `${indent}${completed ? '● ' : ''}` }),
       Text({ dimColor: true, children: '$ ' }),
       Text({ children: commandText(event.text) }),
+      ...(completed && event.exitCode != null && event.exitCode !== 0
+        ? [Text({ color: 'red', children: ` · exit ${event.exitCode}` })] : []),
       Text({ dimColor: true, children: suffix }),
     ] }))
-    // Failing output is worth a row per line: run together it reads as one
-    // stretch of noise, and the cut leaves a separator dangling at the end.
     if (completed && event.exitCode != null && event.exitCode !== 0) {
-      for (const line of clean(event.output ?? '').split('\n').map(part => part.trim()).filter(Boolean).slice(0, 3)) {
-        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `${indent}  ${line}` }))
+      const output = clean(event.output ?? '')
+      if (!output.trim()) return
+      if (!fold) {
+        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(`${indent}  Output preview · open tasks`, columns) }))
+        return
+      }
+      const key = `command-output-${event.positionSeq ?? event.seq}`
+      const open = fold.isOpen(key)
+      lines.push(Box({ paddingLeft: indent.length + 2, children: [
+        fold.Button({ key: `codex_fold_${key}`, plain: true, dimColor: true,
+          label: `Output preview ${open ? '▾' : '▸'}`, onPress: () => fold.toggle(key) }),
+      ] }))
+      if (open) for (const line of output.split('\n')) {
+        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `${indent}    ${line}` }))
       }
     }
   }

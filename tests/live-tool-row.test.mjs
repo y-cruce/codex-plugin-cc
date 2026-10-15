@@ -707,7 +707,7 @@ describe('live row polish', () => {
     data.tail.push(...['message.completed', 'reasoning.completed', 'question.opened', 'director.notified', 'source.error', 'fileChange.completed', 'control.message.updated'].map(type => ({ type, text: 'body' })));
     const tree = liveTree($.ui.resolve(row()), data, 120, 0, 48);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1s']);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · exit 7 · 1s']);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
     for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['◆', undefined, false], ['◇', 'cyan', false]]) {
@@ -728,11 +728,11 @@ describe('live row polish', () => {
     data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
     assert.deepEqual(rendered.slice(-2), ['● Editing 2 files +4 -2, running 1 shell command · failed…', '  ⎿  a.ts'])
-    // Commands in a row fold too; a failing one keeps its own row and output.
+    // Nonzero commands retain their own row; their output starts collapsed.
     const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
     data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]
     assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-7),
-      ['● Ran 2 shell commands', ' ', '● $ false · 1s', '  boom', ' ', '● Running 2 shell commands…', '  ⎿  $ id'])
+      ['● Ran 2 shell commands', ' ', '● $ false · exit 1 · 1s', '  Output preview · open tasks', ' ', '● Running 2 shell commands…', '  ⎿  $ id'])
     // Given a press, a fold's words are a button that opens it into its rows.
     const open = new Set();
     const ui = $.ui.resolve(row());
@@ -759,7 +759,7 @@ describe('live row polish', () => {
     const cases = [
       { tail: [...work, { seq: '6', at, type: 'command.completed', text: '$ false', exitCode: 1, output: 'boom' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
-        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● $ false', '  boom'] },
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● $ false · exit 1', '  Output preview · open tasks'] },
       { tail: [...work, { seq: '6', at, type: 'tool.completed', text: 'Read failed: /r/fail.ts', status: 'failed', output: 'denied' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
         closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● /r/fail.ts', '  denied'] },
@@ -980,29 +980,39 @@ describe('Markdown and prompt footer', () => {
     assert.equal(textOf(await $.ui.render(draft)), 'original hint');
     assert.equal(seen.at(-1), draft);
   });
-  test('splits command output onto a dim row only for a failed completion', ($, on) => {
+  test('nonzero command output is collapsed and opens with its whitespace intact', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
-    data.tail = [null, 2, 0].map(exitCode => ({ type: 'command.completed', text: '$ echo hello', output: 'first\nsecond\nthird', exitCode, durationMs: 1200 }));
+    const output = '        }\n\n    }\n\n    /**\n     * Address snapshot';
+    data.tail = [null, 2, 0].map((exitCode, index) => ({ seq: String(index), positionSeq: `start-${index}`, type: 'command.completed', text: '$ echo hello', output, exitCode, durationMs: 1200 }));
     data.tail.push({ type: 'command.started', text: '$ started', output: 'hidden', exitCode: 2 });
     // A heredoc's body is not worth a row of glyphs: the row says it was cut.
     // The last three fold, and the fold names the newest command.
     data.tail.push({ type: 'command.completed', text: "$ apply_patch <<'PATCH' ⏎ *** Begin Patch ⏎ PATCH", exitCode: 0, durationMs: 1200 });
     const tree = liveTree($.ui.resolve(row()), data, 40, 0);
     const commands = rowsOf(tree).filter(node => node.props.wrap === 'truncate-middle');
-    assert.deepEqual(commands.map(textOf), ['● $ echo hello · 1s', "  ⎿  $ apply_patch <<'PATCH' …"]);
+    assert.deepEqual(commands.map(textOf), ['● $ echo hello · exit 2 · 1s', "  ⎿  $ apply_patch <<'PATCH' …"]);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Ran 1 shell command'));
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands…'));
-    // Every break in the output gets its own row, whether it arrived as the
-    // folding glyph or as a newline: joined back together the failure reads as
-    // one run of noise, and the cut leaves the separator dangling.
-    const outputs = rowsOf(tree).filter(node => textOf(node).startsWith('  ') && !textOf(node).includes('⎿'));
-    assert.deepEqual(outputs.map(textOf), ['  first', '  second', '  third']);
-    assert.equal(outputs[0].props.dimColor, true);
-    assert.equal(outputs[0].props.wrap, 'truncate-end');
-    assert.equal(rowsOf(tree)[rowsOf(tree).indexOf(commands[0]) + 1], outputs[0]);
+    assert.ok(textOf(tree).includes('Output preview · open tasks'));
+    assert.doesNotMatch(textOf(tree), /Address snapshot|\/\*\*|\}/);
     assert.doesNotMatch(textOf(tree), /hidden/);
+    const open = new Set();
+    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: key => open.has(key),
+      toggle: key => { if (!open.delete(key)) open.add(key); } };
+    const draw = () => rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48, undefined, undefined, false, fold));
+    const button = rows => rows.find(node => node.children?.[0]?.props?.key === 'codex_fold_command-output-start-1').children[0];
+    const original = JSON.stringify(data);
+    assert.equal(button(draw()).props.label, 'Output preview ▸');
+    button(draw()).props.onPress();
+    const opened = draw();
+    assert.equal(button(opened).props.label, 'Output preview ▾');
+    assert.deepEqual(opened.filter(node => textOf(node).startsWith('    ')).map(textOf), output.split('\n').map(line => `    ${line}`));
+    button(opened).props.onPress();
+    assert.equal(button(draw()).props.label, 'Output preview ▸');
+    assert.doesNotMatch(draw().map(textOf).join('\n'), /Address snapshot|\/\*\*|\}/);
+    assert.equal(JSON.stringify(data), original);
   });
 });
 
@@ -1081,7 +1091,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate', '  validation failed', ' ', '◆ ↓ Director reply\nanswer delivered',
+      ' ', '● $ rg requestId · exit 1 · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate · exit 1', '  Output preview · open tasks', ' ', '◆ ↓ Director reply\nanswer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',
