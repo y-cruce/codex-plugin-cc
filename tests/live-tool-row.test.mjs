@@ -62,7 +62,7 @@ describe('live ToolUse row', () => {
       for (const [title, body, indent, color] of [
         ['◆ ↓ Director reply', answer, 0, 'cyan'],
         ['◇ ↑ Executor notification', notification, 0, 'cyan'],
-        ['◆ ↓ Director message', controlText, 0, undefined],
+        ['◆ ↓ Director message', controlText, 0, 'cyan'],
         ['◆ ↓ Director interrupt', controlText, 0, undefined],
       ]) {
         const block = nodes.find(node => textOf(node).startsWith(title));
@@ -710,7 +710,7 @@ describe('live row polish', () => {
     assert.deepEqual(commands.map(textOf), ['● $ echo hello · exit 7 · 1s']);
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.equal(rowsOf(tree).filter(node => textOf(node) === '● Ran 1 shell command').length, 2);
-    for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['◆', undefined, false], ['◇', 'cyan', false]]) {
+    for (const [prefix, color, dim] of [['›', undefined, false], ['?', 'magenta', false], ['◆', 'cyan', false], ['◇', 'cyan', false]]) {
       const row = rowsOf(tree).find(node => textOf(node).startsWith(prefix));
       const node = row.type === 'Box' ? row.children[0] : row;
       assert.equal(node.props.color, color); assert.equal(node.props.dimColor ?? false, dim);

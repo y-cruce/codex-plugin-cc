@@ -132,7 +132,7 @@ const BACKOFF_FAILURES = 5
 // `dispatch.sh events` already prints one line per event the director must
 // act on: armed as a Monitor, those lines arrive while the turn is still going.
 // A task that has ended stays in the pane long enough to be read, then goes.
-const KEEP_MS = 900_000
+const KEEP_MS = 180_000
 const MONITOR_MS = 1_800_000
 const SETTLE_MS = 15_000
 const CHECK_MS = 15_000

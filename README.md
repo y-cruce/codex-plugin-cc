@@ -95,6 +95,20 @@ Tasks require the shared broker; live commands never start a second runtime or s
 
 Run `npm test` and `npm run build` for local checks. The optional `CODEX_REAL_APP_SERVER_TEST=1 node --test tests/real-app-server.test.mjs` uses an installed Codex CLI with isolated temporary configuration and a local mock model, including actual file writing and syntax validation. It does not contact a real model service.
 
+### Parallel worktrees
+
+The director prepares a separate worktree for each writer and passes it as the task's `CWD`. With code-director installed:
+
+```bash
+bash ~/.claude/skills/code-director/scripts/dispatch.sh worktree /abs/source-repo /abs/new-worktree worker/topic
+```
+
+The plugin's `scripts/worktree.mjs <source-repo> <new-directory> <new-branch>` registers the worktree with Git, pins source HEAD, and clones unchanged tracked files. macOS uses native `clonefile` through one Python 3 process; other platforms use `COPYFILE_FICLONE_FORCE`. Unsupported cloning falls back to ordinary copies and reports separate `clonedFiles`, `copiedFiles` and `checkoutFiles` counts. Source edits and missing files come from the pinned Git commit. Untracked or ignored dependencies, outputs and session data are excluded. Keep the source stable during creation; a verification failure retains the incomplete tree for inspection. Repositories with submodules use ordinary `git worktree add`.
+
+Executors stay in their assigned directory and check symlinks and absolute paths before builds. Writable dependencies and outputs belong to that directory; do not share them through hard links or symlinks. The director preserves needed files and removes obsolete trees with `git worktree remove` after tasks stop and commits are integrated. Removing a tree keeps its branch; hiding a pane row does not remove the tree. Keep the original directory while its thread needs further turns.
+
+主 agent 为每个写入者准备独立 worktree，并通过任务的 `CWD` 分配。上述入口先由 Git 登记工作树，再克隆未修改的跟踪文件；macOS 上需要 Python 3 调用 APFS 原生接口，不支持时明确报告普通复制数量。源目录已有修改与缺失文件从固定的 HEAD 提交检出，未跟踪或忽略的依赖、产物和会话数据不复制。创建期间保持源目录稳定，验证失败时保留目录供检查；含子模块的仓库使用普通 `git worktree add`。Executor 只在分配目录工作，构建前检查符号链接和绝对路径，可写依赖和产物分别维护。主 agent 在停止任务、集成提交并保存需要的文件后，通过 `git worktree remove` 回收目录；保留分支，线程仍需续接时保留原目录，面板隐藏不会回收目录。
+
 ### `/codex:review`
 
 Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
@@ -177,10 +191,11 @@ omit command output and output preview controls.
 
 The pane and inline traces use the same block layout for `◆ ↓ Director reply`,
 `◆ ↓ Director message`, `◆ ↓ Director interrupt` and `◇ ↑ Executor notification`.
-Headings align on the left and bodies indent two columns. Director replies and
-executor notifications use cyan for both headings and bodies, including completed
-notification cards. Messages and interrupts use the default color. Messages retain
+Headings align on the left and bodies indent two columns. Director replies, messages
+and executor notifications use cyan for both headings and bodies, including completed
+notification cards. Interrupts use the default color. Messages retain
 their complete text and wrap in traces.
+Completed, failed and cancelled tasks stay in the pane for three minutes after ending.
 Completed Markdown tables use bordered columns with wrapping cells, or labelled
 rows when the viewport is too narrow. Cell formatting and links use native Markdown.
 While Codex compacts its context, the trace, task list and status hint show
@@ -189,9 +204,10 @@ compaction completes or the turn or task ends.
 
 面板与内联轨迹用统一块式布局显示 `◆ ↓ Director reply`、`◆ ↓ Director message`、
 `◆ ↓ Director interrupt` 和 `◇ ↑ Executor notification`。英文标题左对齐，正文统一缩进两列；
-主 agent 回复和执行者通知的标题与正文统一使用青色，已结束的通知卡片也使用同一样式；
-直接消息和中断消息使用默认正文色。
+主 agent 回复、直接消息和执行者通知的标题与正文统一使用青色，已结束的通知卡片也使用同一样式；
+中断消息使用默认正文色。
 消息保留完整正文，在轨迹中换行显示。
+已完成、失败和取消的任务在结束后保留三分钟，再从面板隐藏。
 完整 Markdown 表格显示为带边框且单元格换行的分列布局；窗口过窄时按列名逐条展示。
 单元格内的格式和链接继续使用宿主 Markdown 渲染。
 Codex 压缩上下文期间，轨迹、任务列表和状态提示显示 `正在压缩上下文`，轨迹与提示同时显示耗时。
