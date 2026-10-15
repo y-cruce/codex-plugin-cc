@@ -79,7 +79,7 @@ export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'active
   return !isOver(view) && Boolean(view.compactingSince)
 }
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
-// Nonzero exits keep a visible command row; their output has a separate fold.
+// Nonzero exits keep a visible command row.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
   || (event.type === 'command.completed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
@@ -389,23 +389,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
         ? [Text({ color: 'red', children: ` · exit ${event.exitCode}` })] : []),
       Text({ dimColor: true, children: suffix }),
     ] }))
-    if (completed && event.exitCode != null && event.exitCode !== 0) {
-      const output = clean(event.output ?? '')
-      if (!output.trim()) return
-      if (!fold) {
-        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: clip(`${indent}  Output preview · open tasks`, columns) }))
-        return
-      }
-      const key = `command-output-${event.positionSeq ?? event.seq}`
-      const open = fold.isOpen(key)
-      lines.push(Box({ paddingLeft: indent.length + 2, children: [
-        fold.Button({ key: `codex_fold_${key}`, plain: true, dimColor: true,
-          label: `Output preview ${open ? '▾' : '▸'}`, onPress: () => fold.toggle(key) }),
-      ] }))
-      if (open) for (const line of output.split('\n')) {
-        lines.push(Text({ dimColor: true, wrap: 'truncate-end', children: `${indent}    ${line}` }))
-      }
-    }
   }
   const fileRow = (file: NonNullable<TailRow['files']>[number], color: string, failed: boolean, indent = '') => {
     const verb = FILE_VERBS[file.kind] ?? 'Edit'

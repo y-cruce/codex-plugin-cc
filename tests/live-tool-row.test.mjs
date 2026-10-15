@@ -728,11 +728,11 @@ describe('live row polish', () => {
     data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
     assert.deepEqual(rendered.slice(-2), ['● Editing 2 files +4 -2, running 1 shell command · failed…', '  ⎿  a.ts'])
-    // Nonzero commands retain their own row; their output starts collapsed.
+    // Nonzero commands retain their own row without output.
     const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
     data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]
-    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-7),
-      ['● Ran 2 shell commands', ' ', '● $ false · exit 1 · 1s', '  Output preview · open tasks', ' ', '● Running 2 shell commands…', '  ⎿  $ id'])
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-6),
+      ['● Ran 2 shell commands', ' ', '● $ false · exit 1 · 1s', ' ', '● Running 2 shell commands…', '  ⎿  $ id'])
     // Given a press, a fold's words are a button that opens it into its rows.
     const open = new Set();
     const ui = $.ui.resolve(row());
@@ -759,7 +759,7 @@ describe('live row polish', () => {
     const cases = [
       { tail: [...work, { seq: '6', at, type: 'command.completed', text: '$ false', exitCode: 1, output: 'boom' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
-        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● $ false · exit 1', '  Output preview · open tasks'] },
+        closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● $ false · exit 1'] },
       { tail: [...work, { seq: '6', at, type: 'tool.completed', text: 'Read failed: /r/fail.ts', status: 'failed', output: 'denied' }], now: Date.parse(at),
         head: '● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command',
         closed: ['● Edited 1 file +2, searched for 1 pattern, read 1 file, called 1 tool, ran 1 shell command', ' ', '● /r/fail.ts', '  denied'] },
@@ -980,7 +980,7 @@ describe('Markdown and prompt footer', () => {
     assert.equal(textOf(await $.ui.render(draft)), 'original hint');
     assert.equal(seen.at(-1), draft);
   });
-  test('nonzero command output is collapsed and opens with its whitespace intact', ($, on) => {
+  test('commands omit output and preview controls in inline traces and the task pane', ($, on) => {
     world($, on);
     const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
     const output = '        }\n\n    }\n\n    /**\n     * Address snapshot';
@@ -995,23 +995,15 @@ describe('Markdown and prompt footer', () => {
     assert.equal(commands[0].children[0].props.color, 'red');
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Ran 1 shell command'));
     assert.ok(rowsOf(tree).some(node => textOf(node) === '● Running 3 shell commands…'));
-    assert.ok(textOf(tree).includes('Output preview · open tasks'));
-    assert.doesNotMatch(textOf(tree), /Address snapshot|\/\*\*|\}/);
-    assert.doesNotMatch(textOf(tree), /hidden/);
-    const open = new Set();
-    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: key => open.has(key),
-      toggle: key => { if (!open.delete(key)) open.add(key); } };
-    const draw = () => rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48, undefined, undefined, false, fold));
-    const button = rows => rows.find(node => node.children?.[0]?.props?.key === 'codex_fold_command-output-start-1').children[0];
+    assert.doesNotMatch(textOf(tree), /Output preview|Address snapshot|\/\*\*|\}|hidden/);
+    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: () => false, toggle: () => {} };
     const original = JSON.stringify(data);
-    assert.equal(button(draw()).props.label, 'Output preview ▸');
-    button(draw()).props.onPress();
-    const opened = draw();
-    assert.equal(button(opened).props.label, 'Output preview ▾');
-    assert.deepEqual(opened.filter(node => textOf(node).startsWith('    ')).map(textOf), output.split('\n').map(line => `    ${line}`));
-    button(opened).props.onPress();
-    assert.equal(button(draw()).props.label, 'Output preview ▸');
-    assert.doesNotMatch(draw().map(textOf).join('\n'), /Address snapshot|\/\*\*|\}/);
+    for (const open of [new Set(), new Set(['command-output-start-1'])]) {
+      fold.isOpen = key => open.has(key);
+      const pane = liveTree($.ui.resolve(row()), data, 80, 0, 48, undefined, undefined, false, fold);
+      assert.doesNotMatch(textOf(pane), /Output preview|Address snapshot|\/\*\*|\}|hidden/);
+      assert.ok(rowsOf(pane).some(node => textOf(node) === '● $ echo hello · exit 2 · 1s'));
+    }
     assert.equal(JSON.stringify(data), original);
   });
 });
@@ -1091,7 +1083,7 @@ describe('transcript block spacing', () => {
     assert.deepEqual(rendered.slice(1), [
       ' ', 'Warning: timeout clamped', ' ', '● Ran 1 shell command',
       ' ', '› I will check the contract.',
-      ' ', '● $ rg requestId · exit 1 · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate · exit 1', '  Output preview · open tasks', ' ', '◆ ↓ Director reply\nanswer delivered',
+      ' ', '● $ rg requestId · exit 1 · 0s', ' ', '⇢ review · running', '    $ inspect', ' ', '● $ validate · exit 1', ' ', '◆ ↓ Director reply\nanswer delivered',
       // The reasoning row between them is dropped, so one gap joins the blocks.
       ' ', '› Finished.',
       ' ', 'Warning: final note',

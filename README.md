@@ -170,12 +170,10 @@ answers after the questions, and displays durations in whole seconds.
 
 面板右侧保留两个字符的空白；提问后显示主 agent 送达的回复内容，耗时显示到整秒。
 
-Commands with a nonzero exit code show `exit N`. Their output preview starts
-collapsed; expand it in the tasks pane to keep its indentation and blank lines.
-Inline traces show `Output preview · open tasks` instead of the output body.
+Commands with a nonzero exit code show `exit N`. The pane and inline traces
+omit command output and output preview controls.
 
-命令非零退出时显示 `exit N`。输出预览默认折叠，在任务面板展开后保留缩进和空行；
-内联轨迹显示 `Output preview · open tasks` 提示。
+命令非零退出时显示 `exit N`；面板与内联轨迹均不展示命令输出及输出预览入口。
 
 The pane and inline traces use the same block layout for `◆ ↓ Director reply`,
 `◆ ↓ Director message`, `◆ ↓ Director interrupt` and `◇ ↑ Executor notification`.
