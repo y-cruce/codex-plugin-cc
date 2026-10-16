@@ -889,6 +889,9 @@ async function handleReviewCommand(argv, config) {
     summary: metadata.summary,
     label: options.label
   });
+  job.request = {
+    prompt: [`Target: ${target.label}`, focusText].filter(Boolean).join("\n\n")
+  };
   await runForegroundCommand(
     job,
     (progress) =>

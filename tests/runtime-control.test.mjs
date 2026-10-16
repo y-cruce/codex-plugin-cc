@@ -9,6 +9,7 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -484,11 +485,27 @@ test("commands lazily start and reuse one shared app-server after first use", as
     return;
   }
 
-  const adversarial = run("node", [SCRIPT, "adversarial-review"], {
+  const focus = "Check retry safety and keep unknown write outcomes blocked.";
+  const adversarial = run("node", [SCRIPT, "adversarial-review", focus], {
     cwd: repo,
     env
   });
   assert.equal(adversarial.status, 0, adversarial.stderr);
+
+  const jobsDir = path.join(resolveStateDir(repo), "jobs");
+  const jobs = fs.readdirSync(jobsDir).filter((file) => file.endsWith(".json"))
+    .map((file) => JSON.parse(fs.readFileSync(path.join(jobsDir, file), "utf8")));
+  for (const [kind, prompt] of [
+    ["review", "Target: working tree diff"],
+    ["adversarial-review", `Target: working tree diff\n\n${focus}`]
+  ]) {
+    const job = jobs.find((entry) => entry.kind === kind);
+    assert.equal(job.request?.prompt, prompt);
+    const location = await resolveJobHistory(repo, job.id);
+    const view = JSON.parse(fs.readFileSync(location.liveView, "utf8"));
+    assert.equal(view.prompt, prompt);
+    assert.equal(view.rounds.find((round) => round.jobId === job.id).prompt, prompt);
+  }
 
   const setup = run("node", [SCRIPT, "setup", "--json"], { cwd: repo, env });
   assert.equal(setup.status, 0, setup.stderr);
