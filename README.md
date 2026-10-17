@@ -95,6 +95,12 @@ Tasks require the shared broker; live commands never start a second runtime or s
 
 Run `npm test` and `npm run build` for local checks. The optional `CODEX_REAL_APP_SERVER_TEST=1 node --test tests/real-app-server.test.mjs` uses an installed Codex CLI with isolated temporary configuration and a local mock model, including actual file writing and syntax validation. It does not contact a real model service.
 
+### Director tools
+
+From 1.4.48, when code-director's `dispatch.sh` is installed at `~/.claude/skills/code-director/scripts/dispatch.sh`, the plugin gives the director five tools of its own: `mcp__codex__dispatch`, `mcp__codex__message`, `mcp__codex__answer`, `mcp__codex__result` and `mcp__codex__status`. They sit in the tool list from the start of the session, with no ToolSearch step. `dispatch` takes the headers as fields (`mode`, `name`, `cwd`, `brief`, and optionally `thread`, `base`, `write`, `effort`, `model`, `siblings`, `sandbox`, `executor`, `executor_mode`, `executor_effort`) and passes the brief to `dispatch.sh dispatch` on stdin. It returns the same `STATUS` / `JOB` / `NAME` / `THREAD` lines, and the tasks pane picks up the job at its next poll. `message` and `answer` write the correction or the answers map to a temporary file, run `dispatch.sh message` or `dispatch.sh answer` on it, and remove it afterwards. `result` and `status` run this plugin's own companion. A failure comes back as a tool error carrying the script's own line. Every tool runs the plugin's own `codex-companion.mjs`, not whichever version is newest in the plugin cache. The Bash route still works where the tools are absent (the skill not installed, or mods unavailable).
+
+`dispatch.sh` 安装在上述位置时，插件为主 agent 注册 `mcp__codex__dispatch`、`message`、`answer`、`result`、`status` 五个工具，会话开始即可直接调用，不必先经过 ToolSearch。派单的各个头部字段变成结构化参数，brief 通过 stdin 交给 `dispatch.sh`，不再经过 shell 命令行；返回的内容与原来相同，任务面板在下一次轮询时显示该任务。纠正消息和答案会先写入临时文件，执行完毕后删除。所有工具都使用本插件自带的 companion。没有这些工具时，原来的 Bash 用法照常可用。
+
 ### Parallel worktrees
 
 The director prepares a separate worktree for each writer and passes it as the task's `CWD`. With code-director installed:

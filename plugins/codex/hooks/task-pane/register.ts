@@ -1,4 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
+import { directorTools, startDirectorTools } from '../director-tools/register.ts'
+import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
 import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
@@ -31,6 +33,9 @@ type State = {
   // The ledger as the store last took it.
   saved: string
   ticks: number
+  // Shared with the director tools. Their dispatch raises `pending`: a job may
+  // have started, so the next poll rescans for it rather than waiting its turn.
+  tools: DirectorTools
   since: number
   busy: boolean
   booting: Promise<string | undefined> | null
@@ -542,6 +547,10 @@ async function pollOnce($: EngineInterface, state: State) {
     }
     const epoch = state.epoch
     const stale = () => state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || generation !== state.generation
+    if (state.tools.pending) {
+      state.tools.pending = false
+      state.ticks = 0
+    }
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     if (stale()) return
     state.ticks += 1
@@ -989,14 +998,14 @@ function visibleThreads(state: State): LiveView[] {
     })
 }
 
-export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true) {
+export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools()) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false, epoch: 0,
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
-    ticks: 0, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
+    ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(),
@@ -1004,6 +1013,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    await startDirectorTools($, tools)
     if (e.isInteractive) $.clock.after(0, async () => {
       if (state.script && state.leaving) await bindSession($, state, await $.session.id())
       else {
