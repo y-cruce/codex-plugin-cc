@@ -131,7 +131,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       if (!running) {
         const prefix = `${jobPrefix} thread=${job.threadId ?? "unknown"}`;
         if (job.status === "completed") {
-          await writeLine(`DONE ${prefix}`);
+          await writeLine(`DONE ${prefix}${job.reportFile ? ` report=${job.reportFile}` : ""}`);
           lastActiveAt = now();
         } else {
           const error = job.errorMessage ?? readJob(report.workspaceRoot, job.id)?.result?.error?.message;

@@ -975,10 +975,11 @@ export async function runAppServerReview(cwd, options = {}) {
   return withAppServer(cwd, async (client) => {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     await registerObservedJob(client, cwd, options.onProgress);
+    // Persisted so the review thread can be resumed with `task --thread` for follow-ups.
     const thread = await startCodexSession(client, cwd, {
       model: options.model,
-      sandbox: "read-only",
-      ephemeral: true,
+      sandbox: options.sandbox ?? "read-only",
+      ephemeral: false,
       threadName: options.threadName
     });
     const sourceThreadId = thread.thread.id;
@@ -1089,7 +1090,7 @@ export async function runAppServerTurn(cwd, options = {}) {
           cwd,
           model: options.model,
           sandbox: options.sandbox,
-          ephemeral: options.persistThread ? false : true,
+          ephemeral: options.ephemeral ?? (options.persistThread ? false : true),
           persistThread: options.persistThread,
           threadName: options.persistThread ? options.threadName : options.threadName ?? null
         });

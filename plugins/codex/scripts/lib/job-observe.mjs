@@ -91,7 +91,7 @@ async function eventExit(event, job, until, location, page) {
     return `NOTIFIED ${prefix(job)} thread=${threadId}${pending} ${oneLine(p.message)}`;
   }
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
-    if (event.type === "job.completed") return `DONE ${prefix(job)} thread=${threadId}`;
+    if (event.type === "job.completed") return `DONE ${prefix(job)} thread=${threadId}${job.reportFile ? ` report=${job.reportFile}` : ""}`;
     return `FAILED ${prefix(job)} thread=${threadId} ${oneLine(p.error?.message ?? p.reason?.message ?? "unknown")}`;
   }
   return null;
@@ -184,7 +184,7 @@ export async function follow(location, job, options, dependencies = {}) {
     const current = await findJob(location, job.id);
     if (!terminal(current.status)) return false;
     job = current;
-    await finish(`${current.status === "completed" ? "DONE" : "FAILED"} ${prefix(current)} thread=${current.executorSessionId ?? current.threadId ?? lastThread ?? "unknown"}${current.status === "completed" ? "" : ` ${oneLine(current.errorMessage ?? "unknown")}`}`);
+    await finish(`${current.status === "completed" ? "DONE" : "FAILED"} ${prefix(current)} thread=${current.executorSessionId ?? current.threadId ?? lastThread ?? "unknown"}${current.status === "completed" ? (current.reportFile ? ` report=${current.reportFile}` : "") : ` ${oneLine(current.errorMessage ?? "unknown")}`}`);
     return true;
   };
   const recoverUnavailable = async () => {

@@ -3,7 +3,7 @@ import process from "node:process";
 import { finishObservedJob } from "./observation-client.mjs";
 import { jobStatusForTerminal } from "./executor-port.mjs";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { readJobFile, resolveJobFile, resolveJobLogFile, resolveJobReportFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
@@ -186,6 +186,16 @@ export function failTrackedJob(job, error) {
   try { upsertJob(job.workspaceRoot, failed); } catch {}
 }
 
+function writeReportFile(workspaceRoot, jobId, rendered) {
+  try {
+    const reportFile = resolveJobReportFile(workspaceRoot, jobId);
+    fs.writeFileSync(reportFile, rendered, "utf8");
+    return reportFile;
+  } catch {
+    return null;
+  }
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const runningRecord = {
     ...job,
@@ -209,6 +219,11 @@ export async function runTrackedJob(job, runner, options = {}) {
       ? { ...execution.payload, terminal: execution.terminal }
       : execution.payload;
     const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
+    // A review's full output also goes to its own Markdown file, so a director
+    // can read the report from disk instead of parsing it out of the job record.
+    const reportFile = execution.jobClass === "review" && execution.rendered
+      ? writeReportFile(job.workspaceRoot, job.id, execution.rendered)
+      : null;
     writeJobFile(job.workspaceRoot, job.id, {
       ...existing,
       status: completionStatus,
@@ -221,7 +236,8 @@ export async function runTrackedJob(job, runner, options = {}) {
       completedAt,
       ...(terminalMessage ? { errorMessage: terminalMessage } : {}),
       result,
-      rendered: execution.rendered
+      rendered: execution.rendered,
+      ...(reportFile ? { reportFile } : {})
     });
     upsertJob(job.workspaceRoot, {
       id: job.id,
@@ -234,6 +250,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       phase: completionStatus === "completed" ? "done" : completionStatus,
       pid: null,
       ...(terminalMessage ? { errorMessage: terminalMessage } : {}),
+      ...(reportFile ? { reportFile } : {}),
       completedAt
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);

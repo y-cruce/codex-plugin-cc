@@ -87,8 +87,8 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
+      "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>]",
+      "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>] [focus text]",
       "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
@@ -420,6 +420,7 @@ async function executeReviewRun(request) {
     const result = await runAppServerReview(request.cwd, {
       target: reviewTarget,
       model: request.model,
+      sandbox: request.sandbox,
       onProgress: request.onProgress
     });
     const payload = {
@@ -461,7 +462,8 @@ async function executeReviewRun(request) {
   const result = await runAppServerTurn(context.repoRoot, {
     prompt,
     model: request.model,
-    sandbox: "read-only",
+    sandbox: request.sandbox ?? "read-only",
+    ephemeral: false,
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress
   });
@@ -863,7 +865,7 @@ export async function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "label"],
+    valueOptions: ["base", "scope", "model", "cwd", "label", "sandbox"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -873,6 +875,10 @@ async function handleReviewCommand(argv, config) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
+  const sandbox = options.sandbox ?? "read-only";
+  if (!["read-only", "workspace-write", "danger-full-access"].includes(sandbox)) {
+    throw new Error("--sandbox must be read-only, workspace-write, or danger-full-access.");
+  }
   const target = resolveReviewTarget(cwd, {
     base: options.base,
     scope: options.scope
@@ -900,6 +906,7 @@ async function handleReviewCommand(argv, config) {
         base: options.base,
         scope: options.scope,
         model: options.model,
+        sandbox,
         focusText,
         reviewName: config.reviewName,
         onProgress: progress

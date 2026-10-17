@@ -213,6 +213,46 @@ test("review rejects staged-only scope because it is native-review only", () => 
   assert.match(result.stderr, /Use one of: auto, working-tree, branch, or pass --base <ref>/i);
 });
 
+test("review honours --sandbox, keeps its thread for follow-ups and writes a report file", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const rejected = run("node", [SCRIPT, "review", "--sandbox", "wide-open"], { cwd: repo, env: buildEnv(binDir) });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /--sandbox must be/);
+
+  const reviewed = run("node", [SCRIPT, "review", "--sandbox", "danger-full-access", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(reviewed.status, 0, reviewed.stderr);
+  const payload = JSON.parse(reviewed.stdout);
+
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const thread = fakeState.threads.find((candidate) => candidate.id === payload.threadId);
+  assert.equal(thread.sandbox, "danger-full-access");
+  assert.equal(thread.ephemeral, false);
+
+  const jobsDir = path.join(resolveStateDir(repo), "jobs");
+  const reportName = fs.readdirSync(jobsDir).find((name) => name.endsWith(".review.md"));
+  assert.ok(reportName, "review report file is written");
+  const jobRecord = JSON.parse(fs.readFileSync(path.join(jobsDir, reportName.replace(/\.review\.md$/, ".json")), "utf8"));
+  assert.equal(jobRecord.reportFile, path.join(jobsDir, reportName));
+  assert.match(fs.readFileSync(jobRecord.reportFile, "utf8"), /No material issues found/);
+
+  const followUp = run("node", [SCRIPT, "task", "--thread", payload.threadId, "expand on the review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(followUp.status, 0, followUp.stderr);
+});
+
 test("review accepts --background while still running as a tracked review job", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

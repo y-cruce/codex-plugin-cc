@@ -127,6 +127,8 @@ Use it when you want:
 
 Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
 
+Both review commands run read-only by default; `--sandbox <read-only|workspace-write|danger-full-access>` widens that so Codex can build or run tests while verifying findings. Each review keeps its Codex thread, so `task --thread <id>` can follow up on the findings in the same context, and its full output is also written next to the job record as `<job-id>.review.md` (the path is the job's `reportFile` and is appended to monitor `DONE` lines as `report=<path>`).
+
 Examples:
 
 ```bash

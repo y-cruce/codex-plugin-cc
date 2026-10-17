@@ -163,6 +163,7 @@ function writeState(cwd, state) {
     }
     removeJobFile(resolveJobFile(cwd, job.id));
     removeFileIfExists(job.logFile);
+    removeFileIfExists(job.reportFile);
   }
 
   const stateFile = resolveStateFile(cwd);
@@ -252,6 +253,11 @@ function removeJobFile(jobFile) {
 export function resolveJobLogFile(cwd, jobId) {
   ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.log`);
+}
+
+export function resolveJobReportFile(cwd, jobId) {
+  ensureStateDir(cwd);
+  return path.join(resolveJobsDir(cwd), `${jobId}.review.md`);
 }
 
 export function resolveJobFile(cwd, jobId) {
