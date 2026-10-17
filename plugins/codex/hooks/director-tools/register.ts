@@ -5,7 +5,7 @@ import type { EngineInterface, On } from 'claude-code'
 // dispatch logic stays in one place; the tool only takes structured input,
 // writes what the script reads from a file, and hands back its output.
 
-type Context = { worker: string; companion: string; tmp: string }
+type Context = { worker: string; companion: string; tmp: string; data: string | null }
 type ToolInput = Record<string, unknown>
 type Answer = { result: string } | { deny: string }
 
@@ -134,7 +134,10 @@ async function run($: EngineInterface, context: Context, argv: string[], cwd: st
     // The plugin running this tool is the one whose pane watches the job, so its
     // own companion is the one to use rather than whichever version is newest
     // in the plugin cache.
-    env: { CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id() },
+    env: {
+      CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
+      ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
+    },
   })
   const out = [ran.stdout.trim(), ran.isStdoutTruncated ? '[output cut at 4 MiB]' : ''].filter(Boolean).join('\n')
   if (ran.exitCode === 0) return { result: out || '(no output)' }
@@ -183,6 +186,21 @@ export function directorTools(): DirectorTools {
   return { pending: false, context: null }
 }
 
+// The plugin's data folder, which Claude Code hands its hooks and, through the
+// session-start hook's env file, the Bash tool as CLAUDE_PLUGIN_DATA; the
+// companion keeps its job state under it. `$.process.run` does not get it, and
+// without it the companion falls back to $TMPDIR/codex-companion, where the
+// jobs a Bash dispatch started are not. An installed plugin lives at
+// <plugins>/cache/<marketplace>/<name>/<version>, its data at
+// <plugins>/data/<name>-<marketplace>; a --plugin-dir checkout has no such
+// folder and keeps the fallback, as its Bash dispatches do.
+export function pluginDataDir(root: string): string | null {
+  const match = /^(.*)\/cache\/([^/]+)\/([^/]+)\/[^/]+\/?$/.exec(root)
+  if (!match) return null
+  const [, plugins, marketplace, name] = match
+  return `${plugins}/data/${`${name}@${marketplace}`.replace(/[^a-zA-Z0-9\-_]/g, '-')}`
+}
+
 // Registers the tools when the code-director skill is installed; without its
 // dispatch.sh there is nothing for them to run.
 export async function startDirectorTools($: EngineInterface, tools: DirectorTools) {
@@ -192,8 +210,10 @@ export async function startDirectorTools($: EngineInterface, tools: DirectorTool
     const companion = `${$.plugin.root}/scripts/codex-companion.mjs`
     if (!home || !(await $.fs.exists(worker)) || !(await $.fs.exists(companion))) return
     const tmp = (await $.env.get('TMPDIR'))?.replace(/\/+$/, '') || '/tmp'
+    const found = pluginDataDir($.plugin.root)
+    const data = found && (await $.fs.exists(found)) ? found : null
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
-    tools.context = { worker, companion, tmp }
+    tools.context = { worker, companion, tmp, data }
   } catch (error) {
     $.ui.log(`Codex director tools: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
   }

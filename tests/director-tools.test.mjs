@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { directorTools, dispatchInput, registerDirectorTools, startDirectorTools } from "../plugins/codex/hooks/director-tools/register.ts";
+import { directorTools, dispatchInput, pluginDataDir, registerDirectorTools, startDirectorTools } from "../plugins/codex/hooks/director-tools/register.ts";
 
 const WORKER = "/home/test/.claude/skills/code-director/scripts/dispatch.sh";
 const COMPANION = "/plugin/scripts/codex-companion.mjs";
 
-function harness({ files = [WORKER, COMPANION, "/repo"], exitCode = 0, stdout = "STATUS: started\nJOB: task-a-b\n", stderr = "" } = {}) {
+function harness({ root = "/plugin", files = [WORKER, COMPANION, "/repo"], exitCode = 0, stdout = "STATUS: started\nJOB: task-a-b\n", stderr = "" } = {}) {
   const hooks = new Map();
   const on = (event, matcher, hook) => hooks.set(`${event}:${matcher.tool}`, hook);
   const registered = [];
@@ -13,7 +13,7 @@ function harness({ files = [WORKER, COMPANION, "/repo"], exitCode = 0, stdout = 
   const writes = new Map();
   const exists = new Set(files);
   const $ = {
-    plugin: { name: "codex", root: "/plugin" },
+    plugin: { name: "codex", root },
     env: { get: async (name) => ({ HOME: "/home/test", TMPDIR: "/tmp/" })[name] },
     fs: { exists: async (path) => exists.has(path), write: async (path, text) => { writes.set(path, text); } },
     session: { id: async () => "session-1" },
@@ -46,7 +46,7 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   await startDirectorTools(installed.$, installed.tools);
   assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status"]);
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
-  assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp" });
+  assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
   const missing = harness({ files: [COMPANION] });
   await startDirectorTools(missing.$, missing.tools);
@@ -116,4 +116,24 @@ test("result and status run the plugin's companion directly", async () => {
     ["node", COMPANION, "status", "j", "--cwd", "/repo", "--json"],
     ["node", COMPANION, "status", "--cwd", "/repo", "--json"],
   ]);
+});
+
+test("an installed plugin's companion runs with the plugin's data folder, where Bash dispatches keep their jobs", async () => {
+  const root = "/home/test/.claude/plugins/cache/openai-codex/codex/1.4.49";
+  const data = "/home/test/.claude/plugins/data/codex-openai-codex";
+  assert.equal(pluginDataDir(root), data);
+  assert.equal(pluginDataDir(`${root}/`), data);
+  assert.equal(pluginDataDir("/home/test/.claude/plugins/cache/my.market/codex/1.0.0"), "/home/test/.claude/plugins/data/codex-my-market");
+  assert.equal(pluginDataDir("/work/codex-plugin-cc/plugins/codex"), null);
+
+  const h = harness({ root, files: [WORKER, `${root}/scripts/codex-companion.mjs`, "/repo", data] });
+  await startDirectorTools(h.$, h.tools);
+  await h.call("status", { job: "j", cwd: "/repo" });
+  await h.call("dispatch", { mode: "investigate", name: "locate x", cwd: "/repo", brief: "Find it." });
+  for (const { init } of h.runs) assert.equal(init.env.CLAUDE_PLUGIN_DATA, data);
+
+  const fresh = harness({ root, files: [WORKER, `${root}/scripts/codex-companion.mjs`, "/repo"] });
+  await startDirectorTools(fresh.$, fresh.tools);
+  await fresh.call("status", { cwd: "/repo" });
+  assert.equal(fresh.runs[0].init.env.CLAUDE_PLUGIN_DATA, undefined, "no folder yet: the companion's own fallback");
 });
