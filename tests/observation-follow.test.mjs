@@ -127,7 +127,7 @@ test("QUESTION exits with cursor and successful answers appear before terminal o
   const jobId = await h.start("ask", "question job");
   const question = await h.child("observe", "follow", jobId).done;
   assert.equal(question.code, 0, question.stderr);
-  assert.match(question.stdout, /^QUESTION job=.*request=question-1 Which source\?$/m);
+  assert.match(question.stdout, /^QUESTION job=.*request=question-1 ids=source Which source\?$/m);
   const savedCursor = cursor(question.stdout);
   const answersFile = path.join(h.repo, "answers.json");
   fs.writeFileSync(answersFile, JSON.stringify({ source: { answers: ["latest"] } }));
@@ -169,7 +169,7 @@ test("follow notification records the pending request at emission", async (t) =>
   assert.match(notified.stdout, new RegExp(`^NOTIFIED job=${jobId} \\[pending notification\\] thread=.*pending_request=question-1 Source decision needed$`, "m"));
   const repeated = await observe(t, h, "follow", jobId, "--quiet");
   assert.equal(repeated.code, 0, repeated.stderr);
-  assert.match(repeated.stdout, /^QUESTION_PENDING job=.*request=question-1 still unanswered: Which source\?$/m);
+  assert.match(repeated.stdout, /^QUESTION_PENDING job=.*request=question-1 ids=source still unanswered: Which source\?$/m);
   assert.doesNotMatch(repeated.stdout, /^QUESTION /m);
 });
 

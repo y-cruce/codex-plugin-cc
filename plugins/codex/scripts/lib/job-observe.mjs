@@ -6,7 +6,7 @@ import { resolveStateDir } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { renderStoredJobResult } from "./render.mjs";
 import { readHistory, cursorFor, cleanupHistory } from "./job-event-store.mjs";
-import { createLiveView, renderJobEvent } from "./job-event-model.mjs";
+import { createLiveView, questionIds, renderJobEvent } from "./job-event-model.mjs";
 import { ObservationClient } from "./observation-client.mjs";
 import { readObservationJson, observationRoots, observationJobs, observationThreads, resolveObservationRoot } from "./observation-paths.mjs";
 import { liveStatus } from "./live-commands.mjs";
@@ -83,8 +83,9 @@ async function eventExit(event, job, until, location, page) {
     if (!Array.isArray(live?.questions) && await inputResolvedLater(event, job, location, page)) return null;
     const first = await claimQuestion(location.stateDir, job.id, p.requestId);
     const text = oneLine(p.message ?? (event.type === "permission.requested" ? `Permission requested: ${p.tool?.title}` : "")).slice(0, 200);
-    return first ? `QUESTION ${prefix(job)} request=${p.requestId} ${text}`
-      : `QUESTION_PENDING ${prefix(job)} request=${p.requestId} still unanswered: ${text}`;
+    const ids = questionIds(p.fields);
+    return first ? `QUESTION ${prefix(job)} request=${p.requestId}${ids} ${text}`
+      : `QUESTION_PENDING ${prefix(job)} request=${p.requestId}${ids} still unanswered: ${text}`;
   }
   if (event.type === "director.notified" && until !== "done") {
     const pending = p.pendingRequestId == null ? "" : ` pending_request=${p.pendingRequestId}`;

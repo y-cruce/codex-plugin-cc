@@ -70,6 +70,6 @@ export type Terminal = { kind: 'DONE' | 'FAILED' | 'QUESTION' | 'NOTIFIED' | 'ST
 export function terminalOf(output: unknown): Terminal | undefined {
   const text = typeof output === 'string' ? output : (output as { stdout?: unknown } | null)?.stdout
   if (typeof text !== 'string') return undefined
-  const match = [...text.matchAll(/^(DONE|FAILED|QUESTION|NOTIFIED|STALLED|TIMEOUT) job=([^\s]+)(?:[ \t]+\[([^\]\r\n]*)\])?(?:[ \t]+(?:thread|request)=\S+)*(?:[ \t]+([^\r\n]*))?\r?$/gm)].at(-1)
+  const match = [...text.matchAll(/^(DONE|FAILED|QUESTION|NOTIFIED|STALLED|TIMEOUT) job=([^\s]+)(?:[ \t]+\[([^\]\r\n]*)\])?(?:[ \t]+(?:thread|request|ids)=\S+)*(?:[ \t]+([^\r\n]*))?\r?$/gm)].at(-1)
   return match ? { kind: match[1] as Terminal['kind'], text: match[4] ?? '', label: match[3] } : undefined
 }

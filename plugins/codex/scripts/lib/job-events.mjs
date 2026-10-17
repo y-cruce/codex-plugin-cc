@@ -9,6 +9,7 @@ import { resolveStateDir } from "./state.mjs";
 import { claimQuestion } from "./question-report.mjs";
 import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
 import { atomicJson } from "./job-event-store.mjs";
+import { questionIds } from "./job-event-model.mjs";
 
 export const DEFAULT_QUESTION_REMIND_MS = 120000;
 
@@ -94,13 +95,14 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       if (running && live?.unavailable) continue;
       for (const question of pendingQuestions) {
         const key = `${job.id}:${question.requestId}`;
+        const ids = questionIds(question.questions);
         const previous = questions.get(key);
         if (previous) {
           const time = now();
           if (running && time - previous.reportedAt >= questionRemindMs) {
             const minutes = Math.max(0, Math.floor((time - previous.firstSeenAt) / 60000));
             const expires = question.expiresAt == null ? "" : `, expires in ${Math.max(0, Math.floor((question.expiresAt - time) / 60000))}m`;
-            await writeLine(`QUESTION_PENDING ${jobPrefix} request=${question.requestId} ${minutes}m unanswered${expires}: ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
+            await writeLine(`QUESTION_PENDING ${jobPrefix} request=${question.requestId}${ids} ${minutes}m unanswered${expires}: ${oneLine(question.questions?.[0]?.question).slice(0, 200)}`);
             lastActiveAt = now();
             previous.reportedAt = time;
           }
@@ -108,8 +110,8 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
         }
         const first = await claim(report.workspaceRoot ?? cwd, job.id, question.requestId);
         const text = oneLine(question.message ?? question.questions?.[0]?.question).slice(0, 200);
-        await writeLine(first ? `QUESTION ${jobPrefix} request=${question.requestId} ${text}`
-          : `QUESTION_PENDING ${jobPrefix} request=${question.requestId} still unanswered: ${text}`);
+        await writeLine(first ? `QUESTION ${jobPrefix} request=${question.requestId}${ids} ${text}`
+          : `QUESTION_PENDING ${jobPrefix} request=${question.requestId}${ids} still unanswered: ${text}`);
         lastActiveAt = now();
         questions.set(key, { firstSeenAt: lastActiveAt, reportedAt: lastActiveAt });
       }

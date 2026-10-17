@@ -11,6 +11,13 @@ function preview(text, limit, keepLines = false) {
 }
 // The kinds the live renderer wraps rather than clipping to a single row; kept
 // in step with PROSE in hooks/live-tool-row/view.ts.
+// The keys an answer must use. The director cannot answer a structured question
+// without them, and an event line is often all it has read.
+export function questionIds(fields) {
+  const ids = (fields ?? []).map((field) => field?.id).filter((id) => id != null && id !== "");
+  return ids.length ? ` ids=${ids.join(",")}` : "";
+}
+
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
@@ -115,7 +122,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       text = `Tokens: input=${usage.inputTokens ?? 0} output=${usage.outputTokens ?? 0} cached=${usage.cachedInputTokens ?? 0}`;
       break;
     }
-    case "question.opened": text = `Question request=${p.requestId}: ${p.message}`; break;
+    case "question.opened": text = `Question request=${p.requestId}${questionIds(p.fields)}: ${p.message}`; break;
     case "question.resolved": text = `director → answer delivered request=${p.requestId}`; break;
     case "question.closed": text = `Question resolved request=${p.requestId}`; break;
     case "director.notified": text = `notify_director: ${p.message ?? ""}`; break;

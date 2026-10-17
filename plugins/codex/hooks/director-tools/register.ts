@@ -64,8 +64,9 @@ const TOOLS = [
   },
   {
     name: 'answer',
-    description: 'Answer a structured question from a job: dispatch.sh answer. `answers` is keyed by the question ids '
-      + 'that status lists under job.live.questions for this request, each { "answers": ["..."] }. '
+    description: 'Answer a structured question from a job: dispatch.sh answer. `answers` is keyed by the question ids, '
+      + 'each { "answers": ["..."] }: the `ids=` list on the question event line, or job.live.questions in status. '
+      + 'Never guess a key to find out the ids. '
       + 'Returns ANSWERED or ANSWER_FAILED; on "still pending after answer" check status before answering again.',
     inputSchema: {
       type: 'object',

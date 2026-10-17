@@ -254,6 +254,13 @@ test("events does not report a stall while the job is waiting for an answer", as
   assert.deepEqual(lines, ["QUESTION job=job-1 request=request-1 Choose?"]);
 });
 
+test("a question line names the ids an answer must be keyed by", async () => {
+  const lines = await monitor([{ running: [job] }], {
+    status: async () => ({ questions: [{ requestId: "2", questions: [{ id: "scope", question: "Which scope?" }, { id: "depth" }] }] })
+  });
+  assert.deepEqual(lines, ["QUESTION job=job-1 request=2 ids=scope,depth Which scope?"]);
+});
+
 test("events reports each request once and limits the first question to one line of 200 characters", async () => {
   const lines = await monitor([{ running: [job] }, { running: [job] }], {
     status: async () => ({ questions: [{ requestId: "request-1", questions: [

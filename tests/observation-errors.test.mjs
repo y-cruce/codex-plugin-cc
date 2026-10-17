@@ -108,7 +108,7 @@ test("follow reports a question when live pending state is unavailable", async (
     await emit("question.opened", started, { requestId: "request-1", questions: [{ question: "Choose?" }] });
   });
   assert.match(output, /^CURSOR: /m);
-  assert.match(output, /^QUESTION job=task-errors .*request=request-1 Choose\?$/m);
+  assert.match(output, /^QUESTION job=task-errors .*request=request-1 ids=question Choose\?$/m);
   assert.doesNotMatch(output, /^DONE /m);
 });
 

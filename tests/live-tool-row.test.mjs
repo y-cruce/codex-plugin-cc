@@ -341,6 +341,7 @@ describe('live row polish', () => {
     assert.deepEqual(terminalOf('TIMEOUT job=task-abc123-xyz789 [name] 60s elapsed, continue with --after'), { kind: 'TIMEOUT', label: 'name', text: '60s elapsed, continue with --after' });
     assert.deepEqual(terminalOf('DONE job=task-abc123-xyz789'), { kind: 'DONE', text: '', label: undefined });
     assert.deepEqual(terminalOf('QUESTION job=task-abc123-xyz789 thread=t request=1 Which color?'), { kind: 'QUESTION', text: 'Which color?', label: undefined });
+    assert.deepEqual(terminalOf('QUESTION job=task-abc123-xyz789 request=1 ids=color,size Which color?'), { kind: 'QUESTION', text: 'Which color?', label: undefined });
     for (const output of [null, {}, { stdout: 123 }, 'CURSOR: x', 'NOTIFIED job=', 'QUESTION_PENDING job=task-abc123-xyz789 request=1 wait', 'text DONE job=x']) assert.equal(terminalOf(output), undefined);
   });
   for (const [kind, status, color, dim] of [['QUESTION', 'question', 'magenta', false], ['NOTIFIED', 'notified', 'cyan', false], ['TIMEOUT', 'paused', undefined, true], ['STALLED', 'stalled', undefined, true]]) {

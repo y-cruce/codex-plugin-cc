@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
-import { renderJobEvent, createLiveView, applyJobEvent, jobConfig } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { renderJobEvent, createLiveView, applyJobEvent, jobConfig, questionIds } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 
 function harness(job = {}) {
@@ -626,4 +626,13 @@ test("the view names the model and the effort a task runs on, and stays quiet wi
   applyJobEvent(bare, event);
   assert.equal(bare.model, null);
   assert.equal(bare.effort, null);
+});
+
+test("a question's event line carries its request id and the ids its answer is keyed by", () => {
+  assert.equal(questionIds([{ id: "scope" }, { id: "depth" }]), " ids=scope,depth");
+  assert.equal(questionIds([]), "");
+  assert.equal(questionIds(undefined), "");
+  const event = { type: "question.opened", occurredAt: "2026-10-17T00:00:00.000Z", identity: {},
+    payload: { requestId: "2", message: "Which scope?", mode: "form", fields: [{ id: "scope" }], url: null, openedAt: "2026-10-17T00:00:00.000Z", expiresAt: null } };
+  assert.match(renderJobEvent(event), /Question request=2 ids=scope: Which scope\?/);
 });
