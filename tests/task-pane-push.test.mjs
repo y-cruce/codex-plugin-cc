@@ -160,6 +160,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     band: async () => hooks.get("ui.render:AbovePrompt")(engine, { props: {} }, async () => {}),
     close: async (kind = "person") => hooks.get("ui.close:")(engine, { id: "codex_tasks", origin: { kind } }, async () => {}),
     end: async (reason = "resume") => hooks.get("session.end:")(engine, { reason }, async () => {}),
+    prompt: async (event, next) => hooks.get("prompt.submit:")(engine, event, next),
     session: (value) => {
       sessionId = value;
       startedAt = now;
@@ -1049,34 +1050,47 @@ test("a push line survives an event with no body of its own", () => {
   }
 });
 
+test("a restored pane drops its monitor's expiry after all jobs are gone", async () => {
+  const stored = new Map([["codex:tasks:session:ownedMonitors", ["monitor-1"]]]);
+  const pane = await paneHarness(stored, undefined, "session", { fsList: () => [] });
+  pane.list([]);
+  await pane.tick();
+  const text = '<task-notification><task-id>monitor-1</task-id><summary>Monitor event: "Codex job events in work"</summary><event>[Monitor expired after 30m with 1 event delivered. Re-arm it if you still need the watch.]</event></task-notification>';
+  const result = await pane.prompt({ origin: { kind: "task-notification" }, text }, async () => ({ forwarded: true }));
+  assert.ok(result.drop, "expiry after the last job was handled must not wake the director");
+});
+
 test("only expiry notices for monitors owned by the task pane are dropped", () => {
-  const notice = (description, event) => `<task-notification>
-<summary>Monitor event: "${description}"</summary>
+  const notice = (taskId, event) => `<task-notification>
+<task-id>${taskId}</task-id>
+<summary>Monitor event: "Codex job events in alpha"</summary>
 <event>${event}</event>
 </task-notification>`;
-  const watched = new Set(["/work/alpha"]);
-  const live = new Set(["/work/alpha"]);
+  const owned = new Set(["monitor-1"]);
+  const expiry = "[Monitor expired after 30m with 1 event delivered. Re-arm it if you still need the watch.]";
   const cases = [
-    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]"), live, true, true],
-    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with 2 events delivered. Re-arm it if you still need the watch.]"), live, true, true],
-    [notice("Codex job events in alpha", "[Monitor stopped]"), live, true, false],
-    [notice("Codex job events in alpha", 'Monitor "Codex job events in alpha" stream ended'), live, true, false],
-    [notice("Codex job events in alpha", "DONE job-123"), live, true, false],
-    [notice("Codex job events in beta", "[Monitor expired after 30 minutes with no events delivered.]"), live, true, false],
-    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered.]"), new Set(), true, false],
-    [notice("Codex job events in alpha", "[Monitor expired after 30 minutes with no events delivered.]"), live, false, false],
+    [notice("monitor-1", expiry), true],
+    [notice("monitor-1", "[Monitor expired after 30m with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]"), true],
+    [notice("monitor-1", "[Monitor timed out — re-arm if needed.]"), true],
+    [notice("monitor-2", expiry), false],
+    [notice("", expiry), false],
+    [notice("monitor-1", "[Monitor stopped]"), false],
+    ...["DONE", "FAILED", "QUESTION", "NOTIFIED", "STALLED", "QUESTION_PENDING"].map(type =>
+      [notice("monitor-1", `${type} job=job-1`), false]),
+    [notice("monitor-1", `${expiry}\nDONE job=job-1`), false],
   ];
-  for (const [text, liveRoots, canRearm, expected] of cases) {
-    assert.equal(shouldDropMonitorExpiry(text, watched, liveRoots, canRearm), expected, text);
+  for (const [text, expected] of cases) {
+    assert.equal(shouldDropMonitorExpiry(text, owned), expected, text);
   }
 });
 
 test("only idle exits of monitors the task pane armed are dropped", () => {
   const owned = new Set(["monitor-1"]);
-  const end = (taskId, status, summary) => `<task-notification>
+  const end = (taskId, status, summary, body = "") => `<task-notification>
 <task-id>${taskId}</task-id>
 <status>${status}</status>
 <summary>${summary}</summary>
+${body ? `<event>${body}</event>` : ""}
 </task-notification>`;
   const event = (taskId, line) => `<task-notification>
 <task-id>${taskId}</task-id>
@@ -1087,9 +1101,10 @@ test("only idle exits of monitors the task pane armed are dropped", () => {
     [end("monitor-1", "completed", 'Monitor "Codex job events in alpha" stream ended'), true],
     [end("monitor-1", "completed", 'Monitor "Codex job events in alpha" ended without producing output (exit 0)'), true],
     [event("monitor-1", "IDLE_EXIT no active job for 60m; re-arm the monitor before the next dispatch"), true],
-    [end("monitor-1", "failed", 'Monitor "Codex job events in alpha" script failed (exit 2)'), false],
+    [end("monitor-1", "failed", 'Monitor "Codex job events in alpha" script failed (exit 2)', "IDLE_EXIT no active job for 0m"), false],
     [end("monitor-1", "killed", 'Monitor "Codex job events in alpha" stopped'), false],
     [event("monitor-1", "DONE job=job-1 [alpha] finished"), false],
+    [end("monitor-1", "completed", 'Monitor "Codex job events in alpha" stream ended', "DONE job=job-1 [alpha] finished\nIDLE_EXIT no active job for 0m"), false],
     [end("monitor-2", "completed", 'Monitor "Codex job events in alpha" stream ended'), false],
     [event("monitor-2", "IDLE_EXIT no active job for 60m; re-arm the monitor before the next dispatch"), false],
     ['<task-notification><summary>Monitor "Codex job events in alpha" stream ended</summary></task-notification>', false],

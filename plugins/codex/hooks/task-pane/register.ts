@@ -70,7 +70,7 @@ type State = {
   clock: string
   monitors: Map<string, Monitor>
   retiredMonitors: Set<string>
-  // Every watch this pane armed in this session, ended or not: its idle exit is
+  // Every watch this pane armed in this session, ended or not: its ending is
   // reported after the entry in `monitors` may already have been replaced.
   ownedMonitors: Set<string>
   leaving: boolean
@@ -101,20 +101,12 @@ export function pushLine(
   return `${label} · ${event.type}${detail ? `: ${clip(detail, 300)}` : ''}`
 }
 
-export function shouldDropMonitorExpiry(
-  text: string,
-  watchedRoots: Iterable<string>,
-  liveRoots: ReadonlySet<string>,
-  canRearm: boolean,
-): boolean {
-  if (!canRearm || !text.includes('<event>[Monitor expired after ')) return false
-  for (const root of watchedRoots) {
-    if (!liveRoots.has(root)) continue
-    const name = root.split('/').at(-1) ?? root
-    const escaped = name.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-    if (text.includes(`<summary>Monitor event: "Codex job events in ${escaped}"</summary>`)) return true
-  }
-  return false
+export function shouldDropMonitorExpiry(text: string, owned: ReadonlySet<string>): boolean {
+  const taskId = /<task-id>([^<]+)<\/task-id>/.exec(text)?.[1]
+  // Expiry needs no action even after the last job left the pane, or a reload
+  // replaced its watch. Match the whole event so a batch cannot lose job events.
+  return Boolean(taskId && owned.has(taskId)
+    && /<event>\[Monitor (?:expired after [^\n<]*|timed out — re-arm if needed\.)\]<\/event>/.test(text))
 }
 
 // An `events` stream the pane armed ends on its own once the repository has been
@@ -125,8 +117,11 @@ export function shouldDropMonitorExpiry(
 export function shouldDropMonitorEnd(text: string, owned: ReadonlySet<string>): boolean {
   const taskId = /<task-id>([^<]+)<\/task-id>/.exec(text)?.[1]
   if (!taskId || !owned.has(taskId)) return false
-  return /<event>IDLE_EXIT /.test(text)
-    || /<summary>Monitor ".*" (?:stream ended|ended without producing output)/.test(text)
+  if (/<status>(?:failed|killed)<\/status>/.test(text)) return false
+  // The host can attach its last stdout batch to the terminal notification.
+  const body = /<event>([\s\S]*?)<\/event>/.exec(text)?.[1]
+  if (body !== undefined) return body.split('\n').every(line => line.startsWith('IDLE_EXIT '))
+  return /<summary>Monitor ".*" (?:stream ended|ended without producing output)/.test(text)
 }
 const RESCAN_TICKS = 15
 // Consecutive failures before retrying only on the periodic rescan.
@@ -1064,8 +1059,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
     if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
     if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
-    if (!shouldDropMonitorExpiry(e.text, state.monitors.keys(), state.liveRoots, Boolean(state.script))) return next(e)
-    return { drop: 'Codex tasks monitor expiry is re-armed by the pane' }
+    if (!shouldDropMonitorExpiry(e.text, state.ownedMonitors)) return next(e)
+    return { drop: 'Codex tasks monitor expiry needs no director action' }
   })
   // A dispatch creates its job in whatever repository the brief names; waiting
   // for the next rescan would show it up to half a minute late.
