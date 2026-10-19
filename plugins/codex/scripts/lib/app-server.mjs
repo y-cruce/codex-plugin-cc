@@ -11,7 +11,6 @@ import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
 import { spawn } from "node:child_process";
-import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
@@ -88,6 +87,9 @@ class AppServerClientBase {
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
   request(method, params) {
+    if (this.exitResolved) {
+      return Promise.reject(this.exitError ?? new Error("codex app-server connection closed."));
+    }
     if (this.closed) {
       throw new Error("codex app-server client is closed.");
     }
@@ -120,7 +122,7 @@ class AppServerClientBase {
   }
 
   handleLine(line) {
-    if (!line.trim()) {
+    if (this.exitResolved || !line.trim()) {
       return;
     }
 
@@ -225,9 +227,17 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleExit(detail);
     });
 
-    this.readline = readline.createInterface({ input: this.proc.stdout });
     this.reading = (async () => {
-      for await (const line of this.readline) await this.handleLine(line);
+      for await (const chunk of this.proc.stdout) {
+        this.lineBuffer += chunk;
+        let newlineIndex;
+        // JSONL uses LF; readline also splits strings at Unicode separators.
+        while ((newlineIndex = this.lineBuffer.indexOf("\n")) !== -1) {
+          const line = this.lineBuffer.slice(0, newlineIndex);
+          this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+          await this.handleLine(line);
+        }
+      }
     })().catch((error) => this.handleExit(error));
 
     const initialized = await this.request("initialize", {
@@ -245,10 +255,6 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     }
 
     this.closed = true;
-
-    if (this.readline) {
-      this.readline.close();
-    }
 
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.end();

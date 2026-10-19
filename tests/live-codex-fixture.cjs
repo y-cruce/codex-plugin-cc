@@ -59,7 +59,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       reply({ thread: value });
       break;
     }
-    case "thread/name/set": reply({}); break;
+    case "thread/name/set":
+      if (p.name === "invalid-jsonl") process.stdout.write("{invalid JSON}\n");
+      else reply({});
+      break;
     // A loaded thread deliberately ignores resume overrides, like a subscribed real thread.
     case "thread/resume": reply({ thread }); break;
     case "turn/start": {

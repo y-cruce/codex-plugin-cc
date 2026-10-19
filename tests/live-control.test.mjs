@@ -52,6 +52,19 @@ async function setup(t, timeoutMs = 600000, idleTimeoutMs = 600000) {
   return { repo, env, owner, connect, thread, start, notifications, cli, requests, broker, closed, endpoint, pidFile, socketDir };
 }
 
+test("broker rejects queued and later requests after app-server protocol failure", async (t) => {
+  const h = await setup(t);
+  const control = await h.connect();
+  const failure = /Failed to parse codex app-server JSONL/;
+  const requests = [
+    h.owner.request("thread/name/set", { threadId: h.thread.id, name: "invalid-jsonl" }),
+    h.owner.request("thread/start", { cwd: h.repo })
+  ];
+  await Promise.all(requests.map((request) => assert.rejects(within(request, 1000, "failed broker request"), failure)));
+  await assert.rejects(within(control.request("thread/resume", { threadId: h.thread.id }),
+    1000, "later broker request"), failure);
+});
+
 test("steering from another socket preserves FIFO and the owning event stream", async (t) => {
   const h = await setup(t);
   const { turn } = await h.start("hold");
