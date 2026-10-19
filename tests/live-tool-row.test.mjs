@@ -63,7 +63,7 @@ describe('live ToolUse row', () => {
         ['◆ ↓ Director reply', answer, 0, 'cyan'],
         ['◇ ↑ Executor notification', notification, 0, 'cyan'],
         ['◆ ↓ Director message', controlText, 0, 'cyan'],
-        ['◆ ↓ Director interrupt', controlText, 0, undefined],
+        ['◆ ↓ Director interrupt', controlText, 0, 'cyan'],
       ]) {
         const block = nodes.find(node => textOf(node).startsWith(title));
         assert.ok(block, title);

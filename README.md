@@ -203,9 +203,8 @@ omit command output and output preview controls.
 
 The pane and inline traces use the same block layout for `◆ ↓ Director reply`,
 `◆ ↓ Director message`, `◆ ↓ Director interrupt` and `◇ ↑ Executor notification`.
-Headings align on the left and bodies indent two columns. Director replies, messages
-and executor notifications use cyan for both headings and bodies, including completed
-notification cards. Interrupts use the default color. Messages retain
+Headings align on the left and bodies indent two columns. All four use cyan for both
+headings and bodies, including completed notification cards. Messages retain
 their complete text and wrap in traces.
 Completed, failed and cancelled tasks stay in the pane for three minutes after ending.
 Completed Markdown tables use bordered columns with wrapping cells, or labelled
@@ -216,8 +215,7 @@ compaction completes or the turn or task ends.
 
 面板与内联轨迹用统一块式布局显示 `◆ ↓ Director reply`、`◆ ↓ Director message`、
 `◆ ↓ Director interrupt` 和 `◇ ↑ Executor notification`。英文标题左对齐，正文统一缩进两列；
-主 agent 回复、直接消息和执行者通知的标题与正文统一使用青色，已结束的通知卡片也使用同一样式；
-中断消息使用默认正文色。
+四类的标题与正文统一使用青色，已结束的通知卡片也使用同一样式。
 消息保留完整正文，在轨迹中换行显示。
 已完成、失败和取消的任务在结束后保留三分钟，再从面板隐藏。
 完整 Markdown 表格显示为带边框且单元格换行的分列布局；窗口过窄时按列名逐条展示。
