@@ -93,7 +93,9 @@ test("Codex port queues a notification emitted before session creation returns",
   assert.equal(event.done, false);
   assert.equal(event.value.type, "source.unknown");
   assert.equal(event.value.identity.sessionId, "early-session");
-  assert.deepEqual(requests.map((request) => request.method), ["thread/start"]);
+  // The skill reload goes first and its refusal does not stop the session.
+  assert.deepEqual(requests.map((request) => request.method), ["skills/list", "thread/start"]);
+  assert.deepEqual(requests[0].params, { cwds: [process.cwd()], forceReload: true });
   await port.close();
   assert.equal((await iterator.next()).done, true);
 });

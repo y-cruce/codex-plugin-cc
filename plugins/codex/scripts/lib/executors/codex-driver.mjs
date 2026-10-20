@@ -37,7 +37,22 @@ export function buildCodexTurnInput(prompt) {
   return [{ type: "text", text: String(prompt ?? ""), text_elements: [] }];
 }
 
+// The app-server caches each directory's skill list for its whole life, and the
+// shared broker keeps one app-server running across many tasks: a skill edited
+// on disk (codex-executor is a symlink into a checkout, which the app-server's
+// own watcher does not see) stayed stale until the broker restarted. A human
+// would type the reload command; here every thread start and resume asks for
+// it. An app-server without `skills/list` simply refuses, and the task goes on.
+export async function reloadCodexSkills(client, cwd) {
+  try {
+    await client.request("skills/list", { cwds: [cwd], forceReload: true });
+  } catch {
+    // Older Codex, or a reload that failed: the cached list is still usable.
+  }
+}
+
 export async function startCodexSession(client, cwd, options = {}) {
+  await reloadCodexSkills(client, cwd);
   const response = await client.request("thread/start", threadParams(cwd, options));
   const sessionId = response.thread.id;
   if (options.threadName) {
@@ -51,7 +66,8 @@ export async function startCodexSession(client, cwd, options = {}) {
   return response;
 }
 
-export function resumeCodexSession(client, sessionId, cwd, options = {}) {
+export async function resumeCodexSession(client, sessionId, cwd, options = {}) {
+  await reloadCodexSkills(client, cwd);
   return client.request("thread/resume", {
     threadId: sessionId,
     cwd,
