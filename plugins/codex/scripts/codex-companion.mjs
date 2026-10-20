@@ -70,6 +70,8 @@ import {
   renderStoredJobResult,
   renderCancelReport,
   renderJobStatusReport,
+  renderBriefJobStatus,
+  renderBriefStatusReport,
   renderSetupReport,
   renderStatusReport,
   renderTaskResult
@@ -1135,7 +1137,7 @@ function parseStallMs(options) {
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "timeout-ms", "poll-interval-ms", "stall-ms"],
-    booleanOptions: ["json", "all", "wait"]
+    booleanOptions: ["json", "all", "wait", "brief"]
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1162,7 +1164,8 @@ async function handleStatus(argv) {
     const stalledLine = snapshot.stalled
       ? `STALLED job=${snapshot.job.id} thread=${snapshot.job.threadId ?? "unknown"} ${snapshot.job.progressAgeMinutes}m without progress\n`
       : "";
-    outputCommandResult(snapshot, `${stalledLine}${renderJobStatusReport(snapshot.job)}`, options.json);
+    const rendered = options.brief ? renderBriefJobStatus(snapshot.job) : renderJobStatusReport(snapshot.job);
+    outputCommandResult(snapshot, `${stalledLine}${rendered}`, options.json && !options.brief);
     return;
   }
 
@@ -1176,6 +1179,10 @@ async function handleStatus(argv) {
     job.live = await liveStatus(report.workspaceRoot, job);
     if (job.live?.questions?.length) job.phase = "waiting-for-answer";
     else if (job.live?.interrupting) job.phase = "interrupting";
+  }
+  if (options.brief) {
+    outputResult(renderBriefStatusReport(report), false);
+    return;
   }
   outputResult(renderStatusPayload(report, options.json), options.json);
 }

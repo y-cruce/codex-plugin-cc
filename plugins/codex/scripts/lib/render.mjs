@@ -1,3 +1,4 @@
+import { questionText } from "./job-event-model.mjs";
 function severityRank(severity) {
   switch (severity) {
     case "critical":
@@ -525,4 +526,71 @@ export function renderCancelReport(job) {
   lines.push("- Check `/codex:status` for the updated queue.");
 
   return `${lines.join("\n").trimEnd()}\n`;
+}
+
+// What a director reads between events: one line per job it may still act on,
+// and for one job only what it can act on now. The full report (config, every
+// thread the repository ever ran, progress previews) is for a person or a
+// debugging pass; read by an agent with several jobs out, it filled the
+// context with tens of thousands of characters nobody needed.
+const BRIEF_FINISHED = 5;
+
+function briefClip(text, limit) {
+  const flat = String(text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+}
+
+function briefJobLine(job) {
+  const active = job.status === "queued" || job.status === "running";
+  const parts = [`${formatJobId(job)} ${job.status || "unknown"}`];
+  if (job.kindLabel) parts.push(job.kindLabel);
+  if (active && job.phase && job.phase !== job.status) parts.push(job.phase);
+  const time = active ? job.elapsed : job.duration;
+  if (time) parts.push(time);
+  if (active && job.progressAgeMinutes != null) parts.push(`last progress ${job.progressAgeMinutes}m ago`);
+  if (job.ownerAlive === false && active) parts.push("owner exited");
+  const live = job.live && !job.live.unavailable ? job.live : null;
+  for (const question of live?.questions ?? []) parts.push(`waiting for answer request=${question.requestId}`);
+  if (live?.notifications?.length) parts.push(`${live.notifications.length} undelivered note(s)`);
+  if (live?.pendingMessages?.length) parts.push(`${live.pendingMessages.length} pending message(s)`);
+  if (live?.interrupting) parts.push("interrupting");
+  if (job.otherSession) parts.push("other session");
+  if (job.errorMessage && !active) parts.push(`error: ${briefClip(job.errorMessage, 160)}`);
+  return parts.join(" · ");
+}
+
+export function renderBriefStatusReport(report) {
+  const jobs = report.threads ?? [...report.running, report.latestFinished, ...report.recent].filter(Boolean);
+  const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const finished = jobs.filter((job) => job.status !== "queued" && job.status !== "running" && !job.otherSession);
+  const shown = finished.slice(0, BRIEF_FINISHED);
+  const lines = [];
+  if (active.length) lines.push("Active:", ...active.map((job) => `- ${briefJobLine(job)}`));
+  else lines.push("No active jobs.");
+  if (shown.length) lines.push("Recently finished:", ...shown.map((job) => `- ${briefJobLine(job)}`));
+  if (finished.length > shown.length) lines.push(`(${finished.length - shown.length} older finished job(s) not shown)`);
+  return `${lines.join("\n")}\n`;
+}
+
+export function renderBriefJobStatus(job) {
+  const lines = [briefJobLine(job)];
+  const active = job.status === "queued" || job.status === "running";
+  if (job.errorMessage && active) lines.push(`Error: ${briefClip(job.errorMessage, 300)}`);
+  if (job.live?.unavailable) lines.push(`Live: ${briefClip(job.live.unavailable, 200)}`);
+  else if (job.live) {
+    for (const question of job.live.questions ?? []) {
+      const ids = (question.questions ?? []).map((item) => item.id).filter(Boolean);
+      lines.push(`QUESTION request=${question.requestId}${ids.length ? ` ids=${ids.join(",")}` : ""} ${questionText(question.questions, question.message)}`);
+    }
+    for (const note of job.live.notifications ?? []) lines.push(`Note: ${briefClip(note.message, 400)}`);
+    for (const message of job.live.pendingMessages ?? []) {
+      lines.push(`Pending message ${message.id} (${message.status}): ${briefClip((message.input ?? []).map((item) => item.text).join(" "), 160)}`);
+    }
+    if (job.live.error) lines.push(briefClip(job.live.error, 300));
+  }
+  if (active && job.progressPreview?.length) {
+    lines.push("Recent:", ...job.progressPreview.slice(-3).map((line) => `  ${briefClip(line, 160)}`));
+  }
+  if (!active) lines.push(`Output: result ${job.id}`);
+  return `${lines.join("\n")}\n`;
 }

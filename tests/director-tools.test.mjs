@@ -111,9 +111,11 @@ test("result and status run the plugin's companion directly", async () => {
   await h.call("result", { job: "j", cwd: "/repo" });
   await h.call("status", { job: "j", cwd: "/repo" });
   await h.call("status", { cwd: "/repo" });
+  await h.call("status", { cwd: "/repo", detail: true });
   assert.deepEqual(h.runs.map((run) => run.argv), [
     ["node", COMPANION, "result", "j", "--cwd", "/repo"],
-    ["node", COMPANION, "status", "j", "--cwd", "/repo", "--json"],
+    ["node", COMPANION, "status", "j", "--cwd", "/repo", "--brief"],
+    ["node", COMPANION, "status", "--cwd", "/repo", "--brief"],
     ["node", COMPANION, "status", "--cwd", "/repo", "--json"],
   ]);
 });

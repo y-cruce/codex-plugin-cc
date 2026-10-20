@@ -85,9 +85,11 @@ const TOOLS = [
   },
   {
     name: 'status',
-    description: 'A job\'s state as JSON, including job.live.questions with each pending request and its question ids: '
-      + 'the companion\'s status command. Leave `job` out to list the jobs in the repository.',
-    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD }, required: ['cwd'] },
+    description: 'Short text state of the jobs: one line per active job and the last few finished ones, or with `job` '
+      + 'that job\'s line, its pending questions (request, ids, full text and options), undelivered notes and its last '
+      + 'progress lines. Events already wake you, so call it only to check one job you have a reason to doubt. '
+      + '`detail: true` returns the companion\'s full JSON (config, every thread, live controls): large, for debugging only.',
+    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD, detail: { type: 'boolean' } }, required: ['cwd'] },
   },
 ] as const
 
@@ -173,7 +175,8 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'result':
       return run($, context, ['node', context.companion, 'result', job, '--cwd', cwd], cwd, 60_000)
     case 'status':
-      return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', cwd, '--json'], cwd, 30_000)
+      return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', cwd,
+        input.detail === true ? '--json' : '--brief'], cwd, 30_000)
   }
   return { deny: `unknown tool ${name}` }
 }
