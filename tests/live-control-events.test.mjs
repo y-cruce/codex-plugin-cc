@@ -89,7 +89,7 @@ test("task thread starts declare notify_director and initialize enables experime
   assert.equal(starts[0].params.dynamicTools, undefined);
   assert.deepEqual(starts[1].params.dynamicTools, [{
     type: "function", name: "notify_director",
-    description: "Send a short note to the director agent that started you, without stopping your work. Use it only for conclusions that change the plan, blockers you are working around, or a finished phase the director could act on now. Do not report routine progress. Returns immediately; the director does not reply through this tool. Notes longer than 400 characters are rejected.",
+    description: "Send a short note to the director agent that started you, without stopping your work. Use it only when the director must act while you keep working (a blocker it has to clear, a decision or scope change it must approve, a finding that makes the brief wrong) or when another running task needs something you learned and the director has to relay it. Never send progress, finished steps or findings that only feed your final answer; those belong in your final message. Returns immediately; the director does not reply through this tool. Notes longer than 400 characters are rejected.",
     inputSchema: { type: "object", properties: { message: { type: "string", maxLength: 400 } }, required: ["message"], additionalProperties: false },
     deferLoading: false
   }]);
