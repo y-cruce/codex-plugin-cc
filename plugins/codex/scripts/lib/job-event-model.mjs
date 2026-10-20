@@ -18,6 +18,34 @@ export function questionIds(fields) {
   return ids.length ? ` ids=${ids.join(",")}` : "";
 }
 
+// The whole of a structured question on one line: every question with its id
+// when there are several, and every option with the trade-off its description
+// gives. The director answers from this line alone, without the trace the
+// executor built the question from, so it is cut only at a length no real
+// question reaches. Accepts the executor's questions ({ question, options })
+// and the canonical fields ({ description, title, options }).
+export const QUESTION_TEXT_LIMIT = 1500;
+export function questionText(questions, message, limit = QUESTION_TEXT_LIMIT) {
+  const flat = (text) => String(text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
+  // Fields that carry nothing but their ids leave the wording to the message.
+  const list = (questions ?? []).filter(Boolean);
+  const said = list.some((question) => question.question ?? question.description ?? question.title ?? question.options?.length);
+  const text = said
+    ? list.map((question) => {
+      const body = flat(question.question ?? question.description ?? question.title);
+      const options = (question.options ?? []).map((option) => {
+        const label = flat(option?.label ?? option?.value ?? option);
+        const detail = flat(option?.description);
+        return detail ? `${label} (${detail})` : label;
+      }).filter(Boolean);
+      return [list.length > 1 ? `[${question.id ?? "question"}]` : "", body,
+        options.length ? `Options: ${options.join("; ")}.` : ""].filter(Boolean).join(" ");
+    }).join(" | ")
+    : flat(message);
+  const characters = [...text];
+  return characters.length > limit ? `${characters.slice(0, limit - 1).join("")}…` : text;
+}
+
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
@@ -122,7 +150,7 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       text = `Tokens: input=${usage.inputTokens ?? 0} output=${usage.outputTokens ?? 0} cached=${usage.cachedInputTokens ?? 0}`;
       break;
     }
-    case "question.opened": text = `Question request=${p.requestId}${questionIds(p.fields)}: ${p.message}`; break;
+    case "question.opened": text = `Question request=${p.requestId}${questionIds(p.fields)}: ${questionText(p.fields, p.message)}`; break;
     case "question.resolved": text = `director → answer delivered request=${p.requestId}`; break;
     case "question.closed": text = `Question resolved request=${p.requestId}`; break;
     case "director.notified": text = `notify_director: ${p.message ?? ""}`; break;

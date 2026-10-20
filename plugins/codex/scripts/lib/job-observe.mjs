@@ -6,7 +6,7 @@ import { resolveStateDir } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { renderStoredJobResult } from "./render.mjs";
 import { readHistory, cursorFor, cleanupHistory } from "./job-event-store.mjs";
-import { createLiveView, questionIds, renderJobEvent } from "./job-event-model.mjs";
+import { createLiveView, questionIds, questionText, renderJobEvent } from "./job-event-model.mjs";
 import { ObservationClient } from "./observation-client.mjs";
 import { readObservationJson, observationRoots, observationJobs, observationThreads, resolveObservationRoot } from "./observation-paths.mjs";
 import { liveStatus } from "./live-commands.mjs";
@@ -82,7 +82,9 @@ async function eventExit(event, job, until, location, page) {
     if (Array.isArray(live?.questions) && !live.questions.some((question) => String(question.requestId) === String(p.requestId))) return null;
     if (!Array.isArray(live?.questions) && await inputResolvedLater(event, job, location, page)) return null;
     const first = await claimQuestion(location.stateDir, job.id, p.requestId);
-    const text = oneLine(p.message ?? (event.type === "permission.requested" ? `Permission requested: ${p.tool?.title}` : "")).slice(0, 200);
+    const message = p.message ?? (event.type === "permission.requested" ? `Permission requested: ${p.tool?.title}` : "");
+    // The first report carries the whole question; a repeat only names it.
+    const text = first ? questionText(event.type === "question.opened" ? p.fields : [], message) : oneLine(message).slice(0, 200);
     const ids = questionIds(p.fields);
     return first ? `QUESTION ${prefix(job)} request=${p.requestId}${ids} ${text}`
       : `QUESTION_PENDING ${prefix(job)} request=${p.requestId}${ids} still unanswered: ${text}`;

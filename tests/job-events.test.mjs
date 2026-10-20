@@ -258,16 +258,29 @@ test("a question line names the ids an answer must be keyed by", async () => {
   const lines = await monitor([{ running: [job] }], {
     status: async () => ({ questions: [{ requestId: "2", questions: [{ id: "scope", question: "Which scope?" }, { id: "depth" }] }] })
   });
-  assert.deepEqual(lines, ["QUESTION job=job-1 request=2 ids=scope,depth Which scope?"]);
+  assert.deepEqual(lines, ["QUESTION job=job-1 request=2 ids=scope,depth [scope] Which scope? | [depth]"]);
 });
 
-test("events reports each request once and limits the first question to one line of 200 characters", async () => {
-  const lines = await monitor([{ running: [job] }, { running: [job] }], {
-    status: async () => ({ questions: [{ requestId: "request-1", questions: [
-      { question: `Choose\n${"x".repeat(300)}` }, { question: "Do not show this" }
+test("a question line carries every question with its options and their trade-offs", async () => {
+  const lines = await monitor([{ running: [job] }], {
+    status: async () => ({ questions: [{ requestId: "3", questions: [
+      { id: "source", header: "Source", question: "Task X, step 2: config.ts:40 and env disagree.\nWhich wins?",
+        options: [{ label: "Env (Recommended)", description: "Matches production" }, { label: "Config", description: "Keeps tests as they are" }] },
+      { id: "scope", question: "Fix callers too?", options: [{ label: "Yes" }, { label: "No" }] }
     ] }] })
   });
-  assert.deepEqual(lines, [`QUESTION job=job-1 request=request-1 Choose ${"x".repeat(193)}`]);
+  assert.deepEqual(lines, ["QUESTION job=job-1 request=3 ids=source,scope [source] Task X, step 2: config.ts:40 and env disagree. Which wins? "
+    + "Options: Env (Recommended) (Matches production); Config (Keeps tests as they are). | [scope] Fix callers too? Options: Yes; No."]);
+});
+
+test("events reports each request once, whole but on one line, and cut only past 1500 characters", async () => {
+  const lines = await monitor([{ running: [job] }, { running: [job] }], {
+    status: async () => ({ questions: [{ requestId: "request-1", questions: [
+      { id: "a", question: `Choose\n${"x".repeat(300)}` }, { id: "b", question: "Second" }
+    ] }, { requestId: "request-2", questions: [{ question: "y".repeat(2000) }] }] })
+  });
+  assert.deepEqual(lines, [`QUESTION job=job-1 request=request-1 ids=a,b [a] Choose ${"x".repeat(300)} | [b] Second`,
+    `QUESTION job=job-1 request=request-2 ${"y".repeat(1499)}…`]);
 });
 
 test("events omits answered questions and marks notifications with pending requests", async () => {
@@ -304,7 +317,7 @@ test("events reminds pending questions at two-minute intervals and stops when re
   });
   const text = `Choose ${"x".repeat(193)}`;
   assert.deepEqual(lines, [
-    `QUESTION job=job-1 request=request-1 ${text}`,
+    `QUESTION job=job-1 request=request-1 [question] Choose ${"x".repeat(300)} | [question] Do not show this`,
     `QUESTION_PENDING job=job-1 request=request-1 2m unanswered, expires in 8m: ${text}`,
     `QUESTION_PENDING job=job-1 request=request-1 4m unanswered, expires in 6m: ${text}`,
     "DONE job=job-1 thread=thread-1"

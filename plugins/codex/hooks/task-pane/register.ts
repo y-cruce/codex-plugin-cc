@@ -63,7 +63,7 @@ type State = {
   unreadable: Map<string, number>
   owners: Map<string, string[]>
   rootIds: Map<string, Set<string>>
-  pending: { jobId: string; cwd: string; text: string }[]
+  pending: { jobId: string; cwd: string; text: string; type?: string }[]
   worker: string
   toEnd: boolean
   pinned: boolean
@@ -82,6 +82,9 @@ const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
 const ACTIONABLE = ['director.notified', 'question.opened', 'job.completed', 'job.failed', 'job.cancelled']
+// A question is answered from its line alone, so it keeps its options and the
+// context the executor wrote into it; other lines stay short.
+const QUESTION_CLIP = 1600
 
 // What wakes the director is the event, not its body: a question and an ending
 // both arrive with no text of their own, and what they are about lives in the
@@ -98,7 +101,7 @@ export function pushLine(
   const detail = (event.text ?? '').trim()
     || (event.type === 'question.opened' ? view?.pendingQuestion?.text ?? '' : '')
     || (event.type.startsWith('job.') ? view?.lastMessage?.text ?? '' : '')
-  return `${label} · ${event.type}${detail ? `: ${clip(detail, 300)}` : ''}`
+  return `${label} · ${event.type}${detail ? `: ${clip(detail, event.type === 'question.opened' ? QUESTION_CLIP : 300)}` : ''}`
 }
 
 export function shouldDropMonitorExpiry(text: string, owned: ReadonlySet<string>): boolean {
@@ -791,7 +794,7 @@ async function pollOnce($: EngineInterface, state: State) {
       // A plugin's own submit skips this plugin's prompt.submit hooks, so the
       // text itself is what the director reads; keep it short and let it fetch
       // the detail with the companion.
-      const result = await $.prompt.submit({ text: `Codex tasks\n${mine.slice(0, 6).map(line => clip(line.text, 200)).join('\n')}` })
+      const result = await $.prompt.submit({ text: `Codex tasks\n${mine.slice(0, 6).map(line => clip(line.text, line.type === 'question.opened' ? QUESTION_CLIP : 200)).join('\n')}` })
       // The host refuses a submit made too soon after the plugin's last one.
       // Carry those lines to the next poll rather than failing the round: the
       // cursors this round advanced are committed either way, so a refusal must

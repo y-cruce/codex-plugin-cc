@@ -9,7 +9,7 @@ import { resolveStateDir } from "./state.mjs";
 import { claimQuestion } from "./question-report.mjs";
 import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
 import { atomicJson } from "./job-event-store.mjs";
-import { questionIds } from "./job-event-model.mjs";
+import { questionIds, questionText } from "./job-event-model.mjs";
 
 export const DEFAULT_QUESTION_REMIND_MS = 120000;
 
@@ -109,7 +109,10 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
           continue;
         }
         const first = await claim(report.workspaceRoot ?? cwd, job.id, question.requestId);
-        const text = oneLine(question.message ?? question.questions?.[0]?.question).slice(0, 200);
+        // The first report carries the whole question; a repeat only has to say
+        // which request is still open.
+        const text = first ? questionText(question.questions, question.message)
+          : oneLine(question.message ?? question.questions?.[0]?.question).slice(0, 200);
         await writeLine(first ? `QUESTION ${jobPrefix} request=${question.requestId}${ids} ${text}`
           : `QUESTION_PENDING ${jobPrefix} request=${question.requestId}${ids} still unanswered: ${text}`);
         lastActiveAt = now();

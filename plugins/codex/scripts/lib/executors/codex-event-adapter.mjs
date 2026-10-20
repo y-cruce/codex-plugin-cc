@@ -199,7 +199,8 @@ function payloadFor(type, message, receivedAt) {
       return { requestId: String(p.requestId), message: questions.map((question) => question.question).join("\n"), mode: "form",
         fields: questions.map((question) => ({ id: String(question.id ?? question.header ?? "question"), title: question.header ?? null,
           description: question.question ?? null, required: true, kind: question.options ? "single_select" : "text",
-          ...(question.options ? { options: question.options.map((option) => ({ value: option.label ?? option.value ?? String(option), label: option.label ?? option.value ?? String(option) })) } : {}) })),
+          ...(question.options ? { options: question.options.map((option) => ({ value: option.label ?? option.value ?? String(option), label: option.label ?? option.value ?? String(option),
+            ...(option.description ? { description: option.description } : {}) })) } : {}) })),
         url: null, openedAt: receivedAt,
         expiresAt: p.expiresAt === undefined ? new Date(Date.parse(receivedAt) + DEFAULT_INPUT_TIMEOUT_MS).toISOString()
           : p.expiresAt === null ? null : new Date(typeof p.expiresAt === "number" ? p.expiresAt : Date.parse(p.expiresAt)).toISOString() };
