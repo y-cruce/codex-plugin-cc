@@ -83,6 +83,10 @@ type State = {
 }
 
 const PANE = 'codex_tasks'
+// The plugin's channel server (.mcp.json) as Claude Code names it, and the
+// marker its probe carries (scripts/director-channel.mjs).
+const CHANNEL_SERVER = 'plugin:codex:director'
+const CHANNEL_PROBE = 'codex-director-channel-probe'
 const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
@@ -299,12 +303,12 @@ async function channelBase($: EngineInterface, state: State): Promise<string | n
 
 // With the channel on, the lines this pane would push go to the channel
 // server instead, which delivers them into the running turn or wakes an idle
-// session, so no Monitor is armed. It is on only when Claude Code was started
-// with this plugin named in --channels, which the server reads off Claude
-// Code's command line before it leaves its ready file.
+// session, so no Monitor is armed. It is on only once a probe the server sent
+// has come back through prompt.submit (see below): that is the one proof that
+// Claude Code delivers this server's messages.
 async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number) {
   const base = await channelBase($, state)
-  const on = Boolean(base && await $.fs.exists(`${base}.ready.json`))
+  const on = Boolean(base && await $.fs.exists(`${base}.confirmed.json`))
   if (on && !state.channelOn) stopMonitors($, state)
   state.channelOn = on
   if (!on) await ensureMonitors($, state, live, now)
@@ -1107,6 +1111,11 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'channel' && e.origin.server === CHANNEL_SERVER && e.text.includes(CHANNEL_PROBE)) {
+      const base = await channelBase($, state)
+      if (base) await $.fs.write(`${base}.confirmed.json`, JSON.stringify({ at: await $.clock.now() }))
+      return { drop: 'Codex director channel confirmed' }
+    }
     if (e.origin.kind !== 'task-notification') return next(e)
     const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
     if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
