@@ -1156,7 +1156,7 @@ test("a channel goal hold stops after the last job ends by status or reconciliat
   }
 });
 
-test("a stale running index whose job file is gone does not hold /goal", async () => {
+test("a stale running index does not hold /goal, and a goal turn ended with no job live keeps the goal", async () => {
   const calls = [];
   const now = Date.now();
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
@@ -1169,6 +1169,12 @@ test("a stale running index whose job file is gone does not hold /goal", async (
   await pane.tick();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls.filter(request => request.tool === "Bash"), []);
+  // Other background work put the goal's check off; it is still on.
+  await pane.turn();
+  pane.list([{ ...pane.listing[0], historyAvailable: true, directorPush: true, live: true }]);
+  await pane.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
 });
 
 test("reload finds the existing session goal hold and stops it without starting a second shell", async () => {
@@ -1201,7 +1207,7 @@ test("reload finds the existing session goal hold and stops it without starting 
   assert.ok(dropped.drop);
 });
 
-test("a goal cleared, or ended on an answer with no hold up, drops the hold", async () => {
+test("a goal cleared drops the hold, and a turn's end leaves it", async () => {
   const calls = [];
   const now = Date.now();
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
@@ -1213,7 +1219,6 @@ test("a goal cleared, or ended on an answer with no hold up, drops the hold", as
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.filter((request) => request.tool === "Bash").length, 1);
-  // Deferred: the chain ended with the hold up, so the goal is still on.
   await pane.turn();
   await pane.goal("clear", "Goal cleared: ship it");
   await new Promise((resolve) => setImmediate(resolve));

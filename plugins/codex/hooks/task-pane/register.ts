@@ -382,9 +382,10 @@ function releaseHold($: EngineInterface, state: State) {
 // The engine tells a plugin nothing of a goal, so the pane follows what it
 // can see: `/goal <condition>` sets one, `/goal clear` (or its synonyms) drops
 // it, and a resumed session takes the last of those from its transcript. A
-// goal also ends unseen once met; that shows as a chain of turns that ended
-// on an answer with no hold to wait on, since a goal not met would have gone
-// on. Missing one only leaves a hold up while jobs run, as a Monitor was.
+// goal also ends unseen once met, and the turn it ends on looks like one whose
+// check other background work put off: reading that as met dropped a goal
+// still on, and the next job ran with no hold while the goal spun. A met goal
+// kept only leaves a hold up while jobs run, as a Monitor was.
 const GOAL_CLEAR = ['clear', 'stop', 'off', 'reset', 'none', 'cancel']
 
 export function goalCommand(args: string, text = ''): boolean | undefined {
@@ -1292,7 +1293,6 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   })
   on('turn.complete', ($, e, next) => {
     if (!e.agentId) {
-      if (e.reason === 'answer' && state.goal && !state.hold) setGoal($, state, false)
       state.busy = false
       $.clock.after(0, () => { void poll($, state) })
     }
