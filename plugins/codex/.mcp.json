@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "director": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/director-channel.mjs"]
+    }
+  }
+}

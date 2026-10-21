@@ -75,6 +75,11 @@ type State = {
   ownedMonitors: Set<string>
   leaving: boolean
   liveRoots: Set<string>
+  // The director channel's files for this Claude Code process (see
+  // scripts/director-channel.mjs), '' until found, null where there is none.
+  channel: string | null | ''
+  channelOn: boolean
+  channelBatches: number
 }
 
 const PANE = 'codex_tasks'
@@ -279,6 +284,38 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
       $.ui.log(`Codex tasks monitor ${root}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     })
   }
+}
+
+// The channel server is a child of this Claude Code process, as is every
+// command the pane runs, so their shared parent names the server's files.
+async function channelBase($: EngineInterface, state: State): Promise<string | null> {
+  if (state.channel !== '') return state.channel
+  const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 2000 }).catch(() => null)
+  const pid = ran?.exitCode === 0 ? ran.stdout.trim() : ''
+  const tmp = ((await $.env.get('TMPDIR')) ?? '').replace(/\/+$/, '') || '/tmp'
+  state.channel = /^\d+$/.test(pid) ? `${tmp}/codex-channel/${pid}` : null
+  return state.channel
+}
+
+// With the channel on, the lines this pane would push go to the channel
+// server instead, which delivers them into the running turn or wakes an idle
+// session, so no Monitor is armed. It is on only when Claude Code was started
+// with this plugin named in --channels, which the server reads off Claude
+// Code's command line before it leaves its ready file.
+async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number) {
+  const base = await channelBase($, state)
+  const on = Boolean(base && await $.fs.exists(`${base}.ready.json`))
+  if (on && !state.channelOn) stopMonitors($, state)
+  state.channelOn = on
+  if (!on) await ensureMonitors($, state, live, now)
+}
+
+// One file per batch, named to sort in the order written; the server reads and
+// removes each.
+async function sendToChannel($: EngineInterface, state: State, lines: State['pending']) {
+  state.channelBatches += 1
+  const name = `${String(await $.clock.now()).padStart(15, '0')}-${String(state.channelBatches).padStart(6, '0')}.json`
+  await $.fs.write(`${state.channel}.spool/${name}`, JSON.stringify({ lines }))
 }
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
@@ -658,7 +695,7 @@ async function pollOnce($: EngineInterface, state: State) {
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
     state.liveRoots = new Set(found.map(entry => entry.cwd))
-    await ensureMonitors($, state, state.liveRoots, now)
+    await routeEvents($, state, state.liveRoots, now)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
@@ -719,7 +756,11 @@ async function pollOnce($: EngineInterface, state: State) {
             // Left unclaimed: the reconciliation below still settles the ending.
             if (event.type.startsWith('job.') && historical(event.seq!)) continue
             const line = pushLine(job.label ?? job.id, event, view)
-            if (announce && line) lines.push({ jobId: job.id, cwd, text: line, type: event.type })
+            // An ending read in the same poll that first lists the job as over
+            // is still news if this pane saw the job before: claiming it here
+            // without a line left the reconciliation below nothing to report.
+            const ending = event.type.startsWith('job.') && !first && !foreign
+            if ((announce || ending) && line) lines.push({ jobId: job.id, cwd, text: line, type: event.type })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -790,7 +831,15 @@ async function pollOnce($: EngineInterface, state: State) {
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.
     state.pending = mine.slice(-12)
-    if (state.push && mine.length && !state.busy) {
+    if (state.push && mine.length && state.channelOn) {
+      try {
+        await sendToChannel($, state, mine)
+        if (stale()) return
+        state.pending = []
+      } catch (error) {
+        $.ui.log(`Codex tasks channel: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+      }
+    } else if (state.push && mine.length && !state.busy) {
       // A plugin's own submit skips this plugin's prompt.submit hooks, so the
       // text itself is what the director reads; keep it short and let it fetch
       // the detail with the companion.
@@ -1006,7 +1055,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
-    liveRoots: new Set<string>(),
+    liveRoots: new Set<string>(), channel: '', channelOn: false, channelBatches: 0,
   }
 
   on('session.start', async ($, e, next) => {

@@ -101,6 +101,18 @@ From 1.4.48, when code-director's `dispatch.sh` is installed at `~/.claude/skill
 
 `dispatch.sh` 安装在上述位置时，插件为主 agent 注册 `mcp__codex__dispatch`、`message`、`answer`、`result`、`status` 五个工具，会话开始即可直接调用，不必先经过 ToolSearch。派单的各个头部字段变成结构化参数，brief 通过 stdin 交给 `dispatch.sh`，不再经过 shell 命令行；返回的内容与原来相同，任务面板在下一次轮询时显示该任务。纠正消息和答案会先写入临时文件，执行完毕后删除。所有工具都使用本插件自带的 companion。没有这些工具时，原来的 Bash 用法照常可用。
 
+### Director channel
+
+From 1.4.58 the plugin also ships a [channel](https://code.claude.com/docs/en/channels) MCP server, `director`. Start Claude Code with the plugin named among its channels:
+
+```bash
+claude --dangerously-load-development-channels plugin:codex@y-cruce-codex
+```
+
+This marketplace is not on the approved channels allowlist, so it has to be the development flag, and Claude Code asks you to confirm it at every start. Then the lines the tasks pane would otherwise hand the director reach the session as `<channel source="plugin:codex:director" event="job_completed" job="task-…">` messages. That covers a job completing, failing or being cancelled, a question it asks, and a note it sends. Such a message joins a running turn at its next step without interrupting it, and starts a turn when the session is idle. A draft in the prompt is left alone. The pane stops arming Monitors, so nothing expires after thirty minutes or has to be re-armed. Channels work in interactive sessions only. `claude -p`, the SDK, and a session started without the flag keep the Monitor route.
+
+从 1.4.58 起，插件自带一个 channel MCP 服务器 `director`。用上面的参数启动 Claude Code 后，任务面板原本要推给主 agent 的行会改为以 `<channel>` 消息送达，包括任务完成、失败、取消、提问和 Codex 发来的通知。这些消息在回合进行中会插到下一步，不打断当前操作；会话空闲时会自己起一个回合；输入框里的草稿不受影响。面板不再挂 Monitor，也就没有 30 分钟上限，不用重挂。channel 只在交互模式下生效，`-p`、SDK 和不带该参数启动的会话仍走 Monitor。本 marketplace 不在官方 channel 白名单里，只能用开发参数启动，每次启动都要确认一次。
+
 ### Parallel worktrees
 
 The director prepares a separate worktree for each writer and passes it as the task's `CWD`. With code-director installed:
