@@ -1015,6 +1015,24 @@ test("confirmed channels retain fallback for undeclared producers and ACP owner 
   }
 })
 
+test("a fallback Monitor survives a poll whose listing of its repository failed", async () => {
+  const calls = []
+  const now = Date.now()
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, watch: false, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    toolCall: async request => { calls.push(request.tool); return { result: { taskId: "fallback-monitor" } } },
+    replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }) })
+  pane.listing[0].historyAvailable = true
+  pane.listing[0].directorPush = false
+  await pane.tick()
+  assert.equal(calls.filter(tool => tool === 'Monitor').length, 1)
+  pane.list(new Error("listing timed out"))
+  await pane.tick()
+  pane.list(true)
+  await pane.tick()
+  assert.deepEqual(calls.filter(tool => tool !== 'Bash'), ['Monitor'], "kept through the failed listing, not stopped and rearmed")
+})
+
 test("Monitors require a live job record with and without a confirmed channel", async () => {
   for (const confirmed of [true, false]) for (const [status, live] of [["running", false], ["completed", false],
     ["queued", true], ["running", true]]) {

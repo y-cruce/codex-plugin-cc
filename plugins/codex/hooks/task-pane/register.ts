@@ -322,7 +322,9 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
     // because its runtime runs inside the worker that could be killed.
     let retired = false
     for (const [root, monitor] of state.monitors) {
-      if (fallbackRoots.has(root)) continue
+      // A listing that failed this poll (it can take seconds under load) says
+      // nothing about the root; retiring its Monitor rearmed it the next poll.
+      if (fallbackRoots.has(root) || state.unreadable.has(root)) continue
       state.monitors.delete(root)
       retired = true
       if (monitor.taskId) stopMonitor($, state, monitor.taskId)
