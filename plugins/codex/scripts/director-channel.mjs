@@ -50,6 +50,11 @@ export class DirectorChannel {
     this.sessionId = null;
     this.epoch = 0;
     this.confirmed = false;
+    // Sent in this binding. The host queues a channel message until its next
+    // step, so an item can wait a whole turn for prompt.submit to accept it;
+    // sending it again meanwhile queued a copy every second. A rebind or a new
+    // instance sends what is still unaccepted once more.
+    this.sent = new Set();
     this.sockets = new Set();
     this.tail = Promise.resolve();
   }
@@ -111,6 +116,7 @@ export class DirectorChannel {
     this.lease = await acquireWriter(consumer);
     this.sessionId = sessionId;
     this.epoch += 1;
+    this.sent = new Set();
     const outbox = path.join(sessionDirectory(this.root, sessionId), "outbox");
     fs.mkdirSync(outbox, { recursive: true });
     this.watcher = fs.watch(outbox, { persistent: false }, () => this.queueReplay());
@@ -140,8 +146,10 @@ export class DirectorChannel {
     if (route?.instance !== this.instance || route.epoch !== this.epoch || fs.readFileSync(path.join(directory, "consumer", "writer.lock"), "utf8") !== this.lease) {
       throw new Error("Channel consumer was fenced");
     }
+    if (this.sent.has(event.eventId)) return { eventId: event.eventId };
     await deliverDirectorEvents([event], `channel:${this.instance}:${this.epoch}`, async ([pending]) => {
       await this.send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: channelMessage(pending) });
+      this.sent.add(pending.eventId);
     });
     // This ACK covers transport only. The item remains in the outbox until
     // prompt.submit accepts it and commits the shared ingress receipt.
@@ -165,7 +173,7 @@ export class DirectorChannel {
       }
     } finally {
       clearTimeout(this.retry);
-      if (!this.closed && this.sessionId === sessionId && pendingEvents(this.root, sessionId).some(isDirectorEventPending)) {
+      if (!this.closed && this.sessionId === sessionId && pendingEvents(this.root, sessionId).filter(isDirectorEventPending).some((event) => !this.sent.has(event.eventId))) {
         this.retry = setTimeout(() => this.queueReplay(), this.retryMs);
         this.retry.unref();
       }

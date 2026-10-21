@@ -215,6 +215,21 @@ test("the confirmed consumer recovers acceptance after publisher exit and retrie
   assert.deepEqual(pendingEvents(h.root, h.job.sessionId), [], "consumer cleans accepted items without a producer timer");
 });
 
+test("an item waits for ingress without another copy until the channel rebinds", async (t) => {
+  const h = fixture(t);
+  const channel = await h.start(async message => { h.sent.push(message.params); });
+  await h.confirm(channel);
+  h.publisher().publish(h.job, "director.notified", { id: "once", message: "held by the host" }, h.stateDir);
+  await waitFor(() => h.sent.length === 1);
+  // The first send's five-second reservation runs out while a turn holds it.
+  fs.rmSync(path.join(sessionDirectory(h.root, h.job.sessionId), "attempts"), { recursive: true, force: true });
+  await channel.replay();
+  assert.equal(h.sent.length, 1, "the host holds the first copy until its next step");
+  await channel.handle({ action: "bind", sessionId: "other", instance: channel.instance });
+  await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
+  await waitFor(() => h.sent.length === 2);
+});
+
 test("answered, closed and expired questions stay retired across channel and Monitor replay", async (t) => {
   const h = fixture(t);
   const publisher = h.publisher();

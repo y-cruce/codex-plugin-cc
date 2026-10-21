@@ -852,7 +852,10 @@ async function pollOnce($: EngineInterface, state: State) {
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
     state.liveRoots = new Set(found.map(entry => entry.cwd))
-    const fallbackRoots = new Set(found.filter(({ thread }) => thread.directorPush !== true || state.views.get(thread.id)?.executor?.kind === 'acp').map(entry => entry.cwd))
+    // Only a live job needs a Monitor: a finished one's ending is the pane's to
+    // push, and a Monitor armed for old rows reported endings long since read.
+    const fallbackRoots = new Set(found.filter(({ thread }) => thread.activeRoundId !== null
+      && (thread.directorPush !== true || state.views.get(thread.id)?.executor?.kind === 'acp')).map(entry => entry.cwd))
     await routeEvents($, state, state.liveRoots, now, fallbackRoots)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {
