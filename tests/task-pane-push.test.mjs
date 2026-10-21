@@ -964,31 +964,37 @@ test("an ending reported from the view is not reported again when its event is r
   assert.equal(pane.toasts.filter((text) => /job\.completed/.test(text)).length, 1, pane.toasts.join("\n"));
 });
 
-test("with the channel on, a note goes to the spool with its body and is acknowledged", async () => {
-  let pages = [[{ type: "director.notified", seq: "2", payload: { notificationId: "n1", message: "need a decision", pendingRequestId: null },
-    text: "need a decision" }]];
-  // Seen once before the note, so it is news.
-  pages.unshift([]);
-  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
-    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]], replay: () => {
-      const events = pages.shift() ?? [];
-      return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "0"}`, committedSeq: events.at(-1)?.seq ?? "0" }]
-        .map((row) => JSON.stringify(row)).join("\n");
-    } });
-  pane.listing[0].historyAvailable = true;
-  await pane.tick();
-  await pane.tick();
-  const batches = [...pane.files].filter(([file]) => file.startsWith("/tmp/codex-channel/4242.spool/"));
-  assert.equal(batches.length, 1);
-  assert.match(batches[0][1].lines[0].text, /director\.notified: need a decision/);
-  assert.deepEqual(pane.acks.map((args) => args.slice(args.indexOf("ack"), args.indexOf("--cwd"))), [["ack", "job-a", "--ids", "n1"]]);
-  // An ending sent the same way is recorded for a later events watch.
-  pages.push([{ type: "job.completed", seq: "3" }]);
-  pane.list([{ ...pane.listing[0], status: "completed" }]);
-  await pane.tick();
-  assert.deepEqual(pane.acks.at(-1).slice(pane.acks.at(-1).indexOf("reported"), pane.acks.at(-1).indexOf("--cwd")),
-    ["reported", "--session", "session", "--jobs", "job-a"]);
-});
+test("with a confirmed channel the pane displays jobs without replay, spool, ack or director submissions", async () => {
+  let replays = 0
+  const now = Date.now()
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    replay: () => { replays++; return "" } })
+  pane.listing[0].historyAvailable = true
+  await pane.tick()
+  pane.list([{ ...pane.listing[0], status: "completed" }])
+  await pane.tick()
+  assert.equal(replays, 0)
+  assert.equal(pane.acks.length, 0)
+  assert.deepEqual([...pane.files].filter(([file]) => file.includes('.spool/')), [])
+})
+
+test("a rebuilt cursor announces a historical question only while its live view still has that request pending", async () => {
+  for (const pending of [true, false]) {
+    const pane = await paneHarness(new Map(), undefined, "session", { replay: () => [
+      { type: "question.opened", seq: "1", payload: { requestId: "q1" }, text: "request=q1 ids=source: Which source?" },
+      { type: "end", nextCursor: "c1", committedSeq: "1" },
+    ].map(JSON.stringify).join("\n") })
+    pane.listing[0].historyAvailable = true
+    if (pending) {
+      pane.live.pendingQuestion = { requestId: "q1", text: "Which source?", openedAt: "", expiresAt: null }
+      pane.touch()
+      pane.viewTick()
+    }
+    await pane.tick()
+    assert.equal(pane.toasts.filter(text => text.includes('question.opened')).length, pending ? 1 : 0)
+  }
+})
 
 test("with the channel on, a live job holds /goal with a quiet shell that stops when its ending is pushed", async () => {
   const calls = [];

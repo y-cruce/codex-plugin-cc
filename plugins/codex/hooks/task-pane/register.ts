@@ -1,4 +1,5 @@
 import type { EngineInterface, On } from 'claude-code'
+import { deliverDirectorEvents, directorEvent, wasDelivered } from '../../scripts/lib/director-delivery.mjs'
 import { directorTools, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
@@ -64,7 +65,7 @@ type State = {
   unreadable: Map<string, number>
   owners: Map<string, string[]>
   rootIds: Map<string, Set<string>>
-  pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string }[]
+  pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string; delivery?: any }[]
   worker: string
   toEnd: boolean
   pinned: boolean
@@ -83,7 +84,6 @@ type State = {
   // A probe is on its way (the server says so): lines wait for it, and no
   // Monitor is armed in the meantime.
   channelHold: boolean
-  channelBatches: number
   // The background shell that keeps an active /goal waiting while jobs run
   // and the channel, not a Monitor, carries their events (see holdGoal).
   hold: Hold | null
@@ -93,10 +93,6 @@ type State = {
 }
 
 const PANE = 'codex_tasks'
-// The plugin's channel server (.mcp.json) as Claude Code names it, and the
-// marker its probe carries (scripts/director-channel.mjs).
-const CHANNEL_SERVER = 'plugin:codex:director'
-const CHANNEL_PROBE = 'codex-director-channel-probe'
 const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
@@ -313,14 +309,13 @@ async function channelBase($: EngineInterface, state: State): Promise<string | n
   return state.channel
 }
 
-// With the channel on, the lines this pane would push go to the channel
-// server instead, which delivers them into the running turn or wakes an idle
-// session, so no Monitor is armed. It is on only once a probe the server sent
-// has come back through prompt.submit (see below): that is the one proof that
-// Claude Code delivers this server's messages.
+// A confirmed channel receives broker events directly. The pane only reads
+// its readiness marker to stop Monitors; its independent ingress hook confirms
+// the probe and rebinds the session. An expired heartbeat restores fallback.
 async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number) {
   const base = await channelBase($, state)
-  const on = Boolean(base && await $.fs.exists(`${base}.confirmed.json`))
+  const confirmation = base && await $.fs.exists(`${base}.confirmed.json`) ? JSON.parse(await $.fs.read(`${base}.confirmed.json`)) as { sessionId?: string; until?: number } : null
+  const on = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
   if (on && !state.channelOn) stopMonitors($, state)
   state.channelOn = on
   state.channelHold = !on && Boolean(base) && await probing($, base!, now)
@@ -458,30 +453,6 @@ async function acknowledge($: EngineInterface, state: State, lines: State['pendi
       $.ui.log(`Codex tasks ack ${jobId}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     })
   }
-}
-
-// An ending sent over the channel goes into the record the events stream keeps
-// of the endings it reported: a Monitor armed later, in a session resumed
-// without the channel, reported it again otherwise.
-async function recordEndings($: EngineInterface, state: State, lines: State['pending']) {
-  const endings = new Map<string, Set<string>>()
-  for (const line of lines) {
-    if (!line.type?.startsWith('job.')) continue
-    endings.set(line.cwd, (endings.get(line.cwd) ?? new Set()).add(line.jobId))
-  }
-  for (const [cwd, jobs] of endings) {
-    await companion($, state, cwd, ['reported', '--session', state.sessionId, '--jobs', [...jobs].join(',')]).catch(error => {
-      $.ui.log(`Codex tasks record endings: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
-    })
-  }
-}
-
-// One file per batch, named to sort in the order written; the server reads and
-// removes each.
-async function sendToChannel($: EngineInterface, state: State, lines: State['pending']) {
-  state.channelBatches += 1
-  const name = `${String(await $.clock.now()).padStart(15, '0')}-${String(state.channelBatches).padStart(6, '0')}.json`
-  await $.fs.write(`${state.channel}.spool/${name}`, JSON.stringify({ lines }))
 }
 
 async function companion($: EngineInterface, state: State, cwd: string, args: string[]) {
@@ -863,7 +834,7 @@ async function pollOnce($: EngineInterface, state: State) {
       owners: rows.owners, provisional: rows.provisional })
     if (changed) $.ui.invalidate('ui.render')
     const ledger: Ledger = { ...state.ledger }
-    const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string }[] = []
+    const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string; delivery?: any }[] = []
     if (stale()) return
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
@@ -900,14 +871,14 @@ async function pollOnce($: EngineInterface, state: State) {
         // first event never opened one: no history is the answer, not a failure
         // worth retrying. Replaying it until the give-up count spends five
         // processes a poll and then reports a permanent fact as an error line.
-        if (thread.historyAvailable !== false) {
+        if (thread.historyAvailable !== false && !state.channelOn) {
           // Read during a director turn as well. A turn can run for half an
           // hour, and a pane that stops reading for it shows a task frozen at
           // whatever it was doing when the turn began, then jumps.
           const args = ['replay', job.id, '--limit', '8']
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
-            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string; payload?: { notificationId?: string; requestId?: string | number } }] } catch { return [] } })
+            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string; delivery?: any; payload?: { notificationId?: string; requestId?: string | number } }] } catch { return [] } })
           if (stale()) return
           const events = rows.filter(row => row.seq)
           // A reload whose ledger lost this job rebuilds its cursor from the
@@ -933,7 +904,10 @@ async function pollOnce($: EngineInterface, state: State) {
             if (event.type.startsWith('job.') && historical(event.seq!)) continue
             // History a rebuilt cursor replays: that question may have been
             // answered long ago.
-            if (event.type === 'question.opened' && (historical(event.seq!) || settled.has(String(event.payload?.requestId)))) continue
+            if (event.type === 'question.opened') {
+              const pending = String(view?.pendingQuestion?.requestId) === String(event.payload?.requestId)
+              if (historical(event.seq!) && !pending || settled.has(String(event.payload?.requestId))) continue
+            }
             const line = pushLine(job.label ?? job.id, event, view)
             // An ending the reconciliation already reported, from the view, in
             // an earlier poll whose replay did not have the event yet: the
@@ -944,7 +918,7 @@ async function pollOnce($: EngineInterface, state: State) {
             // without a line left the reconciliation below nothing to report.
             const ending = event.type.startsWith('job.') && !first && !foreign
             const notificationId = event.type === 'director.notified' ? event.payload?.notificationId || undefined : undefined
-            if ((announce || ending) && line && !reported) lines.push({ jobId: job.id, cwd, text: line, type: event.type, notificationId })
+            if ((announce || ending) && line && !reported) lines.push({ jobId: job.id, cwd, text: line, type: event.type, notificationId, delivery: event.delivery })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -959,8 +933,9 @@ async function pollOnce($: EngineInterface, state: State) {
         // "said once" line was said every two seconds for as long as it failed.
         state.unreadable.delete(job.id)
         if (status && receipt.terminal !== status) {
-          if (!first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
-            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}` })
+          if (!state.channelOn && !first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
+            const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(state.paths.get(thread.id) ?? '')?.[1]
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, delivery: directory ? directorEvent({ id: job.id, sessionId: state.sessionId }, `job.${status}`, {}, directory) : null })
           }
           receipt.terminal = status
         }
@@ -1020,29 +995,21 @@ async function pollOnce($: EngineInterface, state: State) {
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.
     state.pending = mine.slice(-12)
-    if (state.push && mine.length && state.channelOn) {
-      try {
-        await sendToChannel($, state, mine)
-        if (stale()) return
-        state.pending = []
-        await acknowledge($, state, mine)
-        await recordEndings($, state, mine)
-      } catch (error) {
-        $.ui.log(`Codex tasks channel: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    if (state.channelOn) state.pending = []
+    else if (state.push && mine.length && !state.busy && !state.channelHold) {
+      const batch = mine.slice(0, 6)
+      const output = async (pending = batch.map(line => line.delivery).filter(Boolean)) => {
+        const ids = new Set(pending.map(event => event.eventId))
+        const selected = batch.filter(line => !line.delivery || ids.has(line.delivery.eventId))
+        const result = await $.prompt.submit({ text: `Codex tasks\n${selected.map(line => line.text).join('\n')}` })
+        return !result.drop
       }
-    } else if (state.push && mine.length && !state.busy && !state.channelHold) {
-      // A plugin's own submit skips this plugin's prompt.submit hooks, so the
-      // text itself is what the director reads; keep it short and let it fetch
-      // the detail with the companion.
-      const result = await $.prompt.submit({ text: `Codex tasks\n${mine.slice(0, 6).map(line => clip(line.text, line.type === 'question.opened' ? QUESTION_CLIP : 200)).join('\n')}` })
-      // The host refuses a submit made too soon after the plugin's last one.
-      // Carry those lines to the next poll rather than failing the round: the
-      // cursors this round advanced are committed either way, so a refusal must
-      // not make every job re-read and re-report the events already seen.
+      const events = batch.map(line => line.delivery).filter(Boolean)
+      const sent = events.length ? await deliverDirectorEvents(events, 'pane', output) : await output()
       if (stale()) return
-      if (!result.drop) {
-        state.pending = []
-        await acknowledge($, state, mine.slice(0, 6))
+      if (sent || events.length && events.every(wasDelivered)) {
+        state.pending = mine.slice(6)
+        await acknowledge($, state, batch)
       }
     }
     state.ledger = ledger
@@ -1249,7 +1216,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
-    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0, hold: null, goal: false,
+    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -1303,11 +1270,6 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'channel' && e.origin.server === CHANNEL_SERVER && e.text.includes(CHANNEL_PROBE)) {
-      const base = await channelBase($, state)
-      if (base) await $.fs.write(`${base}.confirmed.json`, JSON.stringify({ at: await $.clock.now() }))
-      return { drop: 'Codex director channel confirmed' }
-    }
     if (e.origin.kind !== 'task-notification') return next(e)
     const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
     if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }

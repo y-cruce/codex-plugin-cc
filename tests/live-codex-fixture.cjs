@@ -14,11 +14,11 @@ let nextTurn = 0;
 let pendingQuestion = null;
 const pendingTools = new Map();
 const emit = (method, params) => send({ method, params });
-function ask(thread) {
+function ask(thread, questions = [{ id: "source", header: "Source", question: "Which source?", options: null }]) {
   pendingQuestion = { id: "question-1", thread };
   send({ id: "question-1", method: "item/tool/requestUserInput", params: {
     threadId: thread.id, turnId: thread.turnId, itemId: "ask-1", autoResolutionMs: null,
-    questions: [{ id: "source", header: "Source", question: "Which source?", options: null }]
+    questions
   } });
 }
 function complete(thread, text, status = "completed") {
@@ -71,6 +71,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       reply({ turn: { id: thread.turnId, status: "inProgress", items: [], error: null } });
       emit("turn/started", { threadId: thread.id, turn: { id: thread.turnId } });
       const text = p.input.map((item) => item.text).join("\n");
+      if (text === "flood ask and notify") {
+        const base = { threadId: thread.id, turnId: thread.turnId };
+        emit("item/started", { ...base, item: { type: "commandExecution", id: "flood", command: "flood", cwd: thread.cwd, status: "inProgress" } });
+        for (let i = 0; i < 1600; i++) emit("item/commandExecution/outputDelta", { ...base, itemId: "flood", delta: `before-${i}\n` });
+        ask(thread, [
+          { id: "source", question: "Which source?", options: [{ label: "Local", description: "Use saved data" }, { label: "Remote", description: "Fetch new data" }] },
+          { id: "scope", question: "Which scope?", options: [{ label: "Small", description: "Only this module" }] }
+        ]);
+        send({ id: `tool-${thread.turnId}`, method: "item/tool/call", params: { ...base, tool: "notify_director", arguments: { message: "Need both decisions" } } });
+        for (let i = 0; i < 1600; i++) emit("item/commandExecution/outputDelta", { ...base, itemId: "flood", delta: `after-${i}\n` });
+        break;
+      }
       const notification = text.match(/(?:^|\s)notify:(.*)/);
       if (notification || ["notify-invalid", "notify-missing", "unknown-tool"].includes(text)) {
         const id = `tool-${thread.turnId}`;

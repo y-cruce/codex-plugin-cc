@@ -148,7 +148,7 @@ test("director notifications reply immediately, survive turns, and acknowledge o
   await waitFor(() => h.notifications.some((item) => item.method === "turn/completed"));
   const response = h.requests().find((item) => item.id === `tool-${turn.id}`);
   assert.deepEqual(response.result, {
-    contentItems: [{ type: "inputText", text: "Delivered to the director." }], success: true
+    contentItems: [{ type: "inputText", text: "Accepted for the director." }], success: true
   });
   const first = await h.owner.request("broker/status", { threadId: h.thread.id });
   assert.equal(first.notifications.length, 1);

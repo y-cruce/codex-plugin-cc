@@ -1,3 +1,4 @@
+import { directorEvent, deliverDirectorEvents } from "./director-delivery.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
@@ -36,10 +37,13 @@ async function findJob(location, id) {
 // The pane pushes a question or a note from its replay row alone, so the row
 // carries what the director answers from: the request and question ids with
 // every option, or the note with the request it is waiting on.
-function replayRow(event) {
-  const p = event.payload ?? {};
+function replayRow(original, job, stateDir) {
+  const p = original.payload ?? {};
+  const delivery = ["question.opened", "director.notified", "job.completed", "job.failed", "job.cancelled"].includes(original.type)
+    ? directorEvent(job, original.type, { ...p, threadId: original.identity.sessionId, turnId: original.identity.turnId }, stateDir) : null;
+  const event = delivery ? { ...original, delivery } : original;
   if (event.type === "question.opened") {
-    return { ...event, text: `request=${p.requestId}${questionIds(p.fields)}: ${questionText(p.fields, p.message)}` };
+    return { ...event, text: `request=${p.requestId}${questionIds(p.fields)}: ${questionText(p.fields, p.message, Infinity)}` };
   }
   if (event.type === "director.notified") {
     const pending = p.pendingRequestId == null ? "" : `pending_request=${p.pendingRequestId} `;
@@ -387,7 +391,7 @@ export async function handleObserve(argv) {
         const page = await history(location, id, { after, limit: Math.min(256, remaining) });
         committedSeq ??= page.committedSeq;
         const events = page.events.filter((event) => BigInt(event.seq) <= BigInt(committedSeq));
-        for (const event of events) await write(`${JSON.stringify(replayRow(event))}\n`);
+        for (const event of events) await write(`${JSON.stringify(replayRow(event, job, stateDir))}\n`);
         remaining -= events.length;
         after = page.nextCursor;
         if (page.caughtUp === true || (page.caughtUp === undefined &&
@@ -399,6 +403,7 @@ export async function handleObserve(argv) {
       // prompt, is marked read the way the events stream marks the ones it prints.
       const ids = String(options.ids ?? "").split(",").filter(Boolean);
       if (!ids.length) throw errorFor("INVALID_ARGUMENT", "Pass --ids <notification-id,...>");
+      await deliverDirectorEvents(ids.map((id) => directorEvent(job, "director.notified", { id }, stateDir)), "ack", async () => {});
       await acknowledgeNotifications(cwd, job, ids);
       await write(`${JSON.stringify({ acknowledged: ids })}\n`);
     } else if (command === "follow") await follow(location, job, options);

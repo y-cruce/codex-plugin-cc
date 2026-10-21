@@ -26,6 +26,7 @@ async function monitor(reports, handlers = {}, options = {}) {
     acknowledge: async () => assert.fail("Unexpected acknowledgement"),
     claimQuestion: async () => true,
     terminalReportsFile: path.join(makeTempDir(), "terminal-reports.json"),
+    directorStateDir: path.join(handlers.terminalReportsFile ? path.dirname(handlers.terminalReportsFile) : makeTempDir(), "state", "repo"),
     ...handlers,
     writeLine: (line) => {
       lines.push(line);
@@ -273,14 +274,14 @@ test("a question line carries every question with its options and their trade-of
     + "Options: Env (Recommended) (Matches production); Config (Keeps tests as they are). | [scope] Fix callers too? Options: Yes; No."]);
 });
 
-test("events reports each request once, whole but on one line, and cut only past 1500 characters", async () => {
+test("events reports each request once with its full question on one line", async () => {
   const lines = await monitor([{ running: [job] }, { running: [job] }], {
     status: async () => ({ questions: [{ requestId: "request-1", questions: [
       { id: "a", question: `Choose\n${"x".repeat(300)}` }, { id: "b", question: "Second" }
     ] }, { requestId: "request-2", questions: [{ question: "y".repeat(2000) }] }] })
   });
   assert.deepEqual(lines, [`QUESTION job=job-1 request=request-1 ids=a,b [a] Choose ${"x".repeat(300)} | [b] Second`,
-    `QUESTION job=job-1 request=request-2 ${"y".repeat(1499)}…`]);
+    `QUESTION job=job-1 request=request-2 ${"y".repeat(2000)}`]);
 });
 
 test("events omits answered questions and marks notifications with pending requests", async () => {
@@ -483,7 +484,7 @@ test("live broker deadline closes a socket even when initialize never replies", 
 
 test("endings delivered elsewhere join an existing watch record and never start one", async (t) => {
   isolateTestEnvironment(t);
-  const repo = makeTempDir();
+  const repo = path.join(makeTempDir(), "state", "repo");
   assert.equal(await recordTerminalReports(repo, "s1", ["job-a"]), false);
   const file = terminalReportsPath(repo, "s1");
   assert.equal(fs.existsSync(file), false);

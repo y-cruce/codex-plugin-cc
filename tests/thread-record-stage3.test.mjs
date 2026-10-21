@@ -156,7 +156,9 @@ test("terminal endings release a bound record for the next round", async (t) => 
     const first = { id: `task-first-${ending.source}-${ending.status}`, workspaceRoot: cwd, executor: ending.executor,
       status: "running", startedAt: AT, createdAt: AT, pid };
     writeJobFile(cwd, first.id, first);
+    const published = [];
     const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: true,
+      publishDirectorEvent: (job, type) => published.push({ jobId: job.id, type }),
       executorIdentity: ending.executor === "acp" ? { kind: "acp", command: "qoder", args: [] } : null });
     try {
       const firstOwner = {};
@@ -172,6 +174,7 @@ test("terminal endings release a bound record for the next round", async (t) => 
         await runtime.reconcile();
       }
 
+      assert.deepEqual(published, ending.source === "event" ? [] : [{ jobId: first.id, type: `job.${ending.status}` }]);
       const firstLocation = await resolveJobHistory(cwd, first.id);
       const firstManifest = JSON.parse(fs.readFileSync(firstLocation.manifest, "utf8"));
       const firstView = JSON.parse(fs.readFileSync(firstLocation.liveView, "utf8"));

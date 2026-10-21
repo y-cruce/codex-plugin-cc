@@ -6,9 +6,10 @@ export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
 export class LiveTurnControl {
-  constructor(client, notify, inputTimeoutMs = DEFAULT_INPUT_TIMEOUT_MS) {
+  constructor(client, notify, inputTimeoutMs = DEFAULT_INPUT_TIMEOUT_MS, publishDirectorEvent = (_threadId, _type, _payload) => {}) {
     this.client = client;
     this.notify = notify;
+    this.publishDirectorEvent = publishDirectorEvent;
     this.inputTimeoutMs = inputTimeoutMs;
     this.threads = new Map();
     this.requests = new Map();
@@ -102,7 +103,7 @@ export class LiveTurnControl {
     if (message.method === "item/tool/call") {
       const p = message.params;
       const state = this.threads.get(p.threadId);
-      if (p.tool !== "notify_director" || !state) return false;
+      if (p.tool !== "notify_director" || !state || state.turnId !== p.turnId) return false;
       if (typeof p.arguments?.message !== "string") {
         this.client.respond(message.id, { contentItems: [{ type: "inputText", text: 'Expected arguments: { "message": "..." } with a string message.' }], success: false });
         return true;
@@ -111,11 +112,12 @@ export class LiveTurnControl {
         this.client.respond(message.id, { contentItems: [{ type: "inputText", text: "Message must be at most 400 characters." }], success: false });
         return true;
       }
-      this.client.respond(message.id, { contentItems: [{ type: "inputText", text: "Delivered to the director." }], success: true });
       const notification = { id: crypto.randomBytes(6).toString("hex"), message: p.arguments.message,
         turnId: p.turnId, receivedAt: new Date().toISOString(),
         ...(state.questions[0] ? { pendingRequestId: state.questions[0].requestId } : {}) };
+      this.publishDirectorEvent(p.threadId, "director.notified", { threadId: p.threadId, sourceRequestId: message.id, callId: p.callId ?? null, ...notification });
       state.notifications.push(notification);
+      this.client.respond(message.id, { contentItems: [{ type: "inputText", text: "Accepted for the director." }], success: true });
       this.notify({ method: "companion/notification", params: { threadId: p.threadId, ...notification } });
       return true;
     }
@@ -138,6 +140,7 @@ export class LiveTurnControl {
     }, this.inputTimeoutMs);
     timer.unref();
     this.requests.set(message.id, { question, timer });
+    this.publishDirectorEvent(p.threadId, "question.opened", question);
     this.notify({ method: "companion/question", params: question });
     return true;
   }

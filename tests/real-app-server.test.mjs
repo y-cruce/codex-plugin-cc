@@ -131,7 +131,7 @@ unified_exec = true
   assert.equal(firstResult.code, 0, firstResult.stderr);
   assert.match(JSON.stringify(requests[1].input), /Latest/);
   assert.ok(requests[0].tools.some((tool) => tool.name === "notify_director"));
-  assert.match(JSON.stringify(requests[2].input), /Delivered to the director\./);
+  assert.match(JSON.stringify(requests[2].input), /Accepted for the director\./);
   const notified = await control.request("broker/status", { threadId: job.threadId });
   assert.equal(notified.notifications[0].message, "Latest source selected.");
 
@@ -139,7 +139,7 @@ unified_exec = true
   await waitFor(() => requests.length === 5);
   const live = await control.request("broker/status", { threadId: job.threadId });
   assert.ok(requests[3].tools.some((tool) => tool.name === "notify_director"));
-  assert.match(JSON.stringify(requests[4].input), /Delivered to the director\./);
+  assert.match(JSON.stringify(requests[4].input), /Accepted for the director\./);
   assert.deepEqual(live.notifications.map((notification) => notification.message), ["Latest source selected.", "Resumed work can notify."]);
   await control.request("turn/steer", { threadId: job.threadId, expectedTurnId: live.turnId,
     input: [{ type: "text", text: "Use the latest plan, never the stored chargeId." }] });

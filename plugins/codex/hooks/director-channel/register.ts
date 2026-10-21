@@ -1,0 +1,52 @@
+import type { EngineInterface, On } from 'claude-code'
+
+const SERVER = 'plugin:codex:director'
+const PROBE = 'codex-director-channel-probe'
+
+// Independent of pane bootstrap: /clear and /resume must bind before any job
+// event can be consumed, even when the pane has never opened.
+export function registerDirectorChannel(on: On) {
+  let pid = ''
+  let bound = ''
+  const control = async ($: EngineInterface, sessionId: string, nonce?: string) => {
+    if (!pid) {
+      const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 2000 })
+      if (ran.exitCode !== 0 || !/^\d+$/.test(ran.stdout.trim())) return
+      pid = ran.stdout.trim()
+    }
+    const result = await $.process.run(['node', `${$.plugin.root}/scripts/director-channel.mjs`, nonce ? 'confirm' : 'bind', pid, sessionId, ...(nonce ? [nonce] : [])], { timeoutMs: 5000 })
+    if (result.exitCode !== 0) throw new Error(result.stderr || 'Could not bind Codex director channel')
+    bound = sessionId
+  }
+  const bind = async ($: EngineInterface) => {
+    const sessionId = await $.session.id()
+    if (sessionId !== bound) await control($, sessionId).catch(error => $.ui?.log(String(error), { to: 'debug' }))
+  }
+  on('classic.SessionStart', async ($, e, next) => {
+    await $.env.set('CODEX_COMPANION_SESSION_ID', e.session_id)
+    await $.env.set('CODEX_COMPANION_TRANSCRIPT_PATH', e.transcript_path)
+    await control($, e.session_id).catch(error => $.ui?.log(String(error), { to: 'debug' }))
+    return next(e)
+  })
+  on('session.start', async ($, e, next) => {
+    await bind($)
+    return next(e)
+  })
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await bind($)
+    return next(e)
+  })
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind !== 'channel' || e.origin.server !== SERVER) return next(e)
+    const sessionId = await $.session.id()
+    const attributes = /^\s*<channel\b([^>]*)>/.exec(e.text)?.[1] ?? ''
+    const nonce = /\bevent="probe"/.test(attributes) && new RegExp(`${PROBE} ([^\\s:<]+)`).exec(e.text)?.[1]
+    if (nonce) {
+      await control($, sessionId, nonce).catch(error => $.ui?.log(String(error), { to: 'debug' }))
+      return { drop: 'Codex director channel confirmed' }
+    }
+    const owner = /\bsession="([^"]+)"/.exec(attributes)?.[1]
+    if (owner && owner !== sessionId) return { drop: 'Codex event belongs to another session' }
+    return next(e)
+  })
+}

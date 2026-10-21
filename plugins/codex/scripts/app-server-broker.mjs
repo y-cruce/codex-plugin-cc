@@ -10,6 +10,7 @@ import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { LiveTurnControl, DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
+import { DirectorPublisher } from "./lib/director-delivery.mjs";
 import { JobRuntime } from "./lib/job-runtime.mjs";
 import { CodexEventAdapter } from "./lib/executors/codex-event-adapter.mjs";
 import { THREAD_RECORDS_ENABLED } from "./lib/thread-records.mjs";
@@ -106,9 +107,19 @@ export async function main(runtimeOptions = {}) {
   }
   writePidFile(pidFile);
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, requestUserInput: true });
-  const controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs);
+  let controls;
+  const director = new DirectorPublisher({ onDelivered: (event) => {
+    if (event.type === "director.notified" && controls?.threads.has(event.threadId)) {
+      controls.request("broker/ack-notifications", { threadId: event.threadId,
+        ids: [event.payload.notificationId ?? event.payload.id] }).catch(() => {});
+    }
+  } });
+  controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs, (threadId, type, payload) => {
+    const job = codexEvents.sessions.get(threadId)?.job;
+    if (job) director.publish(job, type, payload);
+  });
   let codexEvents;
-  const jobs = new JobRuntime({ onTerminal: (job) => codexEvents?.releaseJob(job.id),
+  const jobs = new JobRuntime({ publishDirectorEvent: (job, type) => director.publish(job, type), onTerminal: (job) => codexEvents?.releaseJob(job.id),
     threadRecords: runtimeOptions.threadRecords ?? THREAD_RECORDS_ENABLED });
   codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   await jobs.start(cwd);
@@ -188,6 +199,7 @@ export async function main(runtimeOptions = {}) {
 
   async function closeServer(server) {
     controls.close();
+    director.close();
     for (const socket of sockets) {
       socket.end();
     }
@@ -204,8 +216,10 @@ export async function main(runtimeOptions = {}) {
 
   appClient.setNotificationHandler(routeNotification);
   appClient.setServerRequestHandler(async (message) => {
+    // Tool handlers publish before ordinary history work can wait on deltas.
+    if (controls.handleServerRequest(message)) return true;
     await codexEvents.accept(message);
-    return controls.handleServerRequest(message);
+    return false;
   });
 
   const server = net.createServer((socket) => {

@@ -48,6 +48,7 @@ export class JobRuntime {
     this.owners = new Map();
     this.followers = new Map();
     this.onTerminal = options.onTerminal ?? null;
+    this.publishDirectorEvent = options.publishDirectorEvent ?? (() => {});
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
     this.executorIdentity = options.executorIdentity ?? null;
     this.reconciling = false;
@@ -447,6 +448,7 @@ export class JobRuntime {
     if (!job || !terminal(job.status)) return { recorded: entry.ended };
     entry.job = this.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
       threadId: entry.job.threadId ?? job.threadId ?? null } : job;
+    this.publishDirectorEvent(entry.job, `job.${job.status}`);
     // A round finalizes on its executor's terminal event, and only afterwards
     // does the runner write `result` and `rendered` into the job file -- so the
     // receipt this leaves behind holds a job captured mid-flight. Returning
@@ -499,6 +501,7 @@ export class JobRuntime {
 
   async failOwnerExited(entry, job) {
     entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
+    this.publishDirectorEvent(entry.job, "job.failed");
     if (this.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(entry.job, "job.failed", true));
       entry.job = { ...entry.job, recordId: binding.recordId, roundId: entry.job.id, threadId: null };
