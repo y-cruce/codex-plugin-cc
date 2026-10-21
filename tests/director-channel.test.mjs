@@ -7,7 +7,8 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { DirectorChannel, channelMessage, paths } from "../plugins/codex/scripts/director-channel.mjs";
-import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { isolateTestEnvironment, makeTempDir, waitFor } from "./helpers.mjs";
 
@@ -19,7 +20,10 @@ function fixture(t) {
   const root = deliveryRoot(stateDir);
   const job = { id: "job", sessionId: "session", workspaceRoot: "/repo", status: "running", threadId: "thread", turnId: "turn" };
   const sent = [];
-  const start = async (send = async (message) => { sent.push(message.params); }, claudePid = 1234) => {
+  const start = async (send = async (message) => {
+    sent.push(message.params);
+    await acceptDirectorEvents([eventFromRef(message.params.meta.delivery)], "channel", async () => ({}));
+  }, claudePid = 1234) => {
     const channel = new DirectorChannel({ root, dir, send, claudePid });
     await channel.start(job.sessionId);
     t.after(() => channel.close());
@@ -85,7 +89,7 @@ test("unconfirmed items survive broker/channel restart and replay stable ids acr
   assert.equal(h.sent.filter((message) => message.meta.id === next.eventId).length, 1);
 });
 
-async function monitor(h, live, job = h.job) {
+async function monitor(h, live, job = h.job, ingress = true) {
   const lines = [];
   const abort = new AbortController();
   let polls = 0;
@@ -93,7 +97,12 @@ async function monitor(h, live, job = h.job) {
   await streamJobEvents("/repo", { session: job.sessionId, signal: abort.signal, pollMs: 1 }, {
     directorStateDir: h.stateDir, terminalReportsFile, claimQuestion: async () => true, acknowledge: async () => {}, progressAt: Date.now,
     status: async () => live, snapshot: () => { if (polls++) abort.abort(); return { running: [job], recent: [] }; },
-    writeLine: async (line) => { lines.push(line); }
+    writeLine: async (line) => {
+      if (!ingress) { lines.push(line); return; }
+      const events = deliveryRefs(line).map(eventFromRef).filter(Boolean);
+      if (events.length) await acceptDirectorEvents(events, "monitor", async () => { lines.push(stripDeliveryTags(line)); return {}; });
+      else lines.push(line);
+    }
   });
   return lines;
 }
@@ -126,30 +135,105 @@ test("Monitor and channel share receipts in either switching order, including co
   const { deliverDirectorEvents } = await import("../plugins/codex/scripts/lib/director-delivery.mjs");
   const event = directorEvent(h.job, "director.notified", { id: "race" }, h.stateDir);
   let outputs = 0;
-  await Promise.all(["channel", "monitor"].map((route) => deliverDirectorEvents([event], route, async () => { outputs++; })));
+  await Promise.all(["channel", "monitor"].map((route) => deliverDirectorEvents([event], route, async pending =>
+    acceptDirectorEvents(pending, route, async () => { outputs++; return {}; }))));
   assert.equal(outputs, 1);
 });
 
-test("session rebind fences consumers and keeps old-session outbox items for resume", async (t) => {
+test("session rebind fences consumers and replays frames the old-session ingress dropped on clear", async (t) => {
   const h = fixture(t);
+  const { registerDirectorChannel } = await import("../plugins/codex/hooks/director-channel/register.ts");
+  const hooks = new Map();
+  registerDirectorChannel((name, fn) => hooks.set(name, fn));
+  let sessionId = h.job.sessionId;
+  const engine = { session: { id: async () => sessionId } };
+  const frames = [];
+  const channel = await h.start(async message => {
+    frames.push(message.params);
+    const attributes = Object.entries(message.params.meta).map(([key, value]) => `${key}="${value}"`).join(" ");
+    await hooks.get("prompt.submit")(engine, { origin: { kind: "channel", server: "plugin:codex:director" },
+      text: `<channel ${attributes}>${message.params.content}</channel>` }, async () => { h.sent.push(message.params); return {}; });
+  });
   const publisher = h.publisher();
-  const channel = await h.start();
   await h.confirm(channel);
   const competitor = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 5678, send: async () => assert.fail("competing consumer") });
   t.after(() => competitor.close());
   await assert.rejects(competitor.start(h.job.sessionId), /live writer/);
-  await channel.handle({ action: "bind", sessionId: "cleared", instance: channel.instance });
+  // The host clears before its lifecycle rebind runs. This old frame was sent,
+  // but the new session's ingress rejects it and must not commit a receipt.
+  sessionId = "cleared";
   const old = directorEvent(h.job, "director.notified", { id: "old", message: "for resumed session" }, h.stateDir);
   publisher.publish(h.job, old.type, old.payload, h.stateDir);
+  await waitFor(() => frames.length === 1);
   assert.equal(h.sent.length, 0);
-  assert.ok(readJson(eventPaths(old).item));
-  const fresh = { ...h.job, sessionId: "cleared" };
+  assert.equal(wasDelivered(old), false);
+  await channel.handle({ action: "bind", sessionId, instance: channel.instance });
+  const fresh = { ...h.job, sessionId };
   publisher.publish(fresh, "director.notified", { id: "new", message: "new session" }, h.stateDir);
   await waitFor(() => h.sent.length === 1);
   assert.equal(h.sent[0].meta.session, "cleared");
-  await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
+  sessionId = h.job.sessionId;
+  await channel.handle({ action: "bind", sessionId, instance: channel.instance });
   assert.equal(h.sent[1].meta.id, old.eventId);
-  assert.equal(h.sent[1].meta.session, h.job.sessionId);
+  assert.equal(wasDelivered(old), true);
+});
+
+// No producer socket or timer survives this acceptance. The consumer must
+// discover the item by directory watch and retry its first failed output.
+test("the confirmed consumer recovers acceptance after publisher exit and retries failed delivery", async (t) => {
+  const h = fixture(t);
+  let attempts = 0;
+  const channel = await h.start(async message => {
+    if (++attempts === 1) throw new Error("temporary output failure");
+    await acceptDirectorEvents([eventFromRef(message.params.meta.delivery)], "channel", async () => { h.sent.push(message.params); return {}; });
+  });
+  await h.confirm(channel);
+  const source = `import { DirectorPublisher } from ${JSON.stringify(new URL("../plugins/codex/scripts/lib/director-delivery.mjs", import.meta.url).href)};
+    const publisher = new DirectorPublisher({ retryMs: 60000 });
+    publisher.push = () => process.exit(0);
+    publisher.publish(${JSON.stringify(h.job)}, "director.notified", { id: "producer-exit", message: "accepted before exit" }, ${JSON.stringify(h.stateDir)});`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], { env: process.env, stdio: "ignore" });
+  const closed = new Promise(resolve => child.on("exit", resolve));
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await closed; });
+  assert.equal(await closed, 0);
+  await waitFor(() => h.sent.length === 1, "consumer watch/retry without producer", 5000);
+  assert.equal(attempts, 2);
+  assert.equal(h.sent[0].content.includes("accepted before exit"), true);
+});
+
+test("answered, closed and expired questions stay retired across channel and Monitor replay", async (t) => {
+  const h = fixture(t);
+  const publisher = h.publisher();
+  const channel = await h.start();
+  const retired = [];
+  for (const reason of ["answered", "server-closed", "turn-closed", "expired"]) {
+    let control;
+    const threadId = `thread-${reason}`;
+    const turnId = `turn-${reason}`;
+    const client = { cwd: h.dir, respond: () => {}, exitPromise: new Promise(() => {}), request: async () => {
+      control.observe({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "interrupted" } } });
+    } };
+    control = new LiveTurnControl(client, () => {}, reason === "expired" ? 20 : 600000,
+      (_thread, type, payload) => publisher.publish(h.job, type, payload, h.stateDir));
+    t.after(() => control.close());
+    control.observe({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
+    control.handleServerRequest({ id: reason, method: "item/tool/requestUserInput", params: { threadId, turnId,
+      questions: [{ id: "source", question: "Which source?" }] } });
+    const question = control.snapshot(threadId).questions[0];
+    const event = directorEvent(h.job, "question.opened", question, h.stateDir);
+    if (reason === "answered") await control.request("broker/answer", { threadId, turnId, requestId: reason, answers: { source: { answers: ["local"] } } });
+    else if (reason === "server-closed") control.observe({ method: "serverRequest/resolved", params: { threadId, requestId: reason } });
+    else if (reason === "turn-closed") control.observe({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+    else await waitFor(() => control.snapshot(threadId).error?.includes("timed out"));
+    assert.equal(readJson(eventPaths(event).question).status, reason === "answered" ? "resolved" : reason === "expired" ? "expired" : "closed");
+    retired.push({ question, event });
+  }
+  await h.confirm(channel);
+  assert.equal(h.sent.length, 0);
+  channel.confirmed = false;
+  fs.rmSync(channel.files.confirmed, { force: true });
+  assert.deepEqual(await monitor(h, { questions: retired.map(item => item.question) }), []);
+  assert.ok(retired.every(({ event }) => !isDirectorEventPending(event) && !wasDelivered(event)));
 });
 
 test("the independent ingress hook binds lifecycle sessions, confirms probes and rejects old-session frames", async () => {
@@ -207,7 +291,10 @@ test("the MCP stdio server probes, restarts over a stale lease and replays accep
   const server = readJson(files.server);
   await channelRequest(server.endpoint, { action: "confirm", sessionId: h.job.sessionId, instance: server.instance, nonce: server.nonce });
   await waitFor(() => second.messages.some(message => message.params?.meta?.event === "director_notified"));
-  assert.equal(second.messages.find(message => message.params?.meta?.event === "director_notified").params.meta.id, id);
+  const forwarded = second.messages.find(message => message.params?.meta?.event === "director_notified").params;
+  assert.equal(forwarded.meta.id, id);
+  assert.equal(wasDelivered(eventFromRef(forwarded.meta.delivery)), false, "stdout and ACK are not ingress acceptance");
+  await acceptDirectorEvents([eventFromRef(forwarded.meta.delivery)], "channel", async () => ({}));
   second.child.stdin.end();
   await second.closed;
   assert.equal(second.child.exitCode, 0, second.errors);

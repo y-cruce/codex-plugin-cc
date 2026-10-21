@@ -1,4 +1,5 @@
 import type { EngineInterface, On } from 'claude-code'
+import { acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags } from '../../scripts/lib/director-delivery.mjs'
 
 const SERVER = 'plugin:codex:director'
 const PROBE = 'codex-director-channel-probe'
@@ -37,9 +38,10 @@ export function registerDirectorChannel(on: On) {
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind !== 'channel' || e.origin.server !== SERVER) return next(e)
+    const channel = e.origin.kind === 'channel' && e.origin.server === SERVER
+    if (!channel && e.origin.kind !== 'task-notification') return next(e)
     const sessionId = await $.session.id()
-    const attributes = /^\s*<channel\b([^>]*)>/.exec(e.text)?.[1] ?? ''
+    const attributes = channel ? /^\s*<channel\b([^>]*)>/.exec(e.text)?.[1] ?? '' : ''
     const nonce = /\bevent="probe"/.test(attributes) && new RegExp(`${PROBE} ([^\\s:<]+)`).exec(e.text)?.[1]
     if (nonce) {
       await control($, sessionId, nonce).catch(error => $.ui?.log(String(error), { to: 'debug' }))
@@ -47,6 +49,23 @@ export function registerDirectorChannel(on: On) {
     }
     const owner = /\bsession="([^"]+)"/.exec(attributes)?.[1]
     if (owner && owner !== sessionId) return { drop: 'Codex event belongs to another session' }
-    return next(e)
+    const reference = /\bdelivery="([A-Za-z0-9_-]+)"/.exec(attributes)?.[1]
+    const refs = channel ? reference ? [reference] : [] : deliveryRefs(e.text)
+    if (!refs.length) return next(e)
+    const events = refs.map(eventFromRef).filter(event => event?.sessionId === sessionId)
+    if (!events.length) return { drop: 'Codex event is unavailable or belongs to another session' }
+    return acceptDirectorEvents(events, channel ? 'channel' : 'monitor', async pending => {
+      const ids = new Set(pending.map(event => event.eventId))
+      const filter = (body: string) => body.split('\n').filter(line => {
+        const items = deliveryRefs(line)
+        return !items.length || items.some(ref => ids.has(eventFromRef(ref)?.eventId))
+      }).join('\n')
+      const text = channel ? e.text.replace(/ delivery="[^"]*"/, '') : e.text.includes('<event>')
+        ? e.text.replace(/<event>([\s\S]*?)<\/event>/g, (_match, body) => `<event>${filter(body)}</event>`)
+        : filter(e.text)
+      // next() includes the pane's retired-Monitor filter. A dropped frame must
+      // leave every item pending so channel replay or /resume can recover it.
+      return next({ ...e, text: stripDeliveryTags(text) })
+    })
   })
 }

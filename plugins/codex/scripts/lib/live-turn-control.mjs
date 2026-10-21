@@ -48,6 +48,7 @@ export class LiveTurnControl {
 
   clearQuestions(state) {
     for (const question of state.questions) {
+      this.publishDirectorEvent(state.threadId, "question.closed", question);
       clearTimeout(this.requests.get(question.requestId)?.timer);
       this.requests.delete(question.requestId);
     }
@@ -72,6 +73,8 @@ export class LiveTurnControl {
         else state.partialChanges[previous] = entry;
       }
     } else if (message.method === "serverRequest/resolved") {
+      const question = this.requests.get(p.requestId)?.question;
+      if (question) this.publishDirectorEvent(threadId, "question.closed", question);
       clearTimeout(this.requests.get(p.requestId)?.timer);
       this.requests.delete(p.requestId);
       state.questions = state.questions.filter((question) => question.requestId !== p.requestId);
@@ -131,6 +134,7 @@ export class LiveTurnControl {
       // Recheck after earlier control requests, including an answer, have completed.
       const expired = this.tail.then(async () => {
         if (!this.requests.has(message.id) || state.turnId !== p.turnId) return;
+        this.publishDirectorEvent(p.threadId, "question.expired", question);
         state.error = "Waiting for user answer timed out.";
         await this.execute("turn/interrupt", { threadId: p.threadId, turnId: p.turnId });
       });
@@ -166,6 +170,7 @@ export class LiveTurnControl {
         p.answers[id].answers.every((answer) => typeof answer === "string" && answer.trim()))) {
         throw new Error("Answer every question using its exact question ID and an array of nonempty strings.");
       }
+      this.publishDirectorEvent(p.threadId, "question.resolved", entry.question);
       this.client.respond(p.requestId, { answers: p.answers });
       clearTimeout(entry.timer);
       this.requests.delete(p.requestId);

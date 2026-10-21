@@ -9,6 +9,7 @@ import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclie
 
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../broker-endpoint.mjs";
 import { ExecutorEventQueue } from "../executor-port.mjs";
+import { DirectorPublisher } from "../director-delivery.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
 import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
@@ -223,13 +224,25 @@ export class AcpExecutorJobPort {
 
   createAdapter(job) {
     return new AcpEventAdapter(async (event) => {
+      const owner = { ...job, executorSessionId: event.identity.sessionId, turnId: event.identity.turnId };
+      const payload = { ...event.payload, threadId: event.identity.sessionId, turnId: event.identity.turnId };
+      if (event.type === "question.opened") this.director.publish(owner, event.type, payload);
+      else if (event.type === "permission.requested" && this.modeId !== "yolo") {
+        this.director.publish(owner, "question.opened", { ...permissionQuestion({ requestId: payload.requestId,
+          turnId: payload.turnId, payload }), threadId: payload.threadId });
+      } else if (["question.resolved", "question.closed", "permission.resolved"].includes(event.type)) {
+        this.director.publish(owner, event.type === "permission.resolved" ? "question.resolved" : event.type, payload);
+      } else if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
+        this.director.publish({ ...owner, status: payload.status, errorMessage: payload.error?.message }, event.type, payload);
+      }
       this.queue.push(event);
       await this.runtime.record(event);
     }, { job, receiveTime: this.receiveTime });
   }
 
   async initialize() {
-    this.runtime = new JobRuntime({ threadRecords: this.threadRecords,
+    this.director = new DirectorPublisher();
+    this.runtime = new JobRuntime({ publishDirectorEvent: (job, type) => this.director.publish(job, type), threadRecords: this.threadRecords,
       executorIdentity: { kind: "acp", command: this.command, args: this.args } });
     this.owner = {};
     await this.runtime.register(this.owner, this.cwd, this.job.id);
@@ -502,9 +515,15 @@ export class AcpExecutorJobPort {
       payload, resolve }));
   }
 
+  settlePending(pending, status) {
+    this.director.publish({ ...this.job, executorSessionId: this.sessionId, turnId: pending.turnId }, `question.${status}`,
+      { requestId: pending.requestId, threadId: this.sessionId, turnId: pending.turnId });
+  }
+
   async answerQuestion(request) {
     const pending = this.questions.get(String(request.requestId));
     if (!pending) throw Object.assign(new Error("Question is not pending."), { code: "REQUEST_NOT_PENDING" });
+    this.settlePending(pending, "resolved");
     this.questions.delete(String(request.requestId));
     const response = request.action === "accept" ? { action: "accept", content: request.values ?? {} } : { action: request.action };
     pending.resolve(response);
@@ -517,6 +536,7 @@ export class AcpExecutorJobPort {
   async answerPermission(request) {
     const pending = this.permissions.get(String(request.requestId));
     if (!pending) throw Object.assign(new Error("Permission request is not pending."), { code: "REQUEST_NOT_PENDING" });
+    this.settlePending(pending, "resolved");
     this.permissions.delete(String(request.requestId));
     const outcome = request.outcome === "selected" ? { outcome: "selected", optionId: request.optionId } : { outcome: "cancelled" };
     pending.resolve({ outcome });
@@ -528,6 +548,7 @@ export class AcpExecutorJobPort {
     const permissions = [...this.permissions.values()];
     this.permissions.clear();
     for (const pending of permissions) {
+      this.settlePending(pending, "closed");
       const response = { outcome: { outcome: "cancelled" } };
       pending.resolve(response);
       await this.adapter.emit("permission.resolved", { requestId: pending.requestId, outcome: "cancelled", optionId: null },
@@ -536,6 +557,7 @@ export class AcpExecutorJobPort {
     const questions = [...this.questions.values()];
     this.questions.clear();
     for (const pending of questions) {
+      this.settlePending(pending, "closed");
       const response = { action: "cancel" };
       pending.resolve(response);
       await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: "cancel", values: null },
@@ -594,6 +616,7 @@ export class AcpExecutorJobPort {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    this.director?.close();
     await this.control?.close();
     await this.cancelPending();
     if (this.proc && this.proc.exitCode === null) {

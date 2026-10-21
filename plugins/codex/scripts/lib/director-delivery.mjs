@@ -47,7 +47,7 @@ export function directorEvent(job, type, payload = {}, stateDir = undefined) {
     : payload.notificationId ?? payload.id;
   const eventId = hash(JSON.stringify([stateDir, job.id, terminal ? "terminal" : type, identity]));
   let detail;
-  if (type === "question.opened") detail = `request=${payload.requestId}${questionIds(payload.questions ?? payload.fields)}: ${questionText(payload.questions ?? payload.fields, payload.message, Infinity)}`;
+  if (type === "question.opened" || type === "question.reminder") detail = `request=${payload.requestId}${questionIds(payload.questions ?? payload.fields)}: ${questionText(payload.questions ?? payload.fields, payload.message, Infinity)}`;
   else if (type === "director.notified") detail = `${payload.pendingRequestId == null ? "" : `pending_request=${payload.pendingRequestId} `}${payload.message ?? ""}`;
   else detail = job.errorMessage ?? job.result?.error?.message ?? job.result?.terminal?.finalMessages?.map((m) => m.text).join("\n") ?? "";
   return { eventId, sessionId: job.sessionId, stateDir, jobId: job.id, roundId: job.roundId ?? job.id, label: job.label ?? null, reportFile: job.reportFile ?? null, type,
@@ -59,7 +59,7 @@ export function directorEvent(job, type, payload = {}, stateDir = undefined) {
 export function eventPaths(event) {
   const directory = sessionDirectory(deliveryRoot(event.stateDir), event.sessionId);
   return { directory, item: path.join(directory, "outbox", `${event.eventId}.json`),
-    receipt: path.join(directory, "delivered", `${event.eventId}.json`), lock: path.join(directory, "locks", event.eventId) };
+    receipt: path.join(directory, "delivered", `${event.eventId}.json`), question: path.join(directory, "questions", `${event.payload?.questionEventId ?? event.eventId}.json`), lock: path.join(directory, "locks", event.eventId) };
 }
 export function confirmedRoute(event) {
   const route = readJson(path.join(eventPaths(event).directory, "route.json"));
@@ -81,10 +81,87 @@ async function lock(directory) {
   }
 }
 
-// Both routes hold the same item locks through output and receipt publication.
-// A crash after output but before the receipt/ACK can repeat the stable event id.
-// Claude's one-way channel API cannot provide receiver-side exactly-once delivery.
-export async function deliverDirectorEvents(events, route, output) {
+export function settleDirectorQuestion(job, question, status, stateDir) {
+  const event = directorEvent(job, "question.opened", question, stateDir);
+  if (!event) return;
+  const file = eventPaths(event).question;
+  if (!fs.existsSync(file)) durableJson(file, { eventId: event.eventId, status, at: new Date().toISOString() });
+}
+
+export function isDirectorEventPending(event) {
+  if (!event || wasDelivered(event)) return false;
+  if (event.type === "question.opened" || event.type === "question.reminder") {
+    const file = eventPaths(event).question;
+    if (fs.existsSync(file)) return false;
+    if (event.payload.expiresAt != null && event.payload.expiresAt <= Date.now()) {
+      durableJson(file, { eventId: event.eventId, status: "expired", at: new Date().toISOString() });
+      return false;
+    }
+  }
+  return true;
+}
+
+function retainEvent(event) {
+  if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
+    for (const question of pendingEvents(deliveryRoot(event.stateDir), event.sessionId)) {
+      if (question.type === "question.opened" && question.jobId === event.jobId && question.stateDir === event.stateDir) {
+        settleDirectorQuestion({ id: event.jobId, sessionId: event.sessionId }, question.payload, "closed", event.stateDir);
+      }
+    }
+  }
+  const paths = eventPaths(event);
+  if (!fs.existsSync(paths.item) && isDirectorEventPending(event)) {
+    durableJson(paths.item, { ...event, acceptedAt: event.acceptedAt ?? new Date().toISOString() });
+  }
+}
+
+export function deliveryRef(event) {
+  return Buffer.from(JSON.stringify({ eventId: event.eventId, sessionId: event.sessionId, stateDir: event.stateDir })).toString("base64url");
+}
+export const deliveryTag = (event) => `[codex-delivery=${deliveryRef(event)}]`;
+export function deliveryRefs(text) {
+  return [...text.matchAll(/\[codex-delivery=([A-Za-z0-9_-]+)\](?=\s*(?:\r?\n|<\/event>|$))/g)].map((match) => match[1]);
+}
+export const stripDeliveryTags = (text) => text.replace(/ ?\[codex-delivery=[A-Za-z0-9_-]+\]/g, "");
+export function eventFromRef(ref) {
+  try {
+    const identity = JSON.parse(Buffer.from(ref, "base64url").toString());
+    if (!/^[a-f0-9]{64}$/.test(identity.eventId) || typeof identity.sessionId !== "string" || typeof identity.stateDir !== "string") return null;
+    const event = readJson(eventPaths(identity).item);
+    return event && event.eventId === identity.eventId && event.sessionId === identity.sessionId && event.stateDir === identity.stateDir ? event : null;
+  } catch { return null; }
+}
+
+// Output only reserves a short transport attempt. It is not a delivery receipt:
+// the host may still drop the queued channel/Monitor frame at prompt.submit.
+export async function deliverDirectorEvents(events, route, output, { attemptMs = 5000 } = {}) {
+  const pending = [];
+  for (const event of new Map(events.filter(Boolean).map((e) => [e.eventId, e])).values()) {
+    retainEvent(event);
+    const paths = eventPaths(event);
+    const lease = await lock(paths.lock);
+    const attempt = path.join(paths.directory, "attempts", `${event.eventId}-${hash(route)}.json`);
+    try {
+      if (!isDirectorEventPending(event) || (readJson(attempt)?.until ?? 0) > Date.now()) continue;
+      durableJson(attempt, { until: Date.now() + attemptMs });
+      pending.push({ event, attempt });
+    } finally { await releaseWriter(paths.lock, lease); }
+  }
+  if (!pending.length) return false;
+  try {
+    if (await output(pending.map(({ event }) => event)) !== false) return true;
+  } catch (error) {
+    for (const { attempt } of pending) fs.rmSync(attempt, { force: true });
+    throw error;
+  }
+  for (const { attempt } of pending) fs.rmSync(attempt, { force: true });
+  return false;
+}
+
+// Only the ingress decision commits the final receipt. A crash after next()
+// accepts but before this fsync can repeat the stable id; receiver-side durable
+// enqueue and receipt are not atomic in Claude Code's hook API.
+export async function acceptDirectorEvents(events, route, accept) {
   const leases = [];
   try {
     for (const event of [...new Map(events.filter(Boolean).map((e) => [e.eventId, e])).values()].sort((a, b) => a.eventId.localeCompare(b.eventId))) {
@@ -92,10 +169,13 @@ export async function deliverDirectorEvents(events, route, output) {
       const lease = await lock(paths.lock);
       leases.push({ event, paths, lease });
     }
-    const pending = leases.filter(({ paths }) => !fs.existsSync(paths.receipt));
-    if (pending.length && await output(pending.map(({ event }) => event)) === false) return false;
-    for (const { event, paths } of pending) durableJson(paths.receipt, { eventId: event.eventId, route, at: new Date().toISOString() });
-    return pending.length > 0;
+    const pending = leases.filter(({ event }) => isDirectorEventPending(event));
+    if (!pending.length) return { drop: "Codex event already accepted or question closed" };
+    const result = await accept(pending.map(({ event }) => event));
+    if (!result?.drop) {
+      for (const { event, paths } of pending) durableJson(paths.receipt, { eventId: event.eventId, route, at: new Date().toISOString() });
+    }
+    return result;
   } finally {
     for (const { paths, lease } of leases.reverse()) await releaseWriter(paths.lock, lease);
   }
@@ -142,12 +222,13 @@ export class DirectorPublisher {
   }
 
   publish(job, type, payload = {}, stateDir = undefined) {
+    if (["question.resolved", "question.closed", "question.expired"].includes(type)) {
+      settleDirectorQuestion(job, payload, type.slice(9), stateDir);
+      return null;
+    }
     const event = directorEvent(job, type, payload, stateDir);
     if (!event) return null;
-    const paths = eventPaths(event);
-    if (!fs.existsSync(paths.item) && !fs.existsSync(paths.receipt)) {
-      durableJson(paths.item, { ...event, brokerInstance: this.instance, acceptedAt: new Date().toISOString() });
-    }
+    retainEvent({ ...event, brokerInstance: this.instance, acceptedAt: new Date().toISOString() });
     // Start IPC in this call, independently of ordinary history commits/deltas.
     this.push(event);
     return event.eventId;
@@ -156,9 +237,10 @@ export class DirectorPublisher {
   push(event) {
     if (this.inflight.has(event.eventId)) return this.inflight.get(event.eventId);
     const paths = eventPaths(event);
+    if (wasDelivered(event)) { fs.rmSync(paths.item, { force: true }); this.onDelivered(event); return; }
+    if (!isDirectorEventPending(event)) return;
     const route = confirmedRoute(event);
     if (!route) return;
-    if (wasDelivered(event)) { fs.rmSync(paths.item, { force: true }); this.onDelivered(event); return; }
     const sending = channelRequest(route.endpoint, { action: "deliver", sessionId: event.sessionId, eventId: event.eventId, instance: route.instance })
       .then((ack) => {
         if (ack.eventId === event.eventId && wasDelivered(event)) {

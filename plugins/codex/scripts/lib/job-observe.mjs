@@ -1,4 +1,4 @@
-import { directorEvent, deliverDirectorEvents } from "./director-delivery.mjs";
+import { directorEvent } from "./director-delivery.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
@@ -399,11 +399,10 @@ export async function handleObserve(argv) {
       } while (remaining > 0);
       await write(`${JSON.stringify({ type: "end", nextCursor: after, committedSeq })}\n`);
     } else if (command === "ack") {
-      // A note the pane delivered itself, over the director channel or a
-      // prompt, is marked read the way the events stream marks the ones it prints.
+      // Notification cleanup is separate from ingress acceptance. An explicit
+      // ack cannot stand in for the host accepting a queued notification.
       const ids = String(options.ids ?? "").split(",").filter(Boolean);
       if (!ids.length) throw errorFor("INVALID_ARGUMENT", "Pass --ids <notification-id,...>");
-      await deliverDirectorEvents(ids.map((id) => directorEvent(job, "director.notified", { id }, stateDir)), "ack", async () => {});
       await acknowledgeNotifications(cwd, job, ids);
       await write(`${JSON.stringify({ acknowledged: ids })}\n`);
     } else if (command === "follow") await follow(location, job, options);

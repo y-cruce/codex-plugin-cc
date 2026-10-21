@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Brokers dial this server at the event's handler. The durable session outbox
-// is replayed on bind/confirmation; ordinary job history is never polled here.
+// is watched by its consumer for recovery, including producer death before IPC.
+// A slow rescan repairs missed watch events; ordinary history is never polled.
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -8,8 +9,8 @@ import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { acquireWriter, releaseWriter } from "./lib/job-event-store.mjs";
-import { channelDirectory, channelRequest, deliveryRoot, deliverDirectorEvents, durableJson, eventPaths,
-  pendingEvents, readJson, sessionDirectory } from "./lib/director-delivery.mjs";
+import { channelDirectory, channelRequest, deliveryRoot, deliverDirectorEvents, durableJson,
+  pendingEvents, readJson, sessionDirectory, deliveryRef, isDirectorEventPending } from "./lib/director-delivery.mjs";
 
 export const PROBE = "codex-director-channel-probe";
 const HOLD_MS = 15000;
@@ -27,6 +28,7 @@ export function channelMessage(line) {
   if (line.jobId) meta.job = line.jobId;
   if (line.eventId) meta.id = line.eventId;
   if (line.sessionId) meta.session = line.sessionId;
+  if (line.stateDir) meta.delivery = deliveryRef(line);
   return { content: text, meta };
 }
 
@@ -36,13 +38,15 @@ export function paths(claudePid, dir = channelDirectory()) {
 }
 
 export class DirectorChannel {
-  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send }) {
+  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send, retryMs = 1000, rescanMs = 30000 }) {
     this.root = root;
     this.files = paths(claudePid, dir);
     this.instance = randomUUID();
     this.nonce = `${process.pid}-${this.instance}`;
     this.endpoint = process.platform === "win32" ? `\\\\.\\pipe\\codex-channel-${this.instance}` : path.join(dir, `${process.pid}-${this.instance.slice(0, 8)}.sock`);
     this.send = send;
+    this.retryMs = retryMs;
+    this.rescanMs = rescanMs;
     this.sessionId = null;
     this.epoch = 0;
     this.confirmed = false;
@@ -79,9 +83,13 @@ export class DirectorChannel {
     }
     this.heartbeat = setInterval(() => { if (this.confirmed && this.sessionId) this.confirmation(); }, 2000);
     this.heartbeat.unref();
+    this.safety = setInterval(() => this.queueReplay(), this.rescanMs);
+    this.safety.unref();
   }
 
   async unbind() {
+    this.watcher?.close();
+    clearTimeout(this.retry);
     if (!this.sessionId) return;
     const directory = sessionDirectory(this.root, this.sessionId);
     if (readJson(path.join(directory, "route.json"))?.instance === this.instance) fs.rmSync(path.join(directory, "route.json"), { force: true });
@@ -98,6 +106,10 @@ export class DirectorChannel {
     this.lease = await acquireWriter(consumer);
     this.sessionId = sessionId;
     this.epoch += 1;
+    const outbox = path.join(sessionDirectory(this.root, sessionId), "outbox");
+    fs.mkdirSync(outbox, { recursive: true });
+    this.watcher = fs.watch(outbox, { persistent: false }, () => this.queueReplay());
+    this.watcher.on("error", () => this.queueReplay());
     this.saveRoute();
     if (this.confirmed) await this.replay();
   }
@@ -123,18 +135,35 @@ export class DirectorChannel {
     if (route?.instance !== this.instance || route.epoch !== this.epoch || fs.readFileSync(path.join(directory, "consumer", "writer.lock"), "utf8") !== this.lease) {
       throw new Error("Channel consumer was fenced");
     }
-    await deliverDirectorEvents([event], "channel", async ([pending]) => {
+    await deliverDirectorEvents([event], `channel:${this.instance}:${this.epoch}`, async ([pending]) => {
       await this.send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: channelMessage(pending) });
     });
-    // The shared receipt is durable before ACK. If we die before publishing the
-    // receipt, replay may repeat this id; stdout is not a receiver-side receipt.
+    // This ACK covers transport only. The item remains in the outbox until
+    // prompt.submit accepts it and commits the shared ingress receipt.
     return { eventId: event.eventId };
   }
 
+  queueReplay() {
+    if (this.closed || !this.confirmed || !this.sessionId || this.replayQueued) return;
+    this.replayQueued = true;
+    this.tail = this.tail.catch(() => {}).then(async () => {
+      this.replayQueued = false;
+      if (!this.closed && this.confirmed && this.sessionId) await this.replay();
+    }).catch(() => {});
+  }
+
   async replay() {
-    for (const event of pendingEvents(this.root, this.sessionId)) {
-      await this.deliver(event);
-      fs.rmSync(eventPaths(event).item, { force: true });
+    const sessionId = this.sessionId;
+    try {
+      for (const event of pendingEvents(this.root, sessionId)) {
+        if (isDirectorEventPending(event)) await this.deliver(event);
+      }
+    } finally {
+      clearTimeout(this.retry);
+      if (!this.closed && this.sessionId === sessionId && pendingEvents(this.root, sessionId).some(isDirectorEventPending)) {
+        this.retry = setTimeout(() => this.queueReplay(), this.retryMs);
+        this.retry.unref();
+      }
     }
   }
 
@@ -163,6 +192,9 @@ export class DirectorChannel {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.heartbeat);
+    clearInterval(this.safety);
+    this.watcher?.close();
+    clearTimeout(this.retry);
     for (const socket of this.sockets) socket.destroy();
     await this.tail;
     await this.unbind();

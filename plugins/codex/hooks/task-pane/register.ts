@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from 'claude-code'
-import { deliverDirectorEvents, directorEvent, wasDelivered } from '../../scripts/lib/director-delivery.mjs'
+import { deliverDirectorEvents, acceptDirectorEvents, directorEvent, isDirectorEventPending } from '../../scripts/lib/director-delivery.mjs'
 import { directorTools, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
@@ -312,14 +312,26 @@ async function channelBase($: EngineInterface, state: State): Promise<string | n
 // A confirmed channel receives broker events directly. The pane only reads
 // its readiness marker to stop Monitors; its independent ingress hook confirms
 // the probe and rebinds the session. An expired heartbeat restores fallback.
-async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number) {
+async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number, acpRoots: Set<string>) {
   const base = await channelBase($, state)
   const confirmation = base && await $.fs.exists(`${base}.confirmed.json`) ? JSON.parse(await $.fs.read(`${base}.confirmed.json`)) as { sessionId?: string; until?: number } : null
   const on = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
-  if (on && !state.channelOn) stopMonitors($, state)
+  if (on) {
+    // ACP runs inside its worker and cannot publish its own abrupt exit. Keep
+    // those roots watched for owner loss; their normal events use the channel.
+    let retired = false
+    for (const [root, monitor] of state.monitors) {
+      if (acpRoots.has(root)) continue
+      state.monitors.delete(root)
+      retired = true
+      if (monitor.taskId) stopMonitor($, state, monitor.taskId)
+    }
+    if (retired) await recordMonitors($, state)
+  }
   state.channelOn = on
   state.channelHold = !on && Boolean(base) && await probing($, base!, now)
-  if (!on && !state.channelHold) await ensureMonitors($, state, live, now)
+  if (on) await ensureMonitors($, state, acpRoots, now)
+  else if (!state.channelHold) await ensureMonitors($, state, live, now)
 }
 
 async function probing($: EngineInterface, base: string, now: number) {
@@ -839,7 +851,8 @@ async function pollOnce($: EngineInterface, state: State) {
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
     state.liveRoots = new Set(found.map(entry => entry.cwd))
-    await routeEvents($, state, state.liveRoots, now)
+    const acpRoots = new Set(found.filter(({ thread }) => state.views.get(thread.id)?.executor?.kind === 'acp').map(entry => entry.cwd))
+    await routeEvents($, state, state.liveRoots, now, acpRoots)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
@@ -1005,9 +1018,15 @@ async function pollOnce($: EngineInterface, state: State) {
         return !result.drop
       }
       const events = batch.map(line => line.delivery).filter(Boolean)
-      const sent = events.length ? await deliverDirectorEvents(events, 'pane', output) : await output()
+      const sent = events.length ? await deliverDirectorEvents(events, 'pane', async pending => {
+        // Own submits bypass this plugin's prompt hooks; the returned drop is
+        // the host's ingress decision for this submit.
+        const result = await acceptDirectorEvents(pending, 'pane', async accepted =>
+          await output(accepted) ? {} : { drop: 'Codex pane submit refused' })
+        return !result?.drop
+      }) : await output()
       if (stale()) return
-      if (sent || events.length && events.every(wasDelivered)) {
+      if (sent || events.length && events.every(event => !isDirectorEventPending(event))) {
         state.pending = mine.slice(6)
         await acknowledge($, state, batch)
       }

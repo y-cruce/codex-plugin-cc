@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
-import { deliveryRoot, pendingEvents } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { deliveryRoot, pendingEvents, acceptDirectorEvents, eventFromRef } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
@@ -24,7 +24,9 @@ test("two repository brokers push answerable questions/notes through a delta flo
   if (process.platform === "win32") fs.writeFileSync(path.join(bin, "codex.cmd"), '@node "%~dp0codex" %*\r\n');
   const root = deliveryRoot();
   const messages = [];
-  const channel = new DirectorChannel({ root, dir, send: async (message) => { messages.push(message.params); } });
+  const channel = new DirectorChannel({ root, dir, send: async (message) => {
+    await acceptDirectorEvents([eventFromRef(message.params.meta.delivery)], "channel", async () => { messages.push(message.params); return {}; });
+  } });
   await channel.start("owner");
   await channel.handle({ action: "confirm", sessionId: "owner", instance: channel.instance, nonce: channel.nonce });
   t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });

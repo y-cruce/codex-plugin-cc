@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
+import { DirectorPublisher, directorEvent, deliveryRoot, wasDelivered, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { registerDirectorChannel } from "../plugins/codex/hooks/director-channel/register.ts";
+import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { goalCommand, goalFromMessages, pushLine, registerTaskPane, shouldDropMonitorEnd, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
@@ -964,20 +968,74 @@ test("an ending reported from the view is not reported again when its event is r
   assert.equal(pane.toasts.filter((text) => /job\.completed/.test(text)).length, 1, pane.toasts.join("\n"));
 });
 
-test("with a confirmed channel the pane displays jobs without replay, spool, ack or director submissions", async () => {
-  let replays = 0
-  const now = Date.now()
-  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
-    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
-    replay: () => { replays++; return "" } })
-  pane.listing[0].historyAvailable = true
-  await pane.tick()
-  pane.list([{ ...pane.listing[0], status: "completed" }])
-  await pane.tick()
-  assert.equal(replays, 0)
-  assert.equal(pane.acks.length, 0)
-  assert.deepEqual([...pane.files].filter(([file]) => file.includes('.spool/')), [])
+test("confirmed channels skip pane replay and retain only ACP owner-exit Monitors", async () => {
+  for (const kind of ["codex", "acp"]) {
+    let replays = 0
+    const calls = []
+    const now = Date.now()
+    const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, watch: false, now,
+      preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+      toolCall: async request => { calls.push(request.tool); return { result: { taskId: "owner-monitor" } } },
+      replay: () => { replays++; return "" } })
+    pane.live.executor = { kind, label: kind }
+    pane.touch()
+    pane.viewTick()
+    pane.listing[0].historyAvailable = true
+    await pane.tick()
+    pane.list([{ ...pane.listing[0], status: "completed" }])
+    await pane.tick()
+    assert.equal(replays, 0)
+    assert.equal(pane.acks.length, 0)
+    assert.deepEqual([...pane.files].filter(([file]) => file.includes('.spool/')), [])
+    assert.equal(calls.filter(tool => tool === 'Monitor').length, kind === 'acp' ? 1 : 0)
+  }
 })
+
+test("a queued Monitor frame dropped after retirement stays pending for channel ingress recovery", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  const stateDir = resolveStateDir(cwd);
+  const job = { id: "job-a", workspaceRoot: cwd, sessionId: "session", status: "running", pid: process.pid };
+  const publisher = new DirectorPublisher({ retryMs: 60000 });
+  t.after(() => publisher.close());
+  const payload = { id: "queued-note", message: "queued before confirmation" };
+  const event = directorEvent(job, "director.notified", payload, stateDir);
+  publisher.publish(job, event.type, payload, stateDir);
+  const abort = new AbortController();
+  const lines = [];
+  let polls = 0;
+  await streamJobEvents(cwd, { session: job.sessionId, threadRecords: false, signal: abort.signal, pollMs: 1 }, {
+    directorStateDir: stateDir, status: async () => ({ unavailable: "broker exited" }),
+    snapshot: () => { if (polls++) abort.abort(); return { running: [job], recent: [] }; },
+    writeLine: async line => { lines.push(line); },
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(wasDelivered(event), false, "printing a Monitor line cannot commit ingress acceptance");
+  const pane = await paneHarness(new Map([["codex:tasks:session:retiredMonitors", ["retired"]]]));
+  const hooks = new Map();
+  registerDirectorChannel((name, fn) => hooks.set(name, fn));
+  const ingress = hooks.get("prompt.submit");
+  const engine = { session: { id: async () => job.sessionId } };
+  const notification = { origin: { kind: "task-notification" },
+    text: `<task-notification><task-id>retired</task-id><event>${lines[0]}</event></task-notification>` };
+  const rejected = await ingress(engine, notification, e => pane.prompt(e, async () => assert.fail("retired Monitor reached director")));
+  assert.ok(rejected.drop);
+  assert.equal(wasDelivered(event), false);
+  assert.ok(fs.existsSync(eventPaths(event).item));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-pane-"));
+  let accepted = 0;
+  const channel = new DirectorChannel({ root: deliveryRoot(stateDir), dir, send: async message => {
+    const attributes = Object.entries(message.params.meta).map(([key, value]) => `${key}="${value}"`).join(" ");
+    await ingress(engine, { origin: { kind: "channel", server: "plugin:codex:director" },
+      text: `<channel ${attributes}>${message.params.content}</channel>` }, async () => { accepted++; return {}; });
+  } });
+  t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  await channel.start(job.sessionId);
+  await channel.handle({ action: "confirm", sessionId: job.sessionId, instance: channel.instance, nonce: channel.nonce });
+  assert.equal(accepted, 1);
+  assert.equal(wasDelivered(event), true);
+  assert.ok((await ingress(engine, notification, async () => assert.fail("already accepted Monitor replay"))).drop);
+});
 
 test("a rebuilt cursor announces a historical question only while its live view still has that request pending", async () => {
   for (const pending of [true, false]) {

@@ -6,6 +6,9 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import os from "node:os";
+import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
+import { acceptDirectorEvents, eventFromRef } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { loadAcpDriver } from "../plugins/codex/scripts/lib/acp.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
@@ -30,7 +33,7 @@ async function waitFor(predicate, timeoutMs = BROKER_READY_MS) {
 async function setupPort(t, id = "acp-job", options = {}) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
-  const job = { id, executor: "acp", workspaceRoot: cwd, status: "running", title: "ACP test",
+  const job = { id, executor: "acp", workspaceRoot: cwd, sessionId: options.sessionId, status: "running", title: "ACP test",
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: process.pid };
   writeJobFile(cwd, id, job);
   upsertJob(cwd, job);
@@ -102,10 +105,19 @@ test("ACP basic turn normalizes all session update variants and preserves tool p
 });
 
 test("ACP permission and elicitation stay distinct and resolve through pending maps", async (t) => {
-  const h = await setupPort(t, "acp-input");
+  const h = await setupPort(t, "acp-input", { sessionId: "acp-director" });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-acp-"));
+  const messages = [];
+  const channel = new DirectorChannel({ dir, send: async message => {
+    await acceptDirectorEvents([eventFromRef(message.params.meta.delivery)], "channel", async () => { messages.push(message.params); return {}; });
+  } });
+  await channel.start(h.job.sessionId);
+  await channel.handle({ action: "confirm", sessionId: h.job.sessionId, instance: channel.instance, nonce: channel.nonce });
+  t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const permissionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "permission" }] });
   const permission = await waitFor(() => [...h.port.permissions.values()][0]);
   assert.equal(permission.payload.options[0].kind, "allow_once");
+  await waitFor(() => messages.some(message => message.content.includes(permission.requestId)));
   await h.port.answerPermission({ requestId: permission.requestId, outcome: "selected", optionId: "allow" });
   assert.equal((await permissionTurn.done).status, "completed");
   const manual = h.events.find((event) => event.type === "permission.resolved" && event.identity.requestId === permission.requestId);
@@ -119,9 +131,15 @@ test("ACP permission and elicitation stay distinct and resolve through pending m
   const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
   const question = await waitFor(() => [...h.port.questions.values()][0]);
   assert.deepEqual(question.payload.fields.map((field) => field.kind), ["text", "single_select", "multi_select", "boolean"]);
+  await waitFor(() => messages.some(message => message.content.includes(question.requestId)));
+  assert.equal(messages.filter(message => message.meta.event.startsWith("job_")).length, 0, "turn completions are not job endings");
   await h.port.answerQuestion({ requestId: question.requestId, action: "accept",
     values: { name: "Ada", choice: "a", tags: ["x"], enabled: true } });
-  assert.equal((await questionTurn.done).status, "completed");
+  const terminal = await questionTurn.done;
+  assert.equal(terminal.status, "completed");
+  await h.port.adapter.completeJob(terminal);
+  await waitFor(() => messages.some(message => message.meta.event === "job_completed"));
+  assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 1);
   assert.ok(h.events.some((event) => event.type === "permission.resolved"));
   assert.ok(h.events.some((event) => event.type === "question.resolved"));
 });

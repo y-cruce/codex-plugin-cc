@@ -1,3 +1,4 @@
+import { acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, directorEvent, eventPaths, durableJson } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
@@ -28,9 +29,16 @@ async function monitor(reports, handlers = {}, options = {}) {
     terminalReportsFile: path.join(makeTempDir(), "terminal-reports.json"),
     directorStateDir: path.join(handlers.terminalReportsFile ? path.dirname(handlers.terminalReportsFile) : makeTempDir(), "state", "repo"),
     ...handlers,
-    writeLine: (line) => {
-      lines.push(line);
-      return handlers.writeLine?.(line);
+    writeLine: async (line) => {
+      const output = async () => {
+        const text = stripDeliveryTags(line);
+        lines.push(text);
+        await handlers.writeLine?.(text);
+        return {};
+      };
+      const events = deliveryRefs(line).map(eventFromRef).filter(Boolean);
+      if (events.length) await acceptDirectorEvents(events, "monitor", output);
+      else await output();
     }
   });
   return lines;
@@ -394,6 +402,21 @@ test("events fails a dead owner once even when its broker is unavailable", async
   });
   assert.deepEqual(lines, ["FAILED job=job-1 thread=thread-1 owner process exited"]);
   assert.deepEqual(failures, ["owner process exited"]);
+});
+
+test("ACP owner loss still stages an ending when the channel is confirmed", async (t) => {
+  isolateTestEnvironment(t);
+  const directorStateDir = path.join(process.env.CLAUDE_PLUGIN_DATA, "state", "repo");
+  const current = { ...job, executor: "acp", sessionId: "owner", pid: 123 };
+  const event = directorEvent(current, "job.failed", {}, directorStateDir);
+  const confirmationFile = path.join(makeTempDir(), "channel-confirmed.json");
+  durableJson(confirmationFile, { instance: "instance", sessionId: "owner", until: Date.now() + 60000 });
+  durableJson(path.join(eventPaths(event).directory, "route.json"), { instance: "instance", sessionId: "owner", confirmed: true, confirmationFile });
+  const lines = await monitor([{ running: [current] }], {
+    directorStateDir, ownerAlive: () => false, status: async () => ({ unavailable: "worker exited" }),
+    fail: (_cwd, record, reason) => ({ ...record, status: "failed", errorMessage: reason }),
+  }, { session: "owner" });
+  assert.deepEqual(lines, ["FAILED job=job-1 thread=thread-1 owner process exited"]);
 });
 
 test("an owner failure already marked by status is reported without acknowledging stale notes", async () => {
