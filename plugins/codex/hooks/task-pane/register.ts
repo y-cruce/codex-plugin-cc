@@ -1,5 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
-import { directorIngress } from '../director-channel/register.ts'
+import { admitDirector, bindDirector, directorIngress } from '../director-channel/register.ts'
+import type { DirectorChannel } from '../director-channel/register.ts'
 import { directorTools, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
@@ -315,8 +316,8 @@ async function channelBase($: EngineInterface, state: State): Promise<string | n
 async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number, fallbackRoots: Set<string>) {
   const base = await channelBase($, state)
   const confirmation = base && await $.fs.exists(`${base}.confirmed.json`) ? JSON.parse(await $.fs.read(`${base}.confirmed.json`)) as { sessionId?: string; until?: number } : null
-  const on = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
-  if (on) {
+  const confirmed = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
+  if (confirmed) {
     // Unknown/old producers retain polling. ACP also needs owner-exit recovery
     // because its runtime runs inside the worker that could be killed.
     let retired = false
@@ -328,9 +329,9 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
     }
     if (retired) await recordMonitors($, state)
   }
-  state.channelOn = on
-  state.channelHold = !on && Boolean(base) && await probing($, base!, now)
-  if (on) await ensureMonitors($, state, fallbackRoots, now)
+  state.channelOn = confirmed
+  state.channelHold = !confirmed && Boolean(base) && await probing($, base!, now)
+  if (confirmed) await ensureMonitors($, state, fallbackRoots, now)
   else if (!state.channelHold) await ensureMonitors($, state, live, now)
 }
 
@@ -401,11 +402,11 @@ export function goalFromMessages(messages: { role: string; text: string }[]): bo
   return undefined
 }
 
-function setGoal($: EngineInterface, state: State, on: boolean) {
-  if (state.goal === on) return
-  state.goal = on
-  if (state.key) writeStore($, state, `${state.key}:goal`, on)
-  if (!on) releaseHold($, state)
+function setGoal($: EngineInterface, state: State, goal: boolean) {
+  if (state.goal === goal) return
+  state.goal = goal
+  if (state.key) writeStore($, state, `${state.key}:goal`, goal)
+  if (!goal) releaseHold($, state)
   else $.clock.after(0, () => { void poll($, state) })
 }
 
@@ -1235,7 +1236,7 @@ function visibleThreads(state: State): LiveView[] {
     })
 }
 
-export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools()) {
+export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
@@ -1249,6 +1250,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   }
 
   on('session.start', async ($, e, next) => {
+    if (director) await bindDirector($, director)
     const result = await next(e)
     await startDirectorTools($, tools)
     if (e.isInteractive) $.clock.after(0, async () => {
@@ -1260,8 +1262,9 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     })
     return result
   })
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    if (director) await bindDirector($, director)
     state.busy = true
     if (!state.script) $.clock.after(0, () => { void bootstrap($, state, push) })
     return next(e)
@@ -1298,13 +1301,20 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     releaseHold($, state)
     return next(e)
   })
-  on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind !== 'task-notification') return next(e)
-    const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
-    if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
-    if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
-    if (!shouldDropMonitorExpiry(e.text, state.ownedMonitors)) return next(e)
-    return { drop: 'Codex tasks monitor expiry needs no director action' }
+  on('prompt.submit', async ($, submitted, next) => {
+    const admitted = director ? await admitDirector($, director, submitted) : { event: submitted }
+    if ('drop' in admitted) return admitted
+    const e = admitted.event
+    const result = await (async () => {
+      if (e.origin.kind !== 'task-notification') return next(e)
+      const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
+      if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
+      if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
+      if (!shouldDropMonitorExpiry(e.text, state.ownedMonitors)) return next(e)
+      return { drop: 'Codex tasks monitor expiry needs no director action' }
+    })()
+    if (!result?.drop && 'accept' in admitted && admitted.accept) await directorIngress($, 'accept', admitted.accept)
+    return result
   })
   // A dispatch creates its job in whatever repository the brief names; waiting
   // for the next rescan would show it up to half a minute late.
@@ -1322,8 +1332,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   on('command.run', async ($, e, next) => {
     if (e.command === 'goal') {
       const result = await next(e)
-      const on = goalCommand(e.args, result.text)
-      if (on !== undefined) setGoal($, state, on)
+      const goal = goalCommand(e.args, result.text)
+      if (goal !== undefined) setGoal($, state, goal)
       return result
     }
     if (!/(^|:)tasks$/.test(e.command)) return next(e)

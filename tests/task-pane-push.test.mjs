@@ -6,7 +6,7 @@ import path from "node:path";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { runIngress } from "../plugins/codex/scripts/director-ingress.mjs";
 import { DirectorPublisher, directorEvent, deliveryRoot, wasDelivered, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
-import { registerDirectorChannel } from "../plugins/codex/hooks/director-channel/register.ts";
+import { admitDirector, directorChannel, directorIngress } from "../plugins/codex/hooks/director-channel/register.ts";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { goalCommand, goalFromMessages, pushLine, registerTaskPane, shouldDropMonitorEnd, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
@@ -16,6 +16,15 @@ import { buildSingleJobSnapshot, readStoredJob } from "../plugins/codex/scripts/
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+
+// The pane runs the director ingress ahead of its own prompt.submit; this is that chain.
+const through = (director) => async ($, e, next) => {
+  const admitted = await admitDirector($, director, e);
+  if ("drop" in admitted) return admitted;
+  const result = await next(admitted.event);
+  if (!result?.drop && admitted.accept) await directorIngress($, "accept", admitted.accept);
+  return result;
+};
 
 // The hooks run the delivery record's script through $.process.run; here it runs in-process.
 const ingressRun = async (args) => String(args[1] ?? "").endsWith("/director-ingress.mjs")
@@ -1026,9 +1035,7 @@ test("a queued Monitor frame dropped after retirement stays pending for channel 
   assert.equal(lines.length, 1);
   assert.equal(wasDelivered(event), false, "printing a Monitor line cannot commit ingress acceptance");
   const pane = await paneHarness(new Map([["codex:tasks:session:retiredMonitors", ["retired"]]]));
-  const hooks = new Map();
-  registerDirectorChannel((name, fn) => hooks.set(name, fn));
-  const ingress = hooks.get("prompt.submit");
+  const ingress = through(directorChannel());
   const engine = { plugin: { root: "/plugin" }, session: { id: async () => job.sessionId }, process: { run: ingressRun } };
   const notification = { origin: { kind: "task-notification" },
     text: `<task-notification><task-id>retired</task-id><event>${lines[0]}</event></task-notification>` };

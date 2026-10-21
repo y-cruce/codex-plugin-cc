@@ -1,6 +1,6 @@
 {
   "name": "codex",
-  "version": "1.4.69",
+  "version": "1.4.70",
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"

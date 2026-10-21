@@ -10,8 +10,18 @@ import { DirectorChannel, channelMessage, paths } from "../plugins/codex/scripts
 import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending, durableJson, touchDirectorSession, sweepDirectorSessions, sessionDirectory, INACTIVE_SESSION_MS } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
+import { admitDirector, directorIngress } from "../plugins/codex/hooks/director-channel/register.ts";
 import { isolateTestEnvironment, makeTempDir, waitFor } from "./helpers.mjs";
 import { runIngress } from "../plugins/codex/scripts/director-ingress.mjs";
+
+// The pane runs the director ingress ahead of its own prompt.submit; this is that chain.
+const through = (director) => async ($, e, next) => {
+  const admitted = await admitDirector($, director, e);
+  if ("drop" in admitted) return admitted;
+  const result = await next(admitted.event);
+  if (!result?.drop && admitted.accept) await directorIngress($, "accept", admitted.accept);
+  return result;
+};
 
 function fixture(t) {
   isolateTestEnvironment(t);
@@ -140,9 +150,10 @@ test("Monitor and channel share receipts in either switching order, including co
 
 test("session rebind fences consumers and replays frames the old-session ingress dropped on clear", async (t) => {
   const h = fixture(t);
-  const { registerDirectorChannel } = await import("../plugins/codex/hooks/director-channel/register.ts");
+  const { directorChannel, registerDirectorChannel, bindDirector } = await import("../plugins/codex/hooks/director-channel/register.ts");
   const hooks = new Map();
-  registerDirectorChannel((name, fn) => hooks.set(name, fn));
+  const director = directorChannel();
+  registerDirectorChannel((name, fn) => hooks.set(name, fn), director);
   let sessionId = h.job.sessionId;
   const engine = { plugin: { root: "/plugin" }, session: { id: async () => sessionId }, process: { run: async (args) =>
     ({ exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" }) } };
@@ -150,7 +161,7 @@ test("session rebind fences consumers and replays frames the old-session ingress
   const channel = await h.start(async message => {
     frames.push(message.params);
     const attributes = Object.entries(message.params.meta).map(([key, value]) => `${key}="${value}"`).join(" ");
-    await hooks.get("prompt.submit")(engine, { origin: { kind: "channel", server: "plugin:codex:director" },
+    await through(director)(engine, { origin: { kind: "channel", server: "plugin:codex:director" },
       text: `<channel ${attributes}>${message.params.content}</channel>` }, async () => { h.sent.push(message.params); return {}; });
   });
   const publisher = h.publisher();
@@ -270,9 +281,10 @@ test("retention removes 30-day inactive sessions at startup and keeps live consu
 });
 
 test("the independent ingress hook binds lifecycle sessions, confirms probes and rejects old-session frames", async () => {
-  const { registerDirectorChannel } = await import("../plugins/codex/hooks/director-channel/register.ts");
+  const { directorChannel, registerDirectorChannel, bindDirector } = await import("../plugins/codex/hooks/director-channel/register.ts");
   const hooks = new Map();
-  registerDirectorChannel((event, fn) => hooks.set(event, fn));
+  const director = directorChannel();
+  registerDirectorChannel((event, fn) => hooks.set(event, fn), director);
   const runs = [];
   let sessionId = "first";
   const engine = { plugin: { root: "/plugin" }, session: { id: async () => sessionId },
@@ -280,13 +292,13 @@ test("the independent ingress hook binds lifecycle sessions, confirms probes and
     env: { set: async () => {} }, ui: { log: () => {} } };
   await hooks.get("classic.SessionStart")(engine, { session_id: sessionId }, async () => {});
   sessionId = "resumed";
-  await hooks.get("session.start")(engine, {}, async () => {});
+  await bindDirector(engine, director);
   sessionId = "cleared";
-  await hooks.get("turn.start")(engine, {}, async () => {});
+  await bindDirector(engine, director);
   assert.deepEqual(runs.filter((args) => args[0] === "node").map((args) => args.slice(2)), [
     ["bind", "4242", "first"], ["bind", "4242", "resumed"], ["bind", "4242", "cleared"]
   ]);
-  const submit = hooks.get("prompt.submit");
+  const submit = through(director);
   const origin = { kind: "channel", server: "plugin:codex:director" };
   const dropped = await submit(engine, { origin, text: '<channel event="probe">codex-director-channel-probe 1-nonce: check</channel>' }, async () => assert.fail("probe reached director"));
   assert.ok(dropped.drop);
