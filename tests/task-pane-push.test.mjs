@@ -987,6 +987,49 @@ test("with the channel on, a note goes to the spool with its body and is acknowl
     ["reported", "--session", "session", "--jobs", "job-a"]);
 });
 
+test("with the channel on, a live job holds /goal with a quiet shell that stops when its ending is pushed", async () => {
+  const calls = [];
+  let pages = [[], [], [{ type: "job.completed", seq: "3" }]];
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]],
+    toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+    replay: () => {
+      const events = pages.shift() ?? [];
+      return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "1"}`, committedSeq: events.at(-1)?.seq ?? "1" }]
+        .map((row) => JSON.stringify(row)).join("\n");
+    } });
+  pane.listing[0].historyAvailable = true;
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const holds = calls.filter((request) => request.tool === "Bash");
+  assert.equal(holds.length, 1);
+  assert.equal(holds[0].run_in_background, true);
+  assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*while :; do sleep 3600; done; : session$/);
+  assert.deepEqual(calls.filter((request) => request.tool === "Monitor"), []);
+  await pane.tick();
+  assert.equal(calls.filter((request) => request.tool === "Bash").length, 1, "a settling hold is not armed twice");
+  pane.list([{ ...pane.listing[0], status: "completed" }]);
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((request) => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "hold-1" }]);
+  const batches = [...pane.files].filter(([file]) => file.startsWith("/tmp/codex-channel/4242.spool/"));
+  assert.match(batches.at(-1)[1].lines.at(-1).text, /job\.completed/);
+  // Its stop reaches nobody, should the host report it.
+  const dropped = await pane.prompt({ origin: { kind: "task-notification" },
+    text: "<task-notification><task-id>hold-1</task-id><status>killed</status></task-notification>" }, async () => assert.fail("reached the director"));
+  assert.ok(dropped.drop);
+});
+
+test("without the channel no hold is armed", async () => {
+  const calls = [];
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242",
+    toolCall: async (request) => { calls.push(request.tool); return { result: { taskId: "m1" } }; },
+    replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }) });
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((tool) => tool === "Bash"), []);
+});
+
 test("a question committed before its view is written is still pushed, and an answered one is not", async () => {
   let pages = [[], [{ type: "question.opened", seq: "2", payload: { requestId: "q1" }, text: "request=q1 ids=source: Which source?" }],
     [{ type: "question.opened", seq: "3", payload: { requestId: "q2" }, text: "request=q2: Old?" },

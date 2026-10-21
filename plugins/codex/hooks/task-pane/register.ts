@@ -15,6 +15,7 @@ type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: Liv
 type Receipt = { cursor?: string; terminal?: string; floor?: string }
 type Ledger = Record<string, Receipt>
 type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
+type Hold = { armedAt: number; checkedAt?: number; taskId?: string }
 type State = {
   cwd: string
   home: string
@@ -83,6 +84,9 @@ type State = {
   // Monitor is armed in the meantime.
   channelHold: boolean
   channelBatches: number
+  // The background shell that keeps an active /goal waiting while jobs run
+  // and the channel, not a Monitor, carries their events (see holdGoal).
+  hold: Hold | null
 }
 
 const PANE = 'codex_tasks'
@@ -329,6 +333,80 @@ async function probing($: EngineInterface, base: string, now: number) {
   }
 }
 
+// /goal judges its condition at the end of every turn unless a background
+// shell, Monitor or agent is still running; then it waits, and checks in only
+// after half an hour. Codex jobs run outside Claude Code, so with the channel
+// on and no Monitor armed nothing told it to wait: each turn ended, the goal
+// was judged not met, and the next turn began at once to say "still waiting".
+// While a job is live this shell stands in for the Monitor. It prints nothing
+// and never ends on its own; the pane stops it the poll a job's ending is
+// pushed, before that push opens the turn whose end should judge the goal.
+// The shell reads as what it is in the goal's check-in, which quotes it.
+function holdCommand(sessionId: string) {
+  return `: Codex jobs running, /goal waits for them, the codex plugin stops this when they end; while :; do sleep 3600; done; : ${sessionId}`
+}
+
+async function holding($: EngineInterface, state: State): Promise<boolean> {
+  const epoch = state.epoch
+  const found = await $.process.run(['pgrep', '-f', `the codex plugin stops this when they end.*: ${state.sessionId}`],
+    { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
+  // A failed probe keeps the hold: dropping it would let the goal spin.
+  return state.epoch !== epoch || state.leaving || !found || found.exitCode !== 1
+}
+
+function recordHold($: EngineInterface, state: State) {
+  writeStore($, state, `${state.key}:hold`, state.hold)
+}
+
+function releaseHold($: EngineInterface, state: State) {
+  const hold = state.hold
+  if (!hold) return
+  state.hold = null
+  recordHold($, state)
+  if (hold.taskId) stopMonitor($, state, hold.taskId)
+}
+
+async function holdGoal($: EngineInterface, state: State, active: boolean, sure: boolean, now: number) {
+  if (!state.channelOn || !active) {
+    // A listing that failed this poll may have hidden a live job.
+    if (sure || !state.channelOn) releaseHold($, state)
+    return
+  }
+  const hold = state.hold
+  if (hold && now - hold.armedAt < SETTLE_MS) return
+  if (hold) {
+    if (now - (hold.checkedAt ?? 0) < CHECK_MS) return
+    const present = await holding($, state)
+    if (state.hold !== hold) return
+    hold.checkedAt = now
+    if (present) return
+    if (hold.taskId) state.retiredMonitors.add(hold.taskId)
+  }
+  const epoch = state.epoch
+  const sessionId = state.sessionId
+  const armed: Hold = { armedAt: now }
+  state.hold = armed
+  recordHold($, state)
+  void $.tool.call({
+    tool: 'Bash',
+    command: holdCommand(sessionId),
+    description: 'Codex jobs running (keeps /goal waiting)',
+    run_in_background: true,
+  }).then(result => {
+    const output = result.result as { backgroundTaskId?: string; taskId?: string } | undefined
+    const taskId = output?.backgroundTaskId ?? output?.taskId
+    if (!taskId) return
+    if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || state.hold !== armed) {
+      return stopMonitor($, state, taskId, `${$.plugin.name}:tasks:${sessionId}`)
+    }
+    armed.taskId = taskId
+    recordOwned($, state, taskId)
+    recordHold($, state)
+  }).catch((error: unknown) => {
+    $.ui.log(`Codex tasks goal hold: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  })
+}
+
 // A note the pane delivered is marked read, as the events stream marks the
 // ones it prints; left unread, status kept counting it as undelivered.
 async function acknowledge($: EngineInterface, state: State, lines: State['pending']) {
@@ -557,6 +635,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const epoch = ++state.epoch
   if (state.sessionId && sessionId !== state.sessionId) {
     stopMonitors($, state)
+    releaseHold($, state)
     state.opened = state.shown = false
   }
   state.leaving = true
@@ -574,6 +653,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const retired = (await readStore($, `${key}:retiredMonitors`) ?? []) as string[]
   const armed = await readStore($, `${key}:monitors`)
   const owned = (await readStore($, `${key}:ownedMonitors`) ?? []) as string[]
+  const hold = (await readStore($, `${key}:hold`) ?? null) as Hold | null
   // Reads from an ended session must not install their cache in its successor.
   if (epoch !== state.epoch) return
   state.leaving = false
@@ -592,6 +672,8 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
     if (monitor.taskId) state.ownedMonitors.add(monitor.taskId)
   }
   for (const id of owned) state.ownedMonitors.add(id)
+  // A reload keeps the shell; the next poll finds it, or stops it.
+  state.hold = hold && typeof hold.armedAt === 'number' ? hold : null
   $.ui.invalidate('ui.render')
 }
 
@@ -854,6 +936,11 @@ async function pollOnce($: EngineInterface, state: State) {
       }
     })
     await refreshViews($, state)
+    if (stale()) return
+    const ended = new Set(lines.filter(line => line.type.startsWith('job.')).map(line => line.jobId))
+    const active = found.some(({ thread }) => !DONE.includes(thread.status) && !ended.has(thread.jobId))
+    const sure = [...state.roots].every(root => !state.unreadable.has(root))
+    await holdGoal($, state, active, sure, now)
     if (stale()) return
     // What the pane would draw, not every view the scan loaded: a repository
     // keeps its finished jobs for weeks, so a fresh session found four threads
@@ -1123,7 +1210,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
-    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0,
+    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0, hold: null,
   }
 
   on('session.start', async ($, e, next) => {
@@ -1172,6 +1259,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     resetRows(state)
     state.pending = []
     stopMonitors($, state)
+    releaseHold($, state)
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
