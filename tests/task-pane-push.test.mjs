@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
+import { runIngress } from "../plugins/codex/scripts/director-ingress.mjs";
 import { DirectorPublisher, directorEvent, deliveryRoot, wasDelivered, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { registerDirectorChannel } from "../plugins/codex/hooks/director-channel/register.ts";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
@@ -15,6 +16,10 @@ import { buildSingleJobSnapshot, readStoredJob } from "../plugins/codex/scripts/
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+
+// The hooks run the delivery record's script through $.process.run; here it runs in-process.
+const ingressRun = async (args) => String(args[1] ?? "").endsWith("/director-ingress.mjs")
+  ? { exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" } : null;
 
 const view = {
   pendingQuestion: { requestId: "0", text: "是否允许修改测试文件？", openedAt: "", expiresAt: null },
@@ -105,6 +110,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       },
     },
     process: { run: async (args, init) => {
+      const routed = await ingressRun(args);
+      if (routed) return routed;
       if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
@@ -1022,7 +1029,7 @@ test("a queued Monitor frame dropped after retirement stays pending for channel 
   const hooks = new Map();
   registerDirectorChannel((name, fn) => hooks.set(name, fn));
   const ingress = hooks.get("prompt.submit");
-  const engine = { session: { id: async () => job.sessionId } };
+  const engine = { plugin: { root: "/plugin" }, session: { id: async () => job.sessionId }, process: { run: ingressRun } };
   const notification = { origin: { kind: "task-notification" },
     text: `<task-notification><task-id>retired</task-id><event>${lines[0]}</event></task-notification>` };
   const rejected = await ingress(engine, notification, e => pane.prompt(e, async () => assert.fail("retired Monitor reached director")));

@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from 'claude-code'
-import { deliverDirectorEvents, acceptDirectorEvents, directorEvent, isDirectorEventPending } from '../../scripts/lib/director-delivery.mjs'
+import { directorIngress } from '../director-channel/register.ts'
 import { directorTools, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
@@ -949,7 +949,7 @@ async function pollOnce($: EngineInterface, state: State) {
         if (status && receipt.terminal !== status) {
           if (!direct && !first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(state.paths.get(thread.id) ?? '')?.[1]
-            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, fallback: thread.directorPush !== true, delivery: directory ? directorEvent({ id: job.id, sessionId: state.sessionId }, `job.${status}`, {}, directory) : null })
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, fallback: thread.directorPush !== true, delivery: directory ? { job: { id: job.id, sessionId: state.sessionId }, type: `job.${status}`, stateDir: directory } : null })
           }
           receipt.terminal = status
         }
@@ -1017,22 +1017,26 @@ async function pollOnce($: EngineInterface, state: State) {
     state.pending = pending.slice(-12)
     if (state.push && pending.length && !state.busy && !state.channelHold) {
       const batch = pending.slice(0, 6)
-      const output = async (pending = batch.map(line => line.delivery).filter(Boolean)) => {
-        const ids = new Set(pending.map(event => event.eventId))
-        const selected = batch.filter(line => !line.delivery || ids.has(line.delivery.eventId))
-        const result = await $.prompt.submit({ text: `Codex tasks\n${selected.map(line => line.text).join('\n')}` })
-        return !result.drop
-      }
-      const events = batch.map(line => line.delivery).filter(Boolean)
-      const sent = events.length ? await deliverDirectorEvents(events, 'pane', async pending => {
-        // Own submits bypass this plugin's prompt hooks; the returned drop is
-        // the host's ingress decision for this submit.
-        const result = await acceptDirectorEvents(pending, 'pane', async accepted =>
-          await output(accepted) ? {} : { drop: 'Codex pane submit refused' })
-        return !result?.drop
-      }) : await output()
+      const submit = async (selected: typeof batch) =>
+        !(await $.prompt.submit({ text: `Codex tasks\n${selected.map(line => line.text).join('\n')}` })).drop
+      const described = batch.filter(line => line.delivery)
+      let sent = false
+      let settled = false
+      if (described.length) {
+        const { items } = await directorIngress($, 'reserve', { items: described.map(line => line.delivery), route: 'pane' }) as
+          { items: { event: unknown; reserved: boolean; pending: boolean }[] }
+        const reserved = new Set(described.filter((_, i) => items[i]?.reserved))
+        settled = items.every(item => !item.pending)
+        if (reserved.size) {
+          // Own submits bypass this plugin's prompt hooks; the returned drop is
+          // the host's ingress decision for this submit.
+          sent = await submit(batch.filter(line => !line.delivery || reserved.has(line)))
+          const events = items.filter(item => item.reserved).map(item => item.event)
+          await directorIngress($, sent ? 'accept' : 'release', { events, route: 'pane' })
+        }
+      } else sent = await submit(batch)
       if (stale()) return
-      if (sent || events.length && events.every(event => !isDirectorEventPending(event))) {
+      if (sent || settled) {
         state.pending = pending.slice(6)
         await acknowledge($, state, batch)
       }

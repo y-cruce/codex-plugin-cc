@@ -11,6 +11,7 @@ import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPa
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { isolateTestEnvironment, makeTempDir, waitFor } from "./helpers.mjs";
+import { runIngress } from "../plugins/codex/scripts/director-ingress.mjs";
 
 function fixture(t) {
   isolateTestEnvironment(t);
@@ -143,7 +144,8 @@ test("session rebind fences consumers and replays frames the old-session ingress
   const hooks = new Map();
   registerDirectorChannel((name, fn) => hooks.set(name, fn));
   let sessionId = h.job.sessionId;
-  const engine = { session: { id: async () => sessionId } };
+  const engine = { plugin: { root: "/plugin" }, session: { id: async () => sessionId }, process: { run: async (args) =>
+    ({ exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" }) } };
   const frames = [];
   const channel = await h.start(async message => {
     frames.push(message.params);

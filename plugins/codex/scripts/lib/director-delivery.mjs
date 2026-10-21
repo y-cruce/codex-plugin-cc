@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { acquireWriter, releaseWriter } from "./job-event-store.mjs";
 import { questionIds, questionText } from "./job-event-model.mjs";
 import { resolveStateDirAtWorkspaceRoot } from "./state.mjs";
+import { deliveryRefs, stripDeliveryTags } from "./director-refs.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export const channelDirectory = () => path.join(os.tmpdir(), "codex-channel");
@@ -159,10 +160,7 @@ export function deliveryRef(event) {
   return Buffer.from(JSON.stringify({ eventId: event.eventId, sessionId: event.sessionId, stateDir: event.stateDir })).toString("base64url");
 }
 export const deliveryTag = (event) => `[codex-delivery=${deliveryRef(event)}]`;
-export function deliveryRefs(text) {
-  return [...text.matchAll(/\[codex-delivery=([A-Za-z0-9_-]+)\](?=\s*(?:\r?\n|<\/event>|$))/g)].map((match) => match[1]);
-}
-export const stripDeliveryTags = (text) => text.replace(/ ?\[codex-delivery=[A-Za-z0-9_-]+\]/g, "");
+export { deliveryRefs, stripDeliveryTags };
 export function eventFromRef(ref) {
   try {
     const identity = JSON.parse(Buffer.from(ref, "base64url").toString());
@@ -175,27 +173,55 @@ export function eventFromRef(ref) {
 // Output only reserves a short transport attempt. It is not a delivery receipt:
 // the host may still drop the queued channel/Monitor frame at prompt.submit.
 export async function deliverDirectorEvents(events, route, output, { attemptMs = 5000 } = {}) {
+  const pending = await reserveDirectorEvents(events, route, { attemptMs });
+  if (!pending.length) return false;
+  try {
+    if (await output(pending) !== false) return true;
+  } catch (error) {
+    releaseDirectorEvents(pending, route);
+    throw error;
+  }
+  releaseDirectorEvents(pending, route);
+  return false;
+}
+
+const attemptFile = (event, route) => path.join(eventPaths(event).directory, "attempts", event.eventId, `${hash(route)}.json`);
+
+// The halves of deliverDirectorEvents, for a caller whose output runs in
+// another process (the hooks module, through scripts/director-ingress.mjs).
+export async function reserveDirectorEvents(events, route, { attemptMs = 5000 } = {}) {
   const pending = [];
   for (const event of new Map(events.filter(Boolean).map((e) => [e.eventId, e])).values()) {
     retainEvent(event);
     const paths = eventPaths(event);
     const lease = await lock(paths.lock);
-    const attempt = path.join(paths.directory, "attempts", event.eventId, `${hash(route)}.json`);
+    const attempt = attemptFile(event, route);
     try {
       if (!isDirectorEventPending(event) || (readJson(attempt)?.until ?? 0) > Date.now()) continue;
       durableJson(attempt, { until: Date.now() + attemptMs });
-      pending.push({ event, attempt });
+      pending.push(event);
     } finally { await releaseWriter(paths.lock, lease); }
   }
-  if (!pending.length) return false;
-  try {
-    if (await output(pending.map(({ event }) => event)) !== false) return true;
-  } catch (error) {
-    for (const { attempt } of pending) fs.rmSync(attempt, { force: true });
-    throw error;
+  return pending;
+}
+export function releaseDirectorEvents(events, route) {
+  for (const event of events.filter(Boolean)) fs.rmSync(attemptFile(event, route), { force: true });
+}
+
+// The receipt half of acceptDirectorEvents, written once the ingress has let
+// the items through. Without the lock held across that decision, a channel and
+// a Monitor frame accepted at the same moment may both reach the director.
+export async function commitDirectorEvents(events, route) {
+  for (const event of new Map(events.filter(Boolean).map((e) => [e.eventId, e])).values()) {
+    const paths = eventPaths(event);
+    const lease = await lock(paths.lock);
+    try {
+      if (!isDirectorEventPending(event)) continue;
+      touchDirectorSession(paths.directory);
+      durableJson(paths.receipt, { eventId: event.eventId, route, at: new Date().toISOString() });
+      cleanupDirectorEvent(event);
+    } finally { await releaseWriter(paths.lock, lease); }
   }
-  for (const { attempt } of pending) fs.rmSync(attempt, { force: true });
-  return false;
 }
 
 // Only the ingress decision commits the final receipt. A crash after next()
