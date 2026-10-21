@@ -968,7 +968,10 @@ async function pollOnce($: EngineInterface, state: State) {
     await refreshViews($, state)
     if (stale()) return
     const ended = new Set(lines.filter(line => line.type.startsWith('job.')).map(line => line.jobId))
+    // Live as the fallback Monitors count it: a stale "running" index whose job
+    // file is gone held /goal open for good.
     const active = found.some(({ thread }) => {
+      if (thread.live !== true) return false
       const view = state.views.get(thread.id)
       // A queued round can still display its predecessor's completed view.
       const sameRound = thread.status !== 'queued' && view && (view.activeRoundId ?? view.latestRoundId ?? view.jobId) === thread.jobId

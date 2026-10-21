@@ -1138,6 +1138,21 @@ test("a channel goal hold stops after the last job ends by status or reconciliat
   }
 });
 
+test("a stale running index whose job file is gone does not hold /goal", async () => {
+  const calls = [];
+  const now = Date.now();
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+    replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }),
+  });
+  pane.list([{ ...pane.listing[0], historyAvailable: true, directorPush: true, live: false }]);
+  await pane.goal("all jobs merged", "Goal set: all jobs merged");
+  await pane.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.filter(request => request.tool === "Bash"), []);
+});
+
 test("reload finds the existing session goal hold and stops it without starting a second shell", async () => {
   const now = Date.now();
   const calls = [];
