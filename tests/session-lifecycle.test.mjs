@@ -17,7 +17,8 @@ test("function SessionStart restores ownership when the command env export is ab
   const handler = hooks.get("classic.SessionStart");
   assert.equal(typeof handler, "function");
   const input = { session_id: "branch", transcript_path: "/transcript/branch.jsonl" };
-  const result = await handler({ env: { set: async (key, value) => values.set(key, value) } }, input,
+  const result = await handler({ env: { set: async (key, value) => values.set(key, value) },
+    process: { run: async () => ({ exitCode: 1, stdout: "", stderr: "" }) }, ui: { log() {} } }, input,
     async () => ({ legacy: "timed out" }));
   assert.equal(values.get("CODEX_COMPANION_SESSION_ID"), "branch");
   assert.equal(values.get("CODEX_COMPANION_TRANSCRIPT_PATH"), input.transcript_path);
@@ -96,9 +97,13 @@ test("fork start exports branch ownership; resume end preserves the original job
     for (const sessionId of ["original", "branch"]) {
       const envFile = path.join(cwd, `${sessionId}.sh`);
       process.env.CLAUDE_ENV_FILE = envFile;
-      handleSessionStart({ session_id: sessionId, transcript_path: `/projects/${sessionId}.jsonl` });
-      const env = Object.fromEntries([...fs.readFileSync(envFile, "utf8").matchAll(/^export (\w+)='([^']*)'$/gm)]
-        .map((match) => [match[1], match[2]]));
+      // A compaction starts the session again with the same env file.
+      for (let start = 0; start < 2; start += 1) {
+        handleSessionStart({ session_id: sessionId, transcript_path: `/projects/${sessionId}.jsonl` });
+      }
+      const exports = [...fs.readFileSync(envFile, "utf8").matchAll(/^export (\w+)='([^']*)'$/gm)];
+      assert.equal(exports.length, 3);
+      const env = Object.fromEntries(exports.map((match) => [match[1], match[2]]));
       assert.equal(env.CODEX_COMPANION_TRANSCRIPT_PATH, `/projects/${sessionId}.jsonl`);
       assert.equal(env.CLAUDE_PLUGIN_DATA, process.env.CLAUDE_PLUGIN_DATA);
       jobs.push(createJobRecord({ id: sessionId, status: "running" }, { env }));

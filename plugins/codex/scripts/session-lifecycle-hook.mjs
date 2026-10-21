@@ -24,11 +24,23 @@ function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 }
 
+// Claude Code keeps this file for the whole session and sources it before
+// every Bash command, and SessionStart runs again on each resume, /clear and
+// compaction: appending grew it by three exports every time.
 function appendEnvVar(name, value) {
-  if (!process.env.CLAUDE_ENV_FILE || value == null || value === "") {
+  const file = process.env.CLAUDE_ENV_FILE;
+  if (!file || value == null || value === "") {
     return;
   }
-  fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
+  let lines = [];
+  try {
+    lines = fs.readFileSync(file, "utf8").split("\n").filter((line) => line && !line.startsWith(`export ${name}=`));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  fs.writeFileSync(file, [...lines, `export ${name}=${shellEscape(value)}`, ""].join("\n"), "utf8");
 }
 
 function cleanupSessionJobs(cwd, sessionId) {
