@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { acquireWriter, releaseWriter } from "./lib/job-event-store.mjs";
 import { channelDirectory, channelRequest, deliveryRoot, deliverDirectorEvents, durableJson,
-  pendingEvents, readJson, sessionDirectory, deliveryRef, isDirectorEventPending } from "./lib/director-delivery.mjs";
+  pendingEvents, readJson, sessionDirectory, deliveryRef, isDirectorEventPending, touchDirectorSession, sweepDirectorSessions } from "./lib/director-delivery.mjs";
 
 export const PROBE = "codex-director-channel-probe";
 const HOLD_MS = 15000;
@@ -55,6 +55,7 @@ export class DirectorChannel {
   }
 
   async start(sessionId) {
+    sweepDirectorSessions(this.root);
     fs.mkdirSync(path.dirname(this.files.server), { recursive: true });
     fs.rmSync(this.files.confirmed, { force: true });
     durableJson(this.files.probing, { at: Date.now(), until: Date.now() + HOLD_MS, nonce: this.nonce });
@@ -85,6 +86,8 @@ export class DirectorChannel {
     this.heartbeat.unref();
     this.safety = setInterval(() => this.queueReplay(), this.rescanMs);
     this.safety.unref();
+    this.retention = setInterval(() => sweepDirectorSessions(this.root), 3600000);
+    this.retention.unref();
   }
 
   async unbind() {
@@ -92,6 +95,7 @@ export class DirectorChannel {
     clearTimeout(this.retry);
     if (!this.sessionId) return;
     const directory = sessionDirectory(this.root, this.sessionId);
+    touchDirectorSession(directory);
     if (readJson(path.join(directory, "route.json"))?.instance === this.instance) fs.rmSync(path.join(directory, "route.json"), { force: true });
     await releaseWriter(path.join(directory, "consumer"), this.lease);
     this.sessionId = null;
@@ -101,6 +105,7 @@ export class DirectorChannel {
     if (!sessionId || this.sessionId === sessionId) return;
     await this.unbind();
     fs.rmSync(this.files.confirmed, { force: true });
+    touchDirectorSession(sessionDirectory(this.root, sessionId));
     const consumer = path.join(sessionDirectory(this.root, sessionId), "consumer");
     fs.mkdirSync(consumer, { recursive: true });
     this.lease = await acquireWriter(consumer);
@@ -183,7 +188,7 @@ export class DirectorChannel {
     if (!/^[a-f0-9]{64}$/.test(message.eventId)) throw new Error("Invalid event id");
     const directory = sessionDirectory(this.root, this.sessionId);
     const event = readJson(path.join(directory, "outbox", `${message.eventId}.json`));
-    if (!event && fs.existsSync(path.join(directory, "delivered", `${message.eventId}.json`))) return { eventId: message.eventId };
+    if (!event && (fs.existsSync(path.join(directory, "delivered", `${message.eventId}.json`)) || fs.existsSync(path.join(directory, "questions", `${message.eventId}.json`)))) return { eventId: message.eventId };
     if (!event || event.eventId !== message.eventId || event.sessionId !== this.sessionId) throw new Error("Unknown director event");
     return this.deliver(event);
   }
@@ -193,6 +198,7 @@ export class DirectorChannel {
     this.closed = true;
     clearInterval(this.heartbeat);
     clearInterval(this.safety);
+    clearInterval(this.retention);
     this.watcher?.close();
     clearTimeout(this.retry);
     for (const socket of this.sockets) socket.destroy();

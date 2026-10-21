@@ -7,7 +7,7 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { DirectorChannel, channelMessage, paths } from "../plugins/codex/scripts/director-channel.mjs";
-import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending, durableJson, touchDirectorSession, sweepDirectorSessions, sessionDirectory, INACTIVE_SESSION_MS } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { isolateTestEnvironment, makeTempDir, waitFor } from "./helpers.mjs";
@@ -31,8 +31,7 @@ function fixture(t) {
   };
   const confirm = (channel, sessionId = job.sessionId) => channel.handle({ action: "confirm", sessionId, instance: channel.instance, nonce: channel.nonce });
   const publisher = () => {
-    const publisher = new DirectorPublisher({ root, retryMs: 60000 });
-    t.after(() => publisher.close());
+    const publisher = new DirectorPublisher();
     return publisher;
   };
   return { dir, stateDir, root, job, sent, start, confirm, publisher };
@@ -53,7 +52,6 @@ test("unconfirmed items survive broker/channel restart and replay stable ids acr
   const event = directorEvent(h.job, "director.notified", note, h.stateDir);
   assert.equal(h.sent.length, 0);
   assert.equal(pendingEvents(h.root, h.job.sessionId).length, 1);
-  publisher.close();
   await channel.close();
   // A send succeeded, but the process died before it could persist its receipt.
   channel = await h.start(async (message) => { h.sent.push(message.params); throw new Error("crash before receipt/ACK"); });
@@ -68,8 +66,8 @@ test("unconfirmed items survive broker/channel restart and replay stable ids acr
   publisher = h.publisher();
   await publisher.push(event);
   assert.equal(h.sent.length, 2);
-  // Lose the transport ACK after output/receipt: the next broker's replay sees
-  // the same receipt and never outputs this item twice.
+  // Lose the transport ACK after ingress: an explicit retry sees the same
+  // receipt and never outputs this item twice. Recovery belongs to the consumer.
   const second = { id: "lost-ack", message: "ACK may be lost" };
   const next = directorEvent(h.job, "director.notified", second, h.stateDir);
   fs.rmSync(channel.files.confirmed, { force: true });
@@ -83,7 +81,6 @@ test("unconfirmed items survive broker/channel restart and replay stable ids acr
     });
   });
   await waitFor(() => wasDelivered(next));
-  publisher.close();
   publisher = h.publisher();
   await publisher.push(next);
   assert.equal(h.sent.filter((message) => message.meta.id === next.eventId).length, 1);
@@ -185,11 +182,14 @@ test("the confirmed consumer recovers acceptance after publisher exit and retrie
   let attempts = 0;
   const channel = await h.start(async message => {
     if (++attempts === 1) throw new Error("temporary output failure");
-    await acceptDirectorEvents([eventFromRef(message.params.meta.delivery)], "channel", async () => { h.sent.push(message.params); return {}; });
+    const event = eventFromRef(message.params.meta.delivery);
+    h.sent.push(message.params);
+    // Simulate ingress dying after its receipt fsync, before unlinking the item.
+    durableJson(eventPaths(event).receipt, { eventId: event.eventId, route: "channel" });
   });
   await h.confirm(channel);
   const source = `import { DirectorPublisher } from ${JSON.stringify(new URL("../plugins/codex/scripts/lib/director-delivery.mjs", import.meta.url).href)};
-    const publisher = new DirectorPublisher({ retryMs: 60000 });
+    const publisher = new DirectorPublisher();
     publisher.push = () => process.exit(0);
     publisher.publish(${JSON.stringify(h.job)}, "director.notified", { id: "producer-exit", message: "accepted before exit" }, ${JSON.stringify(h.stateDir)});`;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], { env: process.env, stdio: "ignore" });
@@ -199,6 +199,7 @@ test("the confirmed consumer recovers acceptance after publisher exit and retrie
   await waitFor(() => h.sent.length === 1, "consumer watch/retry without producer", 5000);
   assert.equal(attempts, 2);
   assert.equal(h.sent[0].content.includes("accepted before exit"), true);
+  assert.deepEqual(pendingEvents(h.root, h.job.sessionId), [], "consumer cleans accepted items without a producer timer");
 });
 
 test("answered, closed and expired questions stay retired across channel and Monitor replay", async (t) => {
@@ -226,6 +227,7 @@ test("answered, closed and expired questions stay retired across channel and Mon
     else if (reason === "turn-closed") control.observe({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
     else await waitFor(() => control.snapshot(threadId).error?.includes("timed out"));
     assert.equal(readJson(eventPaths(event).question).status, reason === "answered" ? "resolved" : reason === "expired" ? "expired" : "closed");
+    assert.equal(fs.existsSync(eventPaths(event).item), false, "settlement removes the item while keeping its tombstone");
     retired.push({ question, event });
   }
   await h.confirm(channel);
@@ -234,6 +236,35 @@ test("answered, closed and expired questions stay retired across channel and Mon
   fs.rmSync(channel.files.confirmed, { force: true });
   assert.deepEqual(await monitor(h, { questions: retired.map(item => item.question) }), []);
   assert.ok(retired.every(({ event }) => !isDirectorEventPending(event) && !wasDelivered(event)));
+});
+
+test("retention removes 30-day inactive sessions at startup and keeps live consumers", async (t) => {
+  const h = fixture(t);
+  const publisher = h.publisher();
+  const now = Date.now();
+  const cases = [
+    { session: "expired", at: now - INACTIVE_SESSION_MS - 86400000, keep: false },
+    { session: "recent", at: now - 86400000, keep: true },
+    { session: "live", at: now - INACTIVE_SESSION_MS - 86400000, keep: true, live: true },
+  ];
+  for (const entry of cases) {
+    publisher.publish({ ...h.job, sessionId: entry.session }, "director.notified", { id: entry.session, message: "pending" }, h.stateDir);
+    const directory = sessionDirectory(h.root, entry.session);
+    durableJson(path.join(directory, "delivered", "receipt.json"), {});
+    durableJson(path.join(directory, "questions", "tombstone.json"), {});
+    if (entry.live) durableJson(path.join(directory, "consumer", "writer.lock"), { pid: process.pid, nonce: "live-test-consumer" });
+    touchDirectorSession(directory, entry.at);
+  }
+  const channel = await h.start();
+  for (const entry of cases) assert.equal(fs.existsSync(sessionDirectory(h.root, entry.session)), entry.keep, entry.session);
+  const later = sessionDirectory(h.root, "expired-after-start");
+  publisher.publish({ ...h.job, sessionId: "expired-after-start" }, "director.notified", { id: "later" }, h.stateDir);
+  touchDirectorSession(later, now - INACTIVE_SESSION_MS - 86400000);
+  await channel.replay();
+  assert.equal(fs.existsSync(later), true, "current-session recovery never performs global retention");
+  sweepDirectorSessions(h.root, now);
+  assert.equal(fs.existsSync(later), false, "the hourly retention pass deletes the whole expired session");
+  assert.equal(fs.existsSync(sessionDirectory(h.root, "live")), true);
 });
 
 test("the independent ingress hook binds lifecycle sessions, confirms probes and rejects old-session frames", async () => {

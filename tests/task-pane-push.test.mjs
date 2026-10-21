@@ -57,7 +57,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   files.set(viewPath, live);
   for (const [file, value] of options.preset ?? []) files.set(file, value);
   const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
-    status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false }];
+    status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false, directorPush: true }];
   let threads = listing;
   let writes = 0;
   let failWrites = options.failWrites ?? 0;
@@ -968,26 +968,33 @@ test("an ending reported from the view is not reported again when its event is r
   assert.equal(pane.toasts.filter((text) => /job\.completed/.test(text)).length, 1, pane.toasts.join("\n"));
 });
 
-test("confirmed channels skip pane replay and retain only ACP owner-exit Monitors", async () => {
-  for (const kind of ["codex", "acp"]) {
+test("confirmed channels retain fallback for undeclared producers and ACP owner exit", async () => {
+  for (const [kind, declared] of [["codex", true], ["codex", false], ["codex", undefined], ["acp", true]]) {
     let replays = 0
     const calls = []
     const now = Date.now()
     const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, watch: false, now,
       preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
-      toolCall: async request => { calls.push(request.tool); return { result: { taskId: "owner-monitor" } } },
-      replay: () => { replays++; return "" } })
+      toolCall: async request => { calls.push(request.tool); return { result: { taskId: "fallback-monitor" } } },
+      replay: () => {
+        replays++
+        return [
+          { type: "question.opened", seq: "1", payload: { requestId: "old-q" }, text: "request=old-q ids=source: Which?" },
+          { type: "end", nextCursor: "c1", committedSeq: "1" },
+        ].map(JSON.stringify).join("\n")
+      } })
     pane.live.executor = { kind, label: kind }
+    pane.live.pendingQuestion = { requestId: "old-q", text: "Which?", openedAt: "", expiresAt: null }
     pane.touch()
     pane.viewTick()
     pane.listing[0].historyAvailable = true
+    pane.listing[0].directorPush = declared
     await pane.tick()
-    pane.list([{ ...pane.listing[0], status: "completed" }])
-    await pane.tick()
-    assert.equal(replays, 0)
+    assert.equal(replays > 0, declared !== true)
+    assert.equal(pane.toasts.some(text => text.includes('request=old-q')), declared !== true)
+    assert.equal(calls.filter(tool => tool === 'Monitor').length, kind === 'acp' || declared !== true ? 1 : 0)
     assert.equal(pane.acks.length, 0)
     assert.deepEqual([...pane.files].filter(([file]) => file.includes('.spool/')), [])
-    assert.equal(calls.filter(tool => tool === 'Monitor').length, kind === 'acp' ? 1 : 0)
   }
 })
 
@@ -996,8 +1003,7 @@ test("a queued Monitor frame dropped after retirement stays pending for channel 
   const cwd = makeTempDir();
   const stateDir = resolveStateDir(cwd);
   const job = { id: "job-a", workspaceRoot: cwd, sessionId: "session", status: "running", pid: process.pid };
-  const publisher = new DirectorPublisher({ retryMs: 60000 });
-  t.after(() => publisher.close());
+  const publisher = new DirectorPublisher();
   const payload = { id: "queued-note", message: "queued before confirmation" };
   const event = directorEvent(job, "director.notified", payload, stateDir);
   publisher.publish(job, event.type, payload, stateDir);

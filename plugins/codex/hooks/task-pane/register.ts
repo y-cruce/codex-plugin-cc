@@ -8,7 +8,7 @@ import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
-  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean }
+  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean }
 type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
   startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
 // `floor` is the committed seq when this ledger rebuilt the job's cursor from
@@ -65,7 +65,7 @@ type State = {
   unreadable: Map<string, number>
   owners: Map<string, string[]>
   rootIds: Map<string, Set<string>>
-  pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string; delivery?: any }[]
+  pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string; delivery?: any; fallback?: boolean }[]
   worker: string
   toEnd: boolean
   pinned: boolean
@@ -312,16 +312,16 @@ async function channelBase($: EngineInterface, state: State): Promise<string | n
 // A confirmed channel receives broker events directly. The pane only reads
 // its readiness marker to stop Monitors; its independent ingress hook confirms
 // the probe and rebinds the session. An expired heartbeat restores fallback.
-async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number, acpRoots: Set<string>) {
+async function routeEvents($: EngineInterface, state: State, live: Set<string>, now: number, fallbackRoots: Set<string>) {
   const base = await channelBase($, state)
   const confirmation = base && await $.fs.exists(`${base}.confirmed.json`) ? JSON.parse(await $.fs.read(`${base}.confirmed.json`)) as { sessionId?: string; until?: number } : null
   const on = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
   if (on) {
-    // ACP runs inside its worker and cannot publish its own abrupt exit. Keep
-    // those roots watched for owner loss; their normal events use the channel.
+    // Unknown/old producers retain polling. ACP also needs owner-exit recovery
+    // because its runtime runs inside the worker that could be killed.
     let retired = false
     for (const [root, monitor] of state.monitors) {
-      if (acpRoots.has(root)) continue
+      if (fallbackRoots.has(root)) continue
       state.monitors.delete(root)
       retired = true
       if (monitor.taskId) stopMonitor($, state, monitor.taskId)
@@ -330,7 +330,7 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
   }
   state.channelOn = on
   state.channelHold = !on && Boolean(base) && await probing($, base!, now)
-  if (on) await ensureMonitors($, state, acpRoots, now)
+  if (on) await ensureMonitors($, state, fallbackRoots, now)
   else if (!state.channelHold) await ensureMonitors($, state, live, now)
 }
 
@@ -846,16 +846,17 @@ async function pollOnce($: EngineInterface, state: State) {
       owners: rows.owners, provisional: rows.provisional })
     if (changed) $.ui.invalidate('ui.render')
     const ledger: Ledger = { ...state.ledger }
-    const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string; delivery?: any }[] = []
+    const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string; delivery?: any; fallback?: boolean }[] = []
     if (stale()) return
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
     state.liveRoots = new Set(found.map(entry => entry.cwd))
-    const acpRoots = new Set(found.filter(({ thread }) => state.views.get(thread.id)?.executor?.kind === 'acp').map(entry => entry.cwd))
-    await routeEvents($, state, state.liveRoots, now, acpRoots)
+    const fallbackRoots = new Set(found.filter(({ thread }) => thread.directorPush !== true || state.views.get(thread.id)?.executor?.kind === 'acp').map(entry => entry.cwd))
+    await routeEvents($, state, state.liveRoots, now, fallbackRoots)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
+      const direct = state.channelOn && thread.directorPush === true
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
       // back off only once it has failed a few polls in a row.
@@ -884,7 +885,7 @@ async function pollOnce($: EngineInterface, state: State) {
         // first event never opened one: no history is the answer, not a failure
         // worth retrying. Replaying it until the give-up count spends five
         // processes a poll and then reports a permanent fact as an error line.
-        if (thread.historyAvailable !== false && !state.channelOn) {
+        if (thread.historyAvailable !== false && !direct) {
           // Read during a director turn as well. A turn can run for half an
           // hour, and a pane that stops reading for it shows a task frozen at
           // whatever it was doing when the turn began, then jumps.
@@ -931,7 +932,7 @@ async function pollOnce($: EngineInterface, state: State) {
             // without a line left the reconciliation below nothing to report.
             const ending = event.type.startsWith('job.') && !first && !foreign
             const notificationId = event.type === 'director.notified' ? event.payload?.notificationId || undefined : undefined
-            if ((announce || ending) && line && !reported) lines.push({ jobId: job.id, cwd, text: line, type: event.type, notificationId, delivery: event.delivery })
+            if ((announce || ending) && line && !reported) lines.push({ jobId: job.id, cwd, text: line, type: event.type, notificationId, delivery: event.delivery, fallback: thread.directorPush !== true })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -946,9 +947,9 @@ async function pollOnce($: EngineInterface, state: State) {
         // "said once" line was said every two seconds for as long as it failed.
         state.unreadable.delete(job.id)
         if (status && receipt.terminal !== status) {
-          if (!state.channelOn && !first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
+          if (!direct && !first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(state.paths.get(thread.id) ?? '')?.[1]
-            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, delivery: directory ? directorEvent({ id: job.id, sessionId: state.sessionId }, `job.${status}`, {}, directory) : null })
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, fallback: thread.directorPush !== true, delivery: directory ? directorEvent({ id: job.id, sessionId: state.sessionId }, `job.${status}`, {}, directory) : null })
           }
           receipt.terminal = status
         }
@@ -1007,10 +1008,10 @@ async function pollOnce($: EngineInterface, state: State) {
       !state.followed.has(line.jobId) && !state.monitors.has(line.cwd))]
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.
-    state.pending = mine.slice(-12)
-    if (state.channelOn) state.pending = []
-    else if (state.push && mine.length && !state.busy && !state.channelHold) {
-      const batch = mine.slice(0, 6)
+    const pending = state.channelOn ? mine.filter(line => line.fallback) : mine
+    state.pending = pending.slice(-12)
+    if (state.push && pending.length && !state.busy && !state.channelHold) {
+      const batch = pending.slice(0, 6)
       const output = async (pending = batch.map(line => line.delivery).filter(Boolean)) => {
         const ids = new Set(pending.map(event => event.eventId))
         const selected = batch.filter(line => !line.delivery || ids.has(line.delivery.eventId))
@@ -1027,7 +1028,7 @@ async function pollOnce($: EngineInterface, state: State) {
       }) : await output()
       if (stale()) return
       if (sent || events.length && events.every(event => !isDirectorEventPending(event))) {
-        state.pending = mine.slice(6)
+        state.pending = pending.slice(6)
         await acknowledge($, state, batch)
       }
     }

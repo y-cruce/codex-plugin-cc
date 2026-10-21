@@ -404,6 +404,26 @@ test("events fails a dead owner once even when its broker is unavailable", async
   assert.deepEqual(failures, ["owner process exited"]);
 });
 
+test("a confirmed channel keeps Monitor fallback until the producer declares push support", async (t) => {
+  isolateTestEnvironment(t);
+  for (const directorPush of [undefined, false, true]) {
+    const directorStateDir = path.join(makeTempDir(), "state", "repo");
+    const current = { ...job, directorPush, sessionId: "owner", pid: process.pid };
+    const event = directorEvent(current, "job.completed", {}, directorStateDir);
+    const confirmationFile = path.join(makeTempDir(), "confirmed.json");
+    durableJson(confirmationFile, { instance: "instance", sessionId: "owner", until: Date.now() + 60000 });
+    durableJson(path.join(eventPaths(event).directory, "route.json"), { instance: "instance", sessionId: "owner", confirmed: true, confirmationFile });
+    const lines = await monitor([{ running: [current] }, { latestFinished: { ...current, status: "completed" } }], {
+      directorStateDir, status: async (_cwd, record) => record.status === "running" ? {
+        questions: [{ requestId: "legacy-q", questions: [{ id: "source", question: "Which source?" }] }]
+      } : {},
+    }, { session: "owner" });
+    assert.deepEqual(lines, directorPush === true ? [] : [
+      "QUESTION job=job-1 request=legacy-q ids=source Which source?", "DONE job=job-1 thread=thread-1"
+    ]);
+  }
+});
+
 test("ACP owner loss still stages an ending when the channel is confirmed", async (t) => {
   isolateTestEnvironment(t);
   const directorStateDir = path.join(process.env.CLAUDE_PLUGIN_DATA, "state", "repo");

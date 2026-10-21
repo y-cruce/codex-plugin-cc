@@ -10,7 +10,7 @@ import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { LiveTurnControl, DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
-import { DirectorPublisher } from "./lib/director-delivery.mjs";
+import { DirectorPublisher, directorEvent, wasDelivered } from "./lib/director-delivery.mjs";
 import { JobRuntime } from "./lib/job-runtime.mjs";
 import { CodexEventAdapter } from "./lib/executors/codex-event-adapter.mjs";
 import { THREAD_RECORDS_ENABLED } from "./lib/thread-records.mjs";
@@ -117,9 +117,13 @@ export async function main(runtimeOptions = {}) {
   controls = new LiveTurnControl(appClient, routeNotification, inputTimeoutMs, (threadId, type, payload) => {
     const job = codexEvents.sessions.get(threadId)?.job;
     if (job) director.publish(job, type, payload);
+  }, (threadId, note) => {
+    const job = codexEvents.sessions.get(threadId)?.job ?? [...jobs.jobs.values()]
+      .find(entry => (entry.job.executorSessionId ?? entry.job.threadId) === threadId)?.job;
+    return job ? wasDelivered(directorEvent(job, "director.notified", note)) : false;
   });
   let codexEvents;
-  const jobs = new JobRuntime({ publishDirectorEvent: (job, type) => director.publish(job, type), onTerminal: (job) => codexEvents?.releaseJob(job.id),
+  const jobs = new JobRuntime({ directorPush: true, publishDirectorEvent: (job, type) => director.publish(job, type), onTerminal: (job) => codexEvents?.releaseJob(job.id),
     threadRecords: runtimeOptions.threadRecords ?? THREAD_RECORDS_ENABLED });
   codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   await jobs.start(cwd);
@@ -199,7 +203,6 @@ export async function main(runtimeOptions = {}) {
 
   async function closeServer(server) {
     controls.close();
-    director.close();
     for (const socket of sockets) {
       socket.end();
     }

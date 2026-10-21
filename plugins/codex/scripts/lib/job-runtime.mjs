@@ -5,7 +5,7 @@ import { createCanonicalEvent } from "./executor-events.mjs";
 import { createLiveView, applyJobEvent, jobConfig } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
 import { stateDirFor } from "./history-resolver.mjs";
-import { resolveStateDir } from "./state.mjs";
+import { resolveStateDir, writeJobFile, upsertJob } from "./state.mjs";
 import { bindProvisionalDispatch, bufferProvisionalEvent, createProvisionalDispatch, failProvisionalDispatch,
   MAX_PROVISIONAL_BYTES, MAX_PROVISIONAL_EVENTS, updateRoundReceipt } from "./thread-record-binding.mjs";
 import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
@@ -49,6 +49,7 @@ export class JobRuntime {
     this.followers = new Map();
     this.onTerminal = options.onTerminal ?? null;
     this.publishDirectorEvent = options.publishDirectorEvent ?? (() => {});
+    this.directorPush = options.directorPush === true;
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
     this.executorIdentity = options.executorIdentity ?? null;
     this.reconciling = false;
@@ -306,8 +307,15 @@ export class JobRuntime {
   }
 
   async register(socket, cwd, jobId) {
-    const job = readStoredJob(cwd, jobId);
+    let job = readStoredJob(cwd, jobId);
     if (!job) throw Object.assign(new Error(`UNKNOWN_JOB ${jobId}`), { code: "UNKNOWN_JOB" });
+    // Only the process that owns execution may declare this capability. A new
+    // client talking to an old, still-running broker cannot infer support.
+    if (this.directorPush && job.directorPush !== true) {
+      job = { ...job, directorPush: true };
+      writeJobFile(cwd, jobId, job);
+      upsertJob(cwd, { id: jobId, directorPush: true });
+    }
     if (this.threadRecords) {
       const key = `${job.workspaceRoot}\0${job.id}`;
       let entry = this.jobs.get(key);

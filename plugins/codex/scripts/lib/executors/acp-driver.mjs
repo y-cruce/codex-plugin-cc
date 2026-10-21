@@ -242,10 +242,11 @@ export class AcpExecutorJobPort {
 
   async initialize() {
     this.director = new DirectorPublisher();
-    this.runtime = new JobRuntime({ publishDirectorEvent: (job, type) => this.director.publish(job, type), threadRecords: this.threadRecords,
+    this.runtime = new JobRuntime({ directorPush: true, publishDirectorEvent: (job, type) => this.director.publish(job, type), threadRecords: this.threadRecords,
       executorIdentity: { kind: "acp", command: this.command, args: this.args } });
     this.owner = {};
     await this.runtime.register(this.owner, this.cwd, this.job.id);
+    this.job = this.runtime.jobForSocket(this.owner);
     this.adapter = this.createAdapter(this.job);
     this.proc = spawn(this.command, this.args, { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32", windowsHide: true });
@@ -294,6 +295,7 @@ export class AcpExecutorJobPort {
   async bindQueuedRound(entry) {
     this.job = entry.round.job;
     await this.runtime.register(this.owner, this.cwd, this.job.id);
+    this.job = this.runtime.jobForSocket(this.owner);
     const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, this.sessionId, null, entry.recordId);
     this.recordId = binding.recordId;
   }
@@ -616,7 +618,6 @@ export class AcpExecutorJobPort {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    this.director?.close();
     await this.control?.close();
     await this.cancelPending();
     if (this.proc && this.proc.exitCode === null) {

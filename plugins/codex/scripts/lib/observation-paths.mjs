@@ -62,7 +62,9 @@ export async function observationJobs(stateDir) {
 
 export async function observationThreads(stateDir, { finishedAfter } = /** @type {{ finishedAfter?: number }} */ ({})) {
   const threads = new Map();
-  for (const entry of await observationJobs(stateDir)) {
+  const jobs = await observationJobs(stateDir);
+  const producers = new Map(jobs.map(({ job }) => [job.id, job.directorPush === true]));
+  for (const entry of jobs) {
     entry.job = checkJobLiveness(entry.job.workspaceRoot, entry.job, null, new Map(), { persist: false });
     let history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
     const associatedQueued = history.layout === "legacy" && entry.job.status === "queued" &&
@@ -90,6 +92,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
         sessionIds: entry.job.sessionId ? [entry.job.sessionId] : [],
         viewPath: history.liveView,
         historyAvailable: Boolean(manifest),
+        directorPush: entry.job.directorPush === true,
         layout: "legacy"
       }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
       continue;
@@ -126,6 +129,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
       ])],
       viewPath: history.liveView,
       historyAvailable: !manifest.tombstone,
+      directorPush: producers.get(jobId) === true,
       layout: "thread-record"
     }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
   }

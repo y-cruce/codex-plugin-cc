@@ -81,20 +81,58 @@ async function lock(directory) {
   }
 }
 
+export const INACTIVE_SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+function pidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; }
+}
+
+export function touchDirectorSession(directory, now = Date.now()) {
+  durableJson(path.join(directory, "activity.json"), { at: now });
+}
+
+export function cleanupDirectorEvent(event) {
+  const paths = eventPaths(event);
+  fs.rmSync(paths.item, { force: true });
+  fs.rmSync(path.join(paths.directory, "attempts", event.eventId), { recursive: true, force: true });
+}
+
+// Only channel startup and the hourly timer scan inactive sessions. Recovery
+// continues to inspect only the bound session's outbox every 30 seconds.
+export function sweepDirectorSessions(root, now = Date.now()) {
+  let sessions;
+  try { sessions = fs.readdirSync(root); } catch (error) { if (error.code === "ENOENT") return; throw error; }
+  for (const name of sessions.filter(name => /^[a-f0-9]{64}$/.test(name))) {
+    const directory = path.join(root, name);
+    try {
+      const lease = readJson(path.join(directory, "consumer", "writer.lock"));
+      if (lease && pidAlive(lease.pid)) continue;
+      const lastActivity = readJson(path.join(directory, "activity.json"))?.at ?? fs.statSync(directory).mtimeMs;
+      if (now - lastActivity > INACTIVE_SESSION_MS) fs.rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // Unreadable ownership or activity is not proof of an inactive session.
+    }
+  }
+}
+
 export function settleDirectorQuestion(job, question, status, stateDir) {
   const event = directorEvent(job, "question.opened", question, stateDir);
   if (!event) return;
-  const file = eventPaths(event).question;
-  if (!fs.existsSync(file)) durableJson(file, { eventId: event.eventId, status, at: new Date().toISOString() });
+  const paths = eventPaths(event);
+  touchDirectorSession(paths.directory);
+  if (!fs.existsSync(paths.question)) durableJson(paths.question, { eventId: event.eventId, status, at: new Date().toISOString() });
+  cleanupDirectorEvent(event);
 }
 
 export function isDirectorEventPending(event) {
-  if (!event || wasDelivered(event)) return false;
+  if (!event) return false;
+  if (wasDelivered(event)) { cleanupDirectorEvent(event); return false; }
   if (event.type === "question.opened" || event.type === "question.reminder") {
     const file = eventPaths(event).question;
-    if (fs.existsSync(file)) return false;
+    if (fs.existsSync(file)) { cleanupDirectorEvent(event); return false; }
     if (event.payload.expiresAt != null && event.payload.expiresAt <= Date.now()) {
       durableJson(file, { eventId: event.eventId, status: "expired", at: new Date().toISOString() });
+      cleanupDirectorEvent(event);
       return false;
     }
   }
@@ -102,6 +140,8 @@ export function isDirectorEventPending(event) {
 }
 
 function retainEvent(event) {
+  const directory = eventPaths(event).directory;
+  touchDirectorSession(directory);
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) {
     for (const question of pendingEvents(deliveryRoot(event.stateDir), event.sessionId)) {
       if (question.type === "question.opened" && question.jobId === event.jobId && question.stateDir === event.stateDir) {
@@ -140,7 +180,7 @@ export async function deliverDirectorEvents(events, route, output, { attemptMs =
     retainEvent(event);
     const paths = eventPaths(event);
     const lease = await lock(paths.lock);
-    const attempt = path.join(paths.directory, "attempts", `${event.eventId}-${hash(route)}.json`);
+    const attempt = path.join(paths.directory, "attempts", event.eventId, `${hash(route)}.json`);
     try {
       if (!isDirectorEventPending(event) || (readJson(attempt)?.until ?? 0) > Date.now()) continue;
       durableJson(attempt, { until: Date.now() + attemptMs });
@@ -173,7 +213,11 @@ export async function acceptDirectorEvents(events, route, accept) {
     if (!pending.length) return { drop: "Codex event already accepted or question closed" };
     const result = await accept(pending.map(({ event }) => event));
     if (!result?.drop) {
-      for (const { event, paths } of pending) durableJson(paths.receipt, { eventId: event.eventId, route, at: new Date().toISOString() });
+      for (const { event, paths } of pending) {
+        touchDirectorSession(paths.directory);
+        durableJson(paths.receipt, { eventId: event.eventId, route, at: new Date().toISOString() });
+        cleanupDirectorEvent(event);
+      }
     }
     return result;
   } finally {
@@ -211,14 +255,10 @@ export function channelRequest(endpoint, message) {
 }
 
 export class DirectorPublisher {
-  constructor({ root = deliveryRoot(), instance = randomUUID(), retryMs = 2000, onDelivered = (_event) => {} } = {}) {
-    this.root = root;
+  constructor({ instance = randomUUID(), onDelivered = (_event) => {} } = {}) {
     this.instance = instance;
     this.inflight = new Map();
     this.onDelivered = onDelivered;
-    this.timer = setInterval(() => this.replay(), retryMs);
-    this.timer.unref();
-    this.replay();
   }
 
   publish(job, type, payload = {}, stateDir = undefined) {
@@ -251,20 +291,4 @@ export class DirectorPublisher {
     this.inflight.set(event.eventId, sending);
     return sending;
   }
-
-  replay() {
-    let sessions;
-    try { sessions = fs.readdirSync(this.root); } catch (error) { if (error.code === "ENOENT") return; throw error; }
-    for (const name of sessions) {
-      const directory = path.join(this.root, name, "outbox");
-      let files;
-      try { files = fs.readdirSync(directory); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
-      for (const file of files.filter((name) => name.endsWith(".json"))) {
-        const event = readJson(path.join(directory, file));
-        if (event) this.push(event);
-      }
-    }
-  }
-
-  close() { clearInterval(this.timer); }
 }

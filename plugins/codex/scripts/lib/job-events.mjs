@@ -128,7 +128,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       const jobPrefix = `job=${job.id}${job.label ? ` [${oneLine(job.label)}]` : ""}`;
       const routing = directorEvent(job, `job.${job.status}`, {}, directorStateDir);
       const ownerLost = job.executor === "acp" && job.status === "failed" && ["owner process exited", "broker unreachable"].includes(job.errorMessage);
-      if (routing && confirmedRoute(routing) && !ownerLost) continue;
+      if (job.directorPush === true && routing && confirmedRoute(routing) && !ownerLost) continue;
       // A dead owner must be reported even when its pending notes cannot be acknowledged.
       if (job.status === "failed" && (job.errorMessage === "owner process exited" || job.errorMessage === "broker unreachable")) live = null;
       running = job.status === "queued" || job.status === "running";

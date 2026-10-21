@@ -6,10 +6,11 @@ export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
 export class LiveTurnControl {
-  constructor(client, notify, inputTimeoutMs = DEFAULT_INPUT_TIMEOUT_MS, publishDirectorEvent = (_threadId, _type, _payload) => {}) {
+  constructor(client, notify, inputTimeoutMs = DEFAULT_INPUT_TIMEOUT_MS, publishDirectorEvent = (_threadId, _type, _payload) => {}, notificationAccepted = (_threadId, _note) => false) {
     this.client = client;
     this.notify = notify;
     this.publishDirectorEvent = publishDirectorEvent;
+    this.notificationAccepted = notificationAccepted;
     this.inputTimeoutMs = inputTimeoutMs;
     this.threads = new Map();
     this.requests = new Map();
@@ -42,6 +43,7 @@ export class LiveTurnControl {
   snapshot(threadId) {
     const state = this.threads.get(threadId);
     if (!state) throw new Error("Thread is not loaded in this broker.");
+    state.notifications = state.notifications.filter(note => !this.notificationAccepted(threadId, note));
     const { redirectInput, interruptedReport, finishInterrupt, queuedMessages, ...snapshot } = state;
     return { ...snapshot, pendingMessages: [...snapshot.pendingMessages, ...queuedMessages].map((entry) => structuredClone(entry)) };
   }

@@ -4,8 +4,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import os from "node:os";
+import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
+import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
+import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
+import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir, run, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -76,4 +81,58 @@ test("a backgrounded ACP round stores its payload in the round receipt", (t) => 
   assert.equal(stored.status, 0, stored.stderr);
   assert.doesNotMatch(stored.stdout, /No captured result payload/);
   assert.match(stored.stdout, /Basic complete/);
+});
+
+test("runAcpTurn publishes questions and permissions with the persisted owner on a confirmed channel", async (t) => {
+  isolateTestEnvironment(t);
+  process.env.CODEX_COMPANION_SESSION_ID = "wrong-environment-owner";
+  const cwd = fs.realpathSync(makeTempDir());
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-run-"));
+  const messages = [];
+  let endpoint;
+  const channel = new DirectorChannel({ dir, send: async message => {
+    const event = eventFromRef(message.params.meta.delivery);
+    assert.equal(event.sessionId, "persisted-owner");
+    assert.equal(fs.existsSync(eventPaths(event).item), true);
+    await acceptDirectorEvents([event], "channel", async () => { messages.push(message.params); return {}; });
+    if (event.type !== "question.opened") return;
+    const client = await ObservationClient.connect(cwd, { endpoint });
+    try {
+      if (event.payload.requestId.startsWith("permission:")) await client.request("executor/answer-permission", {
+        requestId: event.payload.requestId, outcome: "selected", optionId: "allow" });
+      else await client.request("executor/answer-question", { requestId: event.payload.requestId, action: "accept",
+        values: { name: "Ada", choice: "a", tags: ["x"], enabled: true } });
+    } finally { client.close(); }
+  } });
+  await channel.start("persisted-owner");
+  await channel.handle({ action: "confirm", sessionId: "persisted-owner", instance: channel.instance, nonce: channel.nonce });
+  t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  for (const prompt of ["question", "permission"]) {
+    const id = `acp-production-${prompt}`;
+    const job = { id, executor: "acp", workspaceRoot: cwd, sessionId: "persisted-owner", status: "running", pid: process.pid,
+      createdAt: new Date().toISOString(), startedAt: new Date().toISOString() };
+    writeJobFile(cwd, id, job);
+    upsertJob(cwd, job);
+    let finished = false;
+    const running = runAcpTurn(cwd, { jobId: id, prompt, command: process.execPath, args: [AGENT], modeId: "default",
+      onProgress: progress => { if (progress.controlEndpoint) endpoint = progress.controlEndpoint; } });
+    running.catch(() => {});
+    t.after(async () => {
+      if (finished || !endpoint) return;
+      const client = await ObservationClient.connect(cwd, { endpoint }).catch(() => null);
+      if (client) try {
+        const live = await client.request("executor/status");
+        await client.request("executor/cancel-job", { turnId: live.turnId });
+      } finally { client.close(); }
+      const result = await running.catch(() => null);
+      await result?.afterCompletion?.();
+    });
+    const result = await within(running, 20000, `production ACP ${prompt} delivery`);
+    assert.equal(result.status, 0);
+    assert.equal(readJobFile(resolveJobFile(cwd, id)).directorPush, true);
+    await result.afterCompletion();
+    finished = true;
+  }
+  assert.equal(messages.filter(message => message.meta.event === "question_opened").length, 2);
+  assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 2);
 });
