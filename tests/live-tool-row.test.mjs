@@ -864,43 +864,24 @@ describe('Markdown and prompt footer', () => {
         assert.ok(fragments.some(text => text.includes('**本轮**: **14:11:55.976**')));
       }
     }
-    // A table still streaming is held back whole; once a blank line follows it
-    // is drawn as the grid, never as rows of pipes.
+    // A table still streaming is already the grid, never rows of pipes.
     const streaming = markdown($.ui.resolve(row()), table, {}, '› ', 120, true);
-    assert.equal(streaming.length, 1);
-    assert.equal(textOf(streaming[0]), '› … writing · 4 lines');
-    const closed = markdown($.ui.resolve(row()), `${table}\n\n后`, {}, '› ', 120, true);
-    assert.ok(walk(closed[0]).some(node => node.props?.borderStyle === 'single'));
-    assert.equal(textOf(closed[1]), '…');
+    assert.ok(walk(streaming[0]).some(node => node.props?.borderStyle === 'single'));
+    assert.equal(textOf(streaming[1]), '…');
   });
-  test('draws settled blocks of a streaming message as Markdown and holds back the one being written', ($, on) => {
+  test('draws a streaming message as Markdown, its unfinished last block included', ($, on) => {
     world($, on);
     const ui = $.ui.resolve(row());
-    for (const source of ['修复了 **三', '见 [文档](http', '```ts\nconst x = 1\n\n']) {
+    for (const source of ['修复了 **三', '见 [文档](http', '```ts\nconst x = 1\n\n', '# Heading\n\n- item']) {
       const nodes = markdown(ui, source + '\u001b', {}, '› ', 100, true);
-      assert.equal(nodes.length, 1);
-      assert.doesNotMatch(textOf(nodes[0]), /\*\*|\[|```/);
-      assert.equal(markdown(ui, source, {}, '› ', 100)[0].children[1].children[0].type, 'Markdown');
+      const body = nodes[0].children[1].children[0];
+      assert.equal(body.type, 'Markdown');
+      assert.equal(body.props.text, source);
+      assert.equal(textOf(nodes[1]), '…');
+      assert.equal(nodes[1].props.dimColor, true);
     }
-    const nodes = markdown(ui, '# Heading\n\n修复了 **三处**：\n\n```ts\nconst x = 1\n```\n- one\n- tw', {}, '› ', 100, true);
-    const body = nodes[0].children[1].children[0];
-    assert.equal(body.type, 'Markdown');
-    assert.equal(body.props.text, '# Heading\n\n修复了 **三处**：\n\n```ts\nconst x = 1\n```\n- one');
-    assert.equal(textOf(nodes[1]), '…');
-    assert.equal(nodes[1].props.dimColor, true);
   });
-  test('finds where the settled part of streaming Markdown ends', async () => {
-    const { settled } = await import('../plugins/codex/hooks/live-tool-row/markdown.ts');
-    assert.equal(settled('partial line'), 0);
-    assert.equal(settled('para\nstill para\n'), 0);
-    assert.equal(settled('para\n\nnext'), 6);
-    assert.equal(settled('intro\n```js\ncode\n'), 6);
-    assert.equal(settled('```js\na\n\nb\n```\nafter'), 15);
-    assert.equal(settled('~~~\n```\n~~~\n'), 12);
-    assert.equal(settled('## Title\nbody'), 9);
-    assert.equal(settled('1. a\n2. b'), 5);
-  });
-  test('shows streaming previews as text and renders completed cards through Markdown', async ($, on) => {
+  test('renders streaming previews and completed cards through Markdown', async ($, on) => {
     const { state, clock } = world($, on);
     const data = fixture(); data.activeCommands = []; data.files = [];
     data.lastMessage.text = '| Name | Detail |\n|--|--|\n| file | [a](/x/y) |';
@@ -909,7 +890,7 @@ describe('Markdown and prompt footer', () => {
     await $.ui.render(row()); await clock.settle();
     let tree = await $.ui.render(row());
     assert.match(textOf(tree), /› \*\*older\*\*/);
-    assert.equal(textOf(rowsOf(tree).at(-1)), '› …');
+    assert.equal(textOf(rowsOf(tree).at(-1)), '…');
     assert.equal(rowsOf(tree).find(node => node.type === 'Box').children[1].children[0].type, 'Markdown');
     const result = liveTree($.ui.resolve(row()), data, 120, 0, undefined, { kind: 'DONE' });
     assert.match(textOf(rowsOf(result).find(node => node.type === 'Box')), /Name[\s\S]*Detail[\s\S]*file[\s\S]*\[a\]\(\/x\/y\)/);
