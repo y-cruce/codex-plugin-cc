@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pushLine, registerTaskPane, shouldDropMonitorEnd, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
+import { goalCommand, goalFromMessages, pushLine, registerTaskPane, shouldDropMonitorEnd, shouldDropMonitorExpiry } from "../plugins/codex/hooks/task-pane/register.ts";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { isOver } from "../plugins/codex/hooks/live-tool-row/view.ts";
 import { askPane, renderPaneReply } from "../plugins/codex/scripts/lib/pane-channel.mjs";
@@ -68,7 +68,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const element = (type) => (props) => ({ type, ...props });
   const engine = {
     plugin: { name: "codex", root: "/plugin" },
-    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }) },
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }),
+      messages: async () => options.messages ?? [] },
     env: { get: async (name) => name === "TMPDIR" ? "/tmp" : "/home/test" },
     clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(fn) },
     store: { get: async (key) => { if (options.storeRead) await options.storeRead(key); return stored.get(key); }, set: async (key, value) => {
@@ -171,6 +172,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       files.set(jobPath, { ...files.get(jobPath), sessionId });
       listing[0].sessionIds = [sessionId];
     },
+    goal: async (args, text) => { await hooks.get("command.run:")(engine, { command: "goal", args }, async () => ({ text })); await settle(writes); },
+    turn: async (reason = "answer") => hooks.get("turn.complete:")(engine, { reason }, async () => ({ text: "" })),
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
@@ -989,7 +992,7 @@ test("with the channel on, a note goes to the spool with its body and is acknowl
 
 test("with the channel on, a live job holds /goal with a quiet shell that stops when its ending is pushed", async () => {
   const calls = [];
-  let pages = [[], [], [{ type: "job.completed", seq: "3" }]];
+  let pages = [];
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
     preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]],
     toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
@@ -1001,6 +1004,10 @@ test("with the channel on, a live job holds /goal with a quiet shell that stops 
   pane.listing[0].historyAvailable = true;
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((request) => request.tool === "Bash"), [], "no goal, no hold");
+  await pane.goal("all three jobs merged", "Goal set: all three jobs merged");
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
   const holds = calls.filter((request) => request.tool === "Bash");
   assert.equal(holds.length, 1);
   assert.equal(holds[0].run_in_background, true);
@@ -1008,6 +1015,7 @@ test("with the channel on, a live job holds /goal with a quiet shell that stops 
   assert.deepEqual(calls.filter((request) => request.tool === "Monitor"), []);
   await pane.tick();
   assert.equal(calls.filter((request) => request.tool === "Bash").length, 1, "a settling hold is not armed twice");
+  pages = [[{ type: "job.completed", seq: "3" }]];
   pane.list([{ ...pane.listing[0], status: "completed" }]);
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
@@ -1018,6 +1026,42 @@ test("with the channel on, a live job holds /goal with a quiet shell that stops 
   const dropped = await pane.prompt({ origin: { kind: "task-notification" },
     text: "<task-notification><task-id>hold-1</task-id><status>killed</status></task-notification>" }, async () => assert.fail("reached the director"));
   assert.ok(dropped.drop);
+});
+
+test("a goal cleared, or ended on an answer with no hold up, drops the hold", async () => {
+  const calls = [];
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]],
+    // A resumed session takes its goal from the transcript.
+    messages: [{ role: "user", text: "<command-name>/goal</command-name>\n<command-args>ship it</command-args>" }],
+    toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: `hold-${calls.length}` } }; },
+    replay: () => JSON.stringify({ type: "end", nextCursor: "c1", committedSeq: "1" }) });
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((request) => request.tool === "Bash").length, 1);
+  // Deferred: the chain ended with the hold up, so the goal is still on.
+  await pane.turn();
+  await pane.goal("clear", "Goal cleared: ship it");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((request) => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "hold-1" }]);
+  await pane.goal("ship it again", "Goal set: ship it again");
+  pane.advance(20000);
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((request) => request.tool === "Bash").length, 2);
+  await pane.turn("aborted");
+  await pane.tick();
+  assert.equal(calls.filter((request) => request.tool === "TaskStop").length, 1, "an interrupt leaves the goal on");
+});
+
+test("goal commands and transcripts read as set or cleared", () => {
+  assert.equal(goalCommand("x", "Goal set: x"), true);
+  assert.equal(goalCommand("", "No goal set"), false);
+  assert.equal(goalCommand("", "Goal: x · 3 turns"), undefined);
+  assert.equal(goalCommand("OFF"), false);
+  assert.equal(goalFromMessages([{ role: "user", text: "<command-name>/goal</command-name><command-args>a</command-args>" },
+    { role: "user", text: "<command-name>/goal</command-name><command-args>clear</command-args>" }]), false);
+  assert.equal(goalFromMessages([{ role: "assistant", text: "hi" }]), undefined);
 });
 
 test("without the channel no hold is armed", async () => {

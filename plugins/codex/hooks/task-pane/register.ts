@@ -87,6 +87,9 @@ type State = {
   // The background shell that keeps an active /goal waiting while jobs run
   // and the channel, not a Monitor, carries their events (see holdGoal).
   hold: Hold | null
+  // Whether this session has a /goal set, as far as the pane can tell; no
+  // goal, no hold (see goalCommand).
+  goal: boolean
 }
 
 const PANE = 'codex_tasks'
@@ -366,10 +369,43 @@ function releaseHold($: EngineInterface, state: State) {
   if (hold.taskId) stopMonitor($, state, hold.taskId)
 }
 
+// The engine tells a plugin nothing of a goal, so the pane follows what it
+// can see: `/goal <condition>` sets one, `/goal clear` (or its synonyms) drops
+// it, and a resumed session takes the last of those from its transcript. A
+// goal also ends unseen once met; that shows as a chain of turns that ended
+// on an answer with no hold to wait on, since a goal not met would have gone
+// on. Missing one only leaves a hold up while jobs run, as a Monitor was.
+const GOAL_CLEAR = ['clear', 'stop', 'off', 'reset', 'none', 'cancel']
+
+export function goalCommand(args: string, text = ''): boolean | undefined {
+  if (/^Goal set\b/.test(text)) return true
+  if (/^(?:Goal cleared|No goal set)\b/.test(text)) return false
+  const condition = args.trim()
+  if (!condition || text) return undefined
+  return !GOAL_CLEAR.includes(condition.toLowerCase())
+}
+
+export function goalFromMessages(messages: { role: string; text: string }[]): boolean | undefined {
+  for (const message of [...messages].reverse()) {
+    if (message.role !== 'user' || !message.text.includes('<command-name>/goal</command-name>')) continue
+    const set = goalCommand(/<command-args>([\s\S]*?)<\/command-args>/.exec(message.text)?.[1] ?? '')
+    if (set !== undefined) return set
+  }
+  return undefined
+}
+
+function setGoal($: EngineInterface, state: State, on: boolean) {
+  if (state.goal === on) return
+  state.goal = on
+  if (state.key) writeStore($, state, `${state.key}:goal`, on)
+  if (!on) releaseHold($, state)
+  else $.clock.after(0, () => { void poll($, state) })
+}
+
 async function holdGoal($: EngineInterface, state: State, active: boolean, sure: boolean, now: number) {
-  if (!state.channelOn || !active) {
+  if (!state.channelOn || !state.goal || !active) {
     // A listing that failed this poll may have hidden a live job.
-    if (sure || !state.channelOn) releaseHold($, state)
+    if (sure || !state.channelOn || !state.goal) releaseHold($, state)
     return
   }
   const hold = state.hold
@@ -654,6 +690,8 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const armed = await readStore($, `${key}:monitors`)
   const owned = (await readStore($, `${key}:ownedMonitors`) ?? []) as string[]
   const hold = (await readStore($, `${key}:hold`) ?? null) as Hold | null
+  let goal = await readStore($, `${key}:goal`) as boolean | undefined
+  if (goal === undefined) goal = goalFromMessages(await Promise.resolve().then(() => $.session.messages()).catch(() => [])) ?? false
   // Reads from an ended session must not install their cache in its successor.
   if (epoch !== state.epoch) return
   state.leaving = false
@@ -674,6 +712,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   for (const id of owned) state.ownedMonitors.add(id)
   // A reload keeps the shell; the next poll finds it, or stops it.
   state.hold = hold && typeof hold.armedAt === 'number' ? hold : null
+  state.goal = goal === true
   $.ui.invalidate('ui.render')
 }
 
@@ -1210,7 +1249,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
-    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0, hold: null,
+    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0, hold: null, goal: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -1248,6 +1287,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   })
   on('turn.complete', ($, e, next) => {
     if (!e.agentId) {
+      if (e.reason === 'answer' && state.goal && !state.hold) setGoal($, state, false)
       state.busy = false
       $.clock.after(0, () => { void poll($, state) })
     }
@@ -1289,6 +1329,12 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // `/codex:tasks` opens and closes the pane and switches its task; answering without next()
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
+    if (e.command === 'goal') {
+      const result = await next(e)
+      const on = goalCommand(e.args, result.text)
+      if (on !== undefined) setGoal($, state, on)
+      return result
+    }
     if (!/(^|:)tasks$/.test(e.command)) return next(e)
     const starting = !state.script
     if (starting) $.clock.after(0, () => { void bootstrap($, state, push) })
