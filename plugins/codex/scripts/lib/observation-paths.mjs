@@ -33,7 +33,7 @@ export async function observationJobs(stateDir) {
     const file = path.join(stateDir, "jobs", name);
     try {
       const job = await readObservationJson(file);
-      if (job) jobs.set(job.id, { job, stateDir, mtime: (await fs.stat(file)).mtimeMs });
+      if (job) jobs.set(job.id, { job, stateDir, mtime: (await fs.stat(file)).mtimeMs, hasJobFile: true });
     } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
   for (const id of await fs.readdir(path.join(stateDir, "job-history")).catch((error) => {
@@ -65,6 +65,8 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
   const jobs = await observationJobs(stateDir);
   const producers = new Map(jobs.map(({ job }) => [job.id, job.directorPush === true]));
   for (const entry of jobs) {
+    // A retained active record still needs owner-exit recovery from its Monitor.
+    const live = entry.hasJobFile === true && ["running", "queued"].includes(entry.job.status);
     entry.job = checkJobLiveness(entry.job.workspaceRoot, entry.job, null, new Map(), { persist: false });
     let history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
     const associatedQueued = history.layout === "legacy" && entry.job.status === "queued" &&
@@ -84,6 +86,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
         jobId: entry.job.id,
         label: job.label ?? null,
         status,
+        live,
         startedAt: job.startedAt ?? null,
         endedAt: job.endedAt ?? entry.job.completedAt ?? null,
         threadId: job.threadId ?? entry.job.threadId ?? null,
@@ -99,6 +102,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
     }
     const existing = threads.get(history.recordId);
     if (existing) {
+      existing.thread.live ||= live;
       if (associatedQueued && entry.job.sessionId && !existing.thread.sessionIds.includes(entry.job.sessionId)) {
         existing.thread.sessionIds.push(entry.job.sessionId);
       }
@@ -118,6 +122,7 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
       jobId,
       label: view.label ?? null,
       status: associatedQueued && view.activeRoundId == null ? "queued" : view.status,
+      live,
       startedAt: view.startedAt ?? null,
       endedAt: associatedQueued && view.activeRoundId == null ? null : view.endedAt ?? null,
       threadId: view.threadId ?? manifest.threadId ?? null,

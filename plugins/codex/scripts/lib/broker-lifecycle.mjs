@@ -162,11 +162,14 @@ export async function ensureBrokerSession(cwd, options = {}) {
 
 async function ensureLockedBrokerSession(cwd, options) {
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  const reachable = existing && (await isBrokerEndpointReady(existing.endpoint));
+  if (reachable && existing.directorPush === true) {
     return existing;
   }
 
-  if (existing) {
+  // A reachable legacy broker still owns its jobs and their control endpoints.
+  // Leave it running while new jobs move to a broker that publishes director events.
+  if (existing && !reachable) {
     teardownBrokerSession({
       endpoint: existing.endpoint ?? null,
       pidFile: existing.pidFile ?? null,
@@ -244,6 +247,7 @@ async function ensureLockedBrokerSession(cwd, options) {
 
   const session = {
     endpoint,
+    directorPush: true,
     pidFile,
     logFile,
     sessionDir,

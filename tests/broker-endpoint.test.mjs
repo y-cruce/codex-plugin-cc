@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
-import { ensureBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { ensureBrokerSession, loadBrokerSession, saveBrokerSession, teardownBrokerSession, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
@@ -24,6 +25,36 @@ test("createBrokerEndpoint uses named pipes on Windows", () => {
     kind: "pipe",
     path: "\\\\.\\pipe\\cxc-12345-codex-app-server"
   });
+});
+
+test("dispatch replaces a reachable legacy broker without disturbing it and reuses the push broker", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  const endpoint = createBrokerEndpoint(makeTempDir("cxo-old-"));
+  const server = net.createServer((socket) => socket.end());
+  await new Promise((resolve) => server.listen(parseBrokerEndpoint(endpoint).path, resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const logFile = path.join(cwd, "old.log");
+  fs.writeFileSync(logFile, "old broker log\n");
+  saveBrokerSession(cwd, { endpoint, logFile });
+  const script = path.join(cwd, "socket-broker.mjs");
+  // Only the lifecycle selection is under test; no Codex app-server is started.
+  fs.writeFileSync(script, `import net from "node:net";
+const endpoint = process.argv[process.argv.indexOf("--endpoint") + 1];
+net.createServer(socket => socket.end()).listen(endpoint.slice(5));
+`);
+  let replacement;
+  t.after(() => { if (replacement?.pid) teardownBrokerSession({ ...replacement,
+    killProcess: pid => process.kill(pid, "SIGTERM") }); });
+  const options = { scriptPath: script, requireBroker: true, timeoutMs: BROKER_READY_MS,
+    killProcess: () => assert.fail("the reachable old broker must not be killed") };
+  replacement = await ensureBrokerSession(cwd, options);
+  assert.notEqual(replacement.endpoint, endpoint);
+  assert.equal(replacement.directorPush, true);
+  assert.deepEqual(loadBrokerSession(cwd), replacement);
+  assert.equal(await waitForBrokerEndpoint(endpoint, 500), true);
+  assert.equal(fs.readFileSync(logFile, "utf8"), "old broker log\n");
+  assert.deepEqual(await ensureBrokerSession(cwd, options), replacement);
 });
 
 test("a broker that never binds is killed when the startup wait runs out", async (t) => {

@@ -9,7 +9,7 @@ import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
-  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean }
+  activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean; live?: boolean }
 type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
   startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
 // `floor` is the committed seq when this ledger rebuilt the job's cursor from
@@ -849,12 +849,10 @@ async function pollOnce($: EngineInterface, state: State) {
     const ledger: Ledger = { ...state.ledger }
     const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string; delivery?: any; fallback?: boolean }[] = []
     if (stale()) return
-    // A watch that expired just before the last job finished still needs to
-    // restart and catch its terminal. Recent finished rows keep that root watched.
-    state.liveRoots = new Set(found.map(entry => entry.cwd))
     // Only a live job needs a Monitor: a finished one's ending is the pane's to
     // push, and a Monitor armed for old rows reported endings long since read.
-    const fallbackRoots = new Set(found.filter(({ thread }) => thread.activeRoundId !== null
+    state.liveRoots = new Set(found.filter(({ thread }) => thread.live === true).map(entry => entry.cwd))
+    const fallbackRoots = new Set(found.filter(({ thread }) => thread.live === true
       && (thread.directorPush !== true || state.views.get(thread.id)?.executor?.kind === 'acp')).map(entry => entry.cwd))
     await routeEvents($, state, state.liveRoots, now, fallbackRoots)
     if (stale()) return

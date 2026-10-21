@@ -46,7 +46,7 @@ export class ObservationClient extends EventEmitter {
 
   static async connect(cwd, { stateDir = undefined, fallback = false, job = null, endpoint = null, brokerEndpoint = null, brokerTimeoutMs = 10000 } = {}) {
     const session = stateDir ? await readObservationJson(path.join(stateDir, "broker.json")) : loadBrokerSession(cwd);
-    const resolvedEndpoint = endpoint ?? brokerEndpoint ?? job?.controlEndpoint ??
+    const resolvedEndpoint = endpoint ?? job?.controlEndpoint ?? brokerEndpoint ??
       ((!fallback && process.env.CODEX_COMPANION_APP_SERVER_ENDPOINT) || session?.endpoint);
     if (!resolvedEndpoint) throw Object.assign(new Error("No live executor endpoint"), { code: "BROKER_UNAVAILABLE" });
     const socket = net.createConnection({ path: parseBrokerEndpoint(resolvedEndpoint).path });

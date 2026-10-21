@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { JobEventStore } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
+import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { terminalReportsPath } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
@@ -76,6 +77,58 @@ test("observationThreads applies finishedAfter only to old terminal threads", as
     ["old-active", "old-terminal", "recent-terminal"]);
   assert.deepEqual((await observationThreads(stateDir, { finishedAfter: cutoff })).map(({ thread }) => thread.id).sort(),
     ["old-active", "recent-terminal"]);
+});
+
+test("thread liveness requires a running or queued job file, including an associated queued round", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  const stateDir = resolveStateDir(cwd);
+  const put = (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(value));
+  };
+  for (const [id, status, retained] of [["running", "running", true], ["queued", "queued", true],
+    ["completed", "completed", true], ["history", "running", false], ["stale-index", "running", false]]) {
+    const job = { id, status, workspaceRoot: cwd, pid: process.pid };
+    if (retained) writeJobFile(cwd, id, job);
+    else if (id === "stale-index") upsertJob(cwd, job);
+    else put(path.join(stateDir, "job-history", id, "manifest.json"), { metadata: { job } });
+  }
+  writeJobFile(cwd, "acp-owner-exit", { id: "acp-owner-exit", status: "running", workspaceRoot: cwd,
+    executor: "acp", pid: 2147483647 });
+  const recordId = "record-stale";
+  const job = { id: "missing-round", status: "running", workspaceRoot: cwd, pid: process.pid };
+  put(path.join(stateDir, "job-index", `${job.id}.json`), { schemaVersion: 1, jobId: job.id, roundId: job.id, recordId });
+  put(path.join(stateDir, "thread-records", recordId, "rounds", `${job.id}.json`), { job });
+  put(path.join(stateDir, "thread-records", recordId, "manifest.json"), {});
+  put(path.join(stateDir, "thread-records", recordId, "live-view.json"), {
+    jobId: job.id, activeRoundId: job.id, status: "running", rounds: []
+  });
+  const rows = (await observationThreads(stateDir)).map(({ thread }) => thread);
+  assert.deepEqual(rows.filter((thread) => thread.live).map((thread) => thread.id).sort(), ["acp-owner-exit", "queued", "running"]);
+  assert.equal(rows.find((thread) => thread.id === recordId).live, false);
+  writeJobFile(cwd, "next-round", { id: "next-round", status: "queued", workspaceRoot: cwd, recordId, pid: process.pid });
+  assert.equal((await observationThreads(stateDir)).find(({ thread }) => thread.id === recordId).thread.live, true);
+});
+
+test("observation keeps a job's endpoint when broker.json and fallback options name its replacement", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  const endpoint = createBrokerEndpoint(makeTempDir("cxo-own-"));
+  const stateDir = resolveStateDir(cwd);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "broker.json"), JSON.stringify({ endpoint: "unix:/wrong/new-broker" }));
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.once("data", (data) => socket.write(`${JSON.stringify({ id: JSON.parse(data).id, result: { observationVersion: 1 } })}\n`));
+  });
+  await new Promise((resolve) => server.listen(parseBrokerEndpoint(endpoint).path, resolve));
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise((resolve) => server.close(resolve)); });
+  const client = await ObservationClient.connect(cwd, { stateDir, fallback: true,
+    job: { controlEndpoint: endpoint }, brokerEndpoint: "unix:/wrong/new-broker" });
+  client.close();
 });
 
 test("pane listing and replay do not sweep unrelated workspace histories", async (t) => {

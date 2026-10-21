@@ -71,7 +71,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   files.set(viewPath, live);
   for (const [file, value] of options.preset ?? []) files.set(file, value);
   const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
-    status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false, directorPush: true }];
+    status: "running", live: true, sessionIds: [sessionId], viewPath, historyAvailable: false, directorPush: true }];
   let threads = listing;
   let writes = 0;
   let failWrites = options.failWrites ?? 0;
@@ -366,7 +366,7 @@ test("session resume returns while a monitor stop never returns", async (t) => {
   }
 });
 
-test("an expired monitor is re-armed even when its last task finished in the gap", async () => {
+test("an expired monitor stays retired when its last task finished in the gap", async () => {
   const calls = [];
   const pane = await paneHarness(new Map(), undefined, "session", { watch: false, toolCall: request => {
     calls.push(request);
@@ -374,14 +374,14 @@ test("an expired monitor is re-armed even when its last task finished in the gap
   } });
   assert.equal(calls.length, 1);
   pane.advance(1800001);
-  pane.list([{ ...pane.listing[0], status: "completed" }]);
+  pane.list([{ ...pane.listing[0], status: "completed", live: false }]);
   pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed" });
   pane.files.set(pane.viewPath, { ...pane.live, status: "completed", activeRoundId: null, endedAt: new Date().toISOString() });
   await pane.tick();
-  assert.equal(calls.length, 2);
-  assert.match(calls[1].command, /events --cwd \/work --session session/);
+  assert.equal(calls.length, 1);
   await pane.tick();
-  assert.equal(calls.length, 2, "the replacement keeps its settling window");
+  assert.equal(calls.length, 1);
+  assert.match(pane.toasts.join("\n"), /job.completed/);
 });
 
 test("an old replay cannot write its ledger into a new session", async () => {
@@ -1015,6 +1015,21 @@ test("confirmed channels retain fallback for undeclared producers and ACP owner 
   }
 })
 
+test("Monitors require a live job record with and without a confirmed channel", async () => {
+  for (const confirmed of [true, false]) for (const [status, live] of [["running", false], ["completed", false],
+    ["queued", true], ["running", true]]) {
+    const calls = [];
+    const now = Date.now();
+    const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, watch: false, now,
+      preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+      toolCall: async request => { calls.push(request.tool); return { result: { taskId: "fallback-monitor" } } } });
+    if (!confirmed) pane.files.delete("/tmp/codex-channel/4242.confirmed.json");
+    pane.list([{ ...pane.listing[0], status, live, activeRoundId: "stale-round", directorPush: false }]);
+    await pane.tick();
+    assert.equal(calls.filter(tool => tool === "Monitor").length, live ? 1 : 0, `${confirmed}/${status}/${live}`);
+  }
+});
+
 test("a queued Monitor frame dropped after retirement stays pending for channel ingress recovery", async (t) => {
   isolateTestEnvironment(t);
   const cwd = makeTempDir();
@@ -1275,7 +1290,7 @@ test("branch stops inherited pane monitors and watches only its own dispatches",
       const id = options.cwd.slice(-1);
       return { exitCode: 0, stdout: JSON.stringify({ threads: options.cwd === `/work/${id}` && options.env.CODEX_COMPANION_SESSION_ID === `session-${id}`
         ? [{ id: `job-${id}`, recordId: `job-${id}`, jobId: `job-${id}`, label: `job ${id}`,
-          status: "running", sessionIds: [`session-${id}`], viewPath: `/view/${id}`, historyAvailable: false }] : [] }), stderr: "" };
+          status: "running", live: true, sessionIds: [`session-${id}`], viewPath: `/view/${id}`, historyAvailable: false }] : [] }), stderr: "" };
     } },
     tool: { call: async (request) => {
       monitors.push(request);
