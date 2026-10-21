@@ -881,6 +881,19 @@ describe('Markdown and prompt footer', () => {
       assert.equal(nodes[1].props.dimColor, true);
     }
   });
+  test('draws an earlier message whole in the pane once a later one begins', ($, on) => {
+    world($, on);
+    const ui = { ...$.ui.resolve(row()), Button: props => ({ type: 'Button', props, children: props.children ?? [props.label] }) };
+    const data = fixture(); data.activeCommands = []; data.files = [];
+    const whole = `${'前文'.repeat(200)}\n\n- [register.ts:738](/a/register.ts) 结尾`;
+    data.tail = [
+      { seq: '1', at: data.startedAt, type: 'message.completed', text: `assistant: ${whole.slice(0, 299)}…`, body: whole },
+      { seq: '2', at: data.startedAt, type: 'message.delta', text: 'assistant: next', body: 'next' },
+    ];
+    data.lastMessage = { kind: 'assistant', text: 'next', at: data.startedAt };
+    const text = textOf(paneBody(ui, [data], 160, 60, Date.parse(data.startedAt), null, () => {}));
+    assert.match(text, /register\.ts:738[\s\S]*结尾/);
+  });
   test('renders streaming previews and completed cards through Markdown', async ($, on) => {
     const { state, clock } = world($, on);
     const data = fixture(); data.activeCommands = []; data.files = [];

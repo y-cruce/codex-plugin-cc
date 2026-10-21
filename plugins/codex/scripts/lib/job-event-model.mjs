@@ -260,7 +260,7 @@ function roundFor(view, event) {
   return round;
 }
 
-function updateTail(view, event, text, key = null) {
+function updateTail(view, event, text, key = null, body = null) {
   if (text == null || event.type === "turn.started" || event.type === "turn.completed") return;
   // A row is one line, except the kinds the renderer wraps as prose: their
   // paragraphs are what makes them readable, and flattening here leaves the
@@ -278,6 +278,11 @@ function updateTail(view, event, text, key = null) {
   // resumed after a tool has a row per stretch, so a row says where its own
   // stretch begins and the reader takes the rest from lastMessage.
   if (/^message\./.test(event.type) && key) row.from = String(view._items[key]?.shown ?? 0);
+  // The preview is what a one-row card has room for. The pane draws the whole
+  // trace, and an earlier message cut to it there reads as the answer broken
+  // off mid-sentence the moment the next one begins, so the row also keeps its
+  // stretch whole -- bounded like the pane's own cut.
+  if (body != null) row.body = body.slice(0, 40000);
   const agent = event.type === "agent.activity" ? { id: event.payload.agentId, path: event.payload.path } : eventAgent(event, view);
   if (agent?.id) row.agentThreadId = agent.id;
   if (event.agent) {
@@ -338,6 +343,7 @@ export function applyJobEvent(view, event, options = {}) {
   const state = key ? (view._items[key] ??= { text: "", summary: [], output: "" }) : null;
   let text = renderEventText(event, { tail: true });
   let tailKey = null;
+  let whole = null;
   switch (event.type) {
     case "agent.activity": {
       // A child that messages its parent reports the parent as the agent it
@@ -443,6 +449,7 @@ export function applyJobEvent(view, event, options = {}) {
         state.tailSeq = null;
       }
       text = preview(`assistant: ${state.text.slice(state.shown ?? 0)}`, 300, true);
+      if (!child) whole = state.text.slice(state.shown ?? 0);
       tailKey = key;
       break;
     }
@@ -467,6 +474,7 @@ export function applyJobEvent(view, event, options = {}) {
         const streamed = state.text ?? "";
         const segment = body.startsWith(streamed) ? body.slice(Math.min(state.shown ?? 0, body.length)) : body;
         text = segment.trim() ? preview(`assistant: ${segment}`, 300, true) : null;
+        if (!child && text != null) whole = segment;
       }
       tailKey = key;
       break;
@@ -572,7 +580,7 @@ export function applyJobEvent(view, event, options = {}) {
     else if ((text != null && !event.type.startsWith("reasoning.") && event.type !== "agent.activity")
       || ["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.thinkingSince = null;
   }
-  updateTail(view, event, text, tailKey);
+  updateTail(view, event, text, tailKey, whole);
   if (key && event.type.endsWith(".completed")) delete view._items[key];
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) view._items = {};
   return view;

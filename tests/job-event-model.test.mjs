@@ -52,6 +52,19 @@ test("message deltas fold into one row, survive snapshot restoration and retain 
   assert.equal(restored.history.committedSeq, "2");
 });
 
+test("an earlier message keeps its whole text beside the preview once the next one begins", () => {
+  const { view, accept } = harness();
+  const long = `${"段落".repeat(200)}\n\n- [register.ts:738](/a/b/register.ts)`;
+  accept("item/agentMessage/delta", { itemId: "m1", delta: long });
+  accept("item/completed", { item: { id: "m1", type: "agentMessage", text: long } });
+  accept("item/agentMessage/delta", { itemId: "m2", delta: "next" });
+  const [first, second] = view.tail;
+  assert.ok(first.text.length < long.length);
+  assert.equal(first.body, long);
+  assert.equal(second.body, "next");
+  assert.equal(view.lastMessage.text, "next");
+});
+
 test("writing that resumes opens its own row and leaves the rows already drawn alone", () => {
   const job = { id: "job-acp", executor: "acp", threadId: "session-1" };
   const view = createLiveView(job);

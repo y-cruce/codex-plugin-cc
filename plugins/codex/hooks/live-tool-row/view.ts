@@ -52,7 +52,7 @@ export type LiveView = {
   }[]
   history: { committedSeq: string; continuity: 'complete' | 'partial' | 'legacy' }
   subAgents?: { threadId: string; path: string; status: string; endedAt: string | null; lastActivity?: string; task?: string; startedSeq?: string }[]
-  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; answer?: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
+  tail: { seq: string; positionSeq?: string; at: string; type: string; text: string; answer?: string; body?: string; from?: string; output?: string; exitCode?: number | null; durationMs?: number | null; agent?: string; agentThreadId?: string
     files?: { path: string; kind: string; additions: number | null; deletions: number | null }[]; status?: string; failed?: boolean
     items?: LiveView['tail']; foldKey?: string }[]
 }
@@ -511,7 +511,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     }
     const prefix = type.startsWith('message') ? '›' : type.startsWith('reasoning') ? '…' : type.startsWith('question') ? '?' : (type.startsWith('director') || type.startsWith('control.message')) ? '→' : type.startsWith('file') ? '✎' : ''
     const color = /error|failed/.test(type) ? 'red' : type.startsWith('question') ? 'magenta' : (type.startsWith('director') || type.startsWith('control.message')) ? 'cyan' : undefined
-    const text = fullTrace && index === newest ? data.lastMessage!.text.slice(Math.min(from, data.lastMessage!.text.length)) : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
+    // An earlier message in a full trace is drawn whole from its body; its
+    // text is the short preview a one-row card has room for.
+    const text = fullTrace && index === newest ? data.lastMessage!.text.slice(Math.min(from, data.lastMessage!.text.length))
+      : fullTrace && event.body != null ? event.body : event.text.replace(/^(assistant|reasoning|notify_director):\s*/, '')
     const props = { color, dimColor: type === 'source.warning' || type.startsWith('reasoning') || (!prefix && !color) }
     if (type.startsWith('message')) {
       separate(true)
