@@ -987,6 +987,24 @@ test("with the channel on, a note goes to the spool with its body and is acknowl
     ["reported", "--session", "session", "--jobs", "job-a"]);
 });
 
+test("a question committed before its view is written is still pushed, and an answered one is not", async () => {
+  let pages = [[], [{ type: "question.opened", seq: "2", payload: { requestId: "q1" }, text: "request=q1 ids=source: Which source?" }],
+    [{ type: "question.opened", seq: "3", payload: { requestId: "q2" }, text: "request=q2: Old?" },
+      { type: "question.resolved", seq: "4", payload: { requestId: "q2" } }]];
+  const pane = await paneHarness(new Map(), undefined, "session", { replay: () => {
+    const events = pages.shift() ?? [];
+    return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "1"}`, committedSeq: events.at(-1)?.seq ?? "1" }]
+      .map((row) => JSON.stringify(row)).join("\n");
+  } });
+  pane.listing[0].historyAvailable = true;
+  // The view still has no pending question.
+  await pane.tick();
+  await pane.tick();
+  await pane.tick();
+  assert.deepEqual(pane.toasts.filter((text) => /question\.opened/.test(text)),
+    ["Alpha task · question.opened: request=q1 ids=source: Which source?"]);
+});
+
 test("while a probe is on its way the pane arms no Monitor, and arms one once the hold is over", async () => {
   const calls = [];
   const now = Date.now();
@@ -1111,6 +1129,9 @@ test("a push line survives an event with no body of its own", () => {
     [{ type: "job.failed" }, { pendingQuestion: null, lastMessage: null }, "job · job.failed"],
     // Replayed from before this session's cursor floor, already answered.
     [{ type: "question.opened" }, { pendingQuestion: null, lastMessage: null }, null],
+    // Committed before the view caught up: its own text carries it.
+    [{ type: "question.opened", text: "request=q1 ids=source: Which source?" }, { pendingQuestion: null, lastMessage: null },
+      "job · question.opened: request=q1 ids=source: Which source?"],
   ];
   for (const [event, data, expected] of cases) {
     assert.equal(pushLine("job", event, data), expected, event.type);

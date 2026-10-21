@@ -107,9 +107,11 @@ export function pushLine(
   event: { type: string; text?: string },
   view?: Pick<LiveView, 'pendingQuestion' | 'lastMessage'>,
 ): string | null {
-  // A question replayed from before this session's cursor floor may have been
-  // answered long ago; the view says whether one is still open.
-  if (event.type === 'question.opened' && !view?.pendingQuestion) return null
+  // A question with neither text of its own nor an open question in the view
+  // has nothing to say. Whether it is still open is the caller's call, from
+  // the events: the view is written a moment after the event is committed, so
+  // a poll in between saw the question but not the view, and dropped it.
+  if (event.type === 'question.opened' && !view?.pendingQuestion && !(event.text ?? '').trim()) return null
   const detail = (event.text ?? '').trim()
     || (event.type === 'question.opened' ? view?.pendingQuestion?.text ?? '' : '')
     || (event.type.startsWith('job.') ? view?.lastMessage?.text ?? '' : '')
@@ -784,7 +786,7 @@ async function pollOnce($: EngineInterface, state: State) {
           const args = ['replay', job.id, '--limit', '8']
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
-            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string; payload?: { notificationId?: string } }] } catch { return [] } })
+            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string; payload?: { notificationId?: string; requestId?: string | number } }] } catch { return [] } })
           if (stale()) return
           const events = rows.filter(row => row.seq)
           // A reload whose ledger lost this job rebuilds its cursor from the
@@ -802,9 +804,15 @@ async function pollOnce($: EngineInterface, state: State) {
           // on a job that finished hours ago would otherwise replay every note
           // and question it ever wrote as though they had just arrived.
           const announce = !DONE.includes(job.status) && !foreign
+          // A question answered or withdrawn within the same read is not news.
+          const settled = new Set(events.filter(row => row.type === 'question.resolved' || row.type === 'question.closed')
+            .map(row => String(row.payload?.requestId)))
           for (const event of events.filter(row => ACTIONABLE.includes(row.type))) {
             // Left unclaimed: the reconciliation below still settles the ending.
             if (event.type.startsWith('job.') && historical(event.seq!)) continue
+            // History a rebuilt cursor replays: that question may have been
+            // answered long ago.
+            if (event.type === 'question.opened' && (historical(event.seq!) || settled.has(String(event.payload?.requestId)))) continue
             const line = pushLine(job.label ?? job.id, event, view)
             // An ending the reconciliation already reported, from the view, in
             // an earlier poll whose replay did not have the event yet: the
