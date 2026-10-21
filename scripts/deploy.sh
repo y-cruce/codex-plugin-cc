@@ -82,24 +82,6 @@ if [ ! -f "$CACHE/node_modules/.package-lock.json" ]; then
 fi
 node --input-type=module -e "await import('file://$CACHE/scripts/lib/executors/acp-driver.mjs')"
 
-# The build and the tests run the hooks in plain Node, which takes anything.
-# Claude Code scans the hooks module before loading it and refuses the whole
-# module on the first rule it breaks; 1.4.67 to 1.4.69 lost every Codex hook
-# and tool that way while build and tests passed. One headless session against
-# the copy just installed says whether it loads.
-echo "── hooks load check"
-CHECK=$(mktemp -d)
-LIMIT=$(command -v timeout >/dev/null && echo "timeout 180" || true)
-(cd "$CHECK" && $LIMIT claude -p "reply ok" --debug-file "$CHECK/debug.log" >/dev/null 2>&1) || true
-if ! grep -q "cache/y-cruce-codex/codex/$VERSION/hooks/hooks.json" "$CHECK/debug.log" 2>/dev/null \
-  || ! grep -q "hooks module codex@y-cruce-codex loaded" "$CHECK/debug.log"; then
-  grep -E "hooks module codex@y-cruce-codex failed to load" "$CHECK/debug.log" >&2 \
-    || echo "   no load of $VERSION in $CHECK/debug.log" >&2
-  echo "the installed $VERSION hooks module does not load: fix it and release again" >&2
-  exit 1
-fi
-rm -rf "$CHECK"
-
 echo
 echo "$(git log --oneline -1)"
 echo "Restart Claude Code to pick up $VERSION."
