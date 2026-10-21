@@ -74,17 +74,53 @@ function completed(ui: UI, text: string, props: TextProps, columns: number) {
   return ui.Box({ flexDirection: 'column', children: nodes })
 }
 
+// Where the settled part of a streaming message ends. A block is settled once
+// what follows it has begun: a blank line, a closing fence, the next list item
+// or the line after a heading. Claude Code draws a reply the same way -- the
+// blocks before the last are Markdown, only the last is still in the air -- but
+// where it renders that last block as it comes, the trace holds it back: a
+// half-written fence, table row or `**` drawn as it streams is the raw syntax
+// the reader came to the pane not to see.
+export function settled(text: string): number {
+  let end = 0
+  let fence = ''
+  let at = 0
+  while (true) {
+    const next = text.indexOf('\n', at)
+    const line = text.slice(at, next < 0 ? undefined : next)
+    // The last line has no break after it yet, so it may still grow -- but one
+    // that has begun a new list item or fence already closes what came before.
+    if (next < 0) return !fence && /^ {0,3}([-*+]|\d{1,9}[.)]) |^ {0,3}(`{3,}|~{3,})/.test(line) ? at : end
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) {
+        fence = ''
+        end = next + 1
+      }
+    } else if (marker) {
+      fence = marker
+      end = at
+    } else if (!line.trim() || /^ {0,3}#{1,6}(\s|$)/.test(line)) end = next + 1
+    else if (/^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)/.test(line)) end = at
+    at = next + 1
+  }
+}
+
 export function markdown(ui: UI, text: string, props: TextProps = {}, prefix = '', columns = 120, streaming = false) {
   const width = Math.max(1, columns - prefix.length)
-  // Keep unfinished text visible without guessing how its Markdown will close.
-  const body = streaming
-    ? ui.Text({ ...props, wrap: 'wrap', children: clean(text) })
-    : completed(ui, clean(text), props, width)
+  const source = clean(text)
+  // While a message streams, only its settled blocks are drawn, and drawn as
+  // Markdown; the block still being written shows as a marker until it closes.
+  const shown = streaming ? source.slice(0, settled(source)).trimEnd() : source
+  const pending = streaming ? source.slice(shown.length).trim() : ''
+  const lines = pending ? pending.split('\n').length : 0
+  const marker = ui.Text({ ...props, dimColor: true, children: lines > 1 ? `… writing · ${lines} lines` : '…' })
+  const body = shown.trim() ? completed(ui, shown, props, width) : null
   // A separate gutter keeps the prefix from changing a heading or fence's syntax.
-  const nodes = [prefix ? ui.Box({ flexDirection: 'row', children: [
+  const nodes = body ? [prefix ? ui.Box({ flexDirection: 'row', children: [
     ui.Text({ ...props, children: prefix }),
     ui.Box({ width, children: [body] }),
-  ] }) : body]
-  if (streaming) nodes.push(ui.Text({ ...props, dimColor: true, children: '…' }))
+  ] }) : body] : []
+  if (streaming) nodes.push(body || !prefix ? marker : ui.Box({ flexDirection: 'row', children: [ui.Text({ ...props, children: prefix }), marker] }))
   return nodes
 }
