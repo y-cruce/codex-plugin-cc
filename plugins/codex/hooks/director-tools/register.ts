@@ -91,6 +91,13 @@ const TOOLS = [
       + '`detail: true` returns the companion\'s full JSON (config, every thread, live controls): large, for debugging only.',
     inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD, detail: { type: 'boolean' } }, required: ['cwd'] },
   },
+  {
+    name: 'cancel',
+    description: 'End a running or queued job now: the companion\'s cancel command. It interrupts the Codex turn and '
+      + 'stops the job\'s process; files it already changed stay. To change a job\'s direction, use message with '
+      + 'interrupt instead. TaskStop cannot stop a Codex job.',
+    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD }, required: ['job', 'cwd'] },
+  },
 ] as const
 
 function text(value: unknown): string {
@@ -177,6 +184,10 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'status':
       return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', cwd,
         input.detail === true ? '--json' : '--brief'], cwd, 30_000)
+    case 'cancel':
+      // Without a job the companion picks one itself; a tool call names it.
+      if (!job) return { deny: 'job is required' }
+      return run($, context, ['node', context.companion, 'cancel', job, '--cwd', cwd], cwd, 60_000)
   }
   return { deny: `unknown tool ${name}` }
 }
@@ -238,4 +249,5 @@ export function registerDirectorTools(on: On, tools: DirectorTools) {
   on('tool.call', { tool: 'mcp__codex__answer' }, ($, e) => answerCall($, tools, 'answer', e as unknown as ToolInput))
   on('tool.call', { tool: 'mcp__codex__result' }, ($, e) => answerCall($, tools, 'result', e as unknown as ToolInput))
   on('tool.call', { tool: 'mcp__codex__status' }, ($, e) => answerCall($, tools, 'status', e as unknown as ToolInput))
+  on('tool.call', { tool: 'mcp__codex__cancel' }, ($, e) => answerCall($, tools, 'cancel', e as unknown as ToolInput))
 }

@@ -44,7 +44,7 @@ test("dispatchInput refuses a header value that would start another header, and 
 test("the tools are registered in the prompt's tool list only where dispatch.sh is installed", async () => {
   const installed = harness();
   await startDirectorTools(installed.$, installed.tools);
-  assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status"]);
+  assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status", "cancel"]);
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
@@ -105,18 +105,21 @@ test("answer writes the answers map as JSON for dispatch.sh answer", async () =>
   assert.deepEqual(await h.call("answer", { job: "j", cwd: "/repo", request: "0", answers: [] }), { deny: "answers must be an object keyed by question id" });
 });
 
-test("result and status run the plugin's companion directly", async () => {
+test("result, status and cancel run the plugin's companion directly", async () => {
   const h = harness({ stdout: "{}\n" });
   await startDirectorTools(h.$, h.tools);
   await h.call("result", { job: "j", cwd: "/repo" });
   await h.call("status", { job: "j", cwd: "/repo" });
   await h.call("status", { cwd: "/repo" });
   await h.call("status", { cwd: "/repo", detail: true });
+  await h.call("cancel", { job: "j", cwd: "/repo" });
+  assert.deepEqual(await h.call("cancel", { cwd: "/repo" }), { deny: "job is required" });
   assert.deepEqual(h.runs.map((run) => run.argv), [
     ["node", COMPANION, "result", "j", "--cwd", "/repo"],
     ["node", COMPANION, "status", "j", "--cwd", "/repo", "--brief"],
     ["node", COMPANION, "status", "--cwd", "/repo", "--brief"],
     ["node", COMPANION, "status", "--cwd", "/repo", "--json"],
+    ["node", COMPANION, "cancel", "j", "--cwd", "/repo"],
   ]);
 });
 
