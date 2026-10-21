@@ -349,8 +349,8 @@ async function probing($: EngineInterface, base: string, now: number) {
 // on and no Monitor armed nothing told it to wait: each turn ended, the goal
 // was judged not met, and the next turn began at once to say "still waiting".
 // While a job is live this shell stands in for the Monitor. It prints nothing
-// and never ends on its own; the pane stops it the poll a job's ending is
-// pushed, before that push opens the turn whose end should judge the goal.
+// and never ends on its own; the pane stops it when the last job is over,
+// including when the broker sent its ending before the pane reconciled it.
 // The shell reads as what it is in the goal's check-in, which quotes it.
 function holdCommand(sessionId: string) {
   return `: Codex jobs running, /goal waits for them, the codex plugin stops this when they end; while :; do sleep 3600; done; : ${sessionId}`
@@ -966,7 +966,12 @@ async function pollOnce($: EngineInterface, state: State) {
     await refreshViews($, state)
     if (stale()) return
     const ended = new Set(lines.filter(line => line.type.startsWith('job.')).map(line => line.jobId))
-    const active = found.some(({ thread }) => !DONE.includes(thread.status) && !ended.has(thread.jobId))
+    const active = found.some(({ thread }) => {
+      const view = state.views.get(thread.id)
+      // A queued round can still display its predecessor's completed view.
+      const sameRound = thread.status !== 'queued' && view && (view.activeRoundId ?? view.latestRoundId ?? view.jobId) === thread.jobId
+      return !DONE.includes(thread.status) && !ended.has(thread.jobId) && !(sameRound && isOver(view))
+    })
     const sure = [...state.roots].every(root => !state.unreadable.has(root))
     await holdGoal($, state, active, sure, now)
     if (stale()) return

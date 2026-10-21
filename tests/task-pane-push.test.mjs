@@ -109,6 +109,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
+      if (args[0] === "pgrep" && options.pgrep) return options.pgrep(args)
       if (args[0] === "pgrep") return { exitCode: options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
       if (args.includes("ack") || args.includes("reported")) { acks.push(args); return { exitCode: 0, stdout: "{}", stderr: "" }; }
       observed.push(init.cwd);
@@ -1060,48 +1061,89 @@ test("a rebuilt cursor announces a historical question only while its live view 
   }
 })
 
-test("with the channel on, a live job holds /goal with a quiet shell that stops when its ending is pushed", async () => {
+test("a channel goal hold stops after the last job ends by status or reconciliation on either delivery route", async () => {
+  for (const directorPush of [true, false]) for (const source of ["status", "reconciliation"]) {
+    const calls = [];
+    const now = Date.now();
+    const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
+      preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+      toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+      replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }),
+    });
+    const first = { ...pane.listing[0], historyAvailable: true, directorPush };
+    const second = { ...first, id: "record-b", recordId: "record-b", jobId: "job-b", activeRoundId: "job-b", latestRoundId: "job-b",
+      viewPath: pane.viewPath.replace("record-a", "record-b") };
+    const secondJob = pane.jobPath.replace("job-a", "job-b");
+    pane.files.set(secondJob, { id: "job-b", sessionId: "session", workspaceRoot: "/work", status: "running" });
+    pane.files.set(second.viewPath, { ...pane.live, recordId: "record-b", jobId: "job-b", activeRoundId: "job-b", latestRoundId: "job-b" });
+    pane.list([first, second]);
+    await pane.tick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls.filter(request => request.tool === "Bash"), [], "no goal, no hold");
+    await pane.goal("all jobs merged", "Goal set: all jobs merged");
+    await pane.tick();
+    await new Promise(resolve => setImmediate(resolve));
+    const holds = calls.filter(request => request.tool === "Bash");
+    assert.equal(holds.length, 1);
+    assert.equal(holds[0].run_in_background, true);
+    assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*while :; do sleep 3600; done; : session$/);
+    await pane.tick();
+    assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "one hold for both live jobs");
+    pane.list([{ ...first, status: "completed" }, second]);
+    await pane.tick();
+    assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the other job still keeps the goal waiting");
+    if (source === "status") pane.list([{ ...first, status: "completed" }, { ...second, status: "completed" }]);
+    else {
+      pane.files.set(secondJob, { ...pane.files.get(secondJob), status: "completed", completedAt: new Date(now).toISOString() });
+      pane.touch();
+      pane.viewTick();
+    }
+    await pane.tick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls.filter(request => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "hold-1" }]);
+    assert.equal(pane.toasts.filter(text => text.includes('job.completed')).length, directorPush ? 0 : 2,
+      "a broker ending releases the hold without requiring a pane ending line");
+    const dropped = await pane.prompt({ origin: { kind: "task-notification" },
+      text: "<task-notification><task-id>hold-1</task-id><status>killed</status></task-notification>" }, async () => assert.fail("hold stop reached the director"));
+    assert.ok(dropped.drop);
+  }
+});
+
+test("reload finds the existing session goal hold and stops it without starting a second shell", async () => {
+  const now = Date.now();
   const calls = [];
-  let pages = [];
-  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
-    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]],
-    toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
-    replay: () => {
-      const events = pages.shift() ?? [];
-      return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "1"}`, committedSeq: events.at(-1)?.seq ?? "1" }]
-        .map((row) => JSON.stringify(row)).join("\n");
-    } });
-  pane.listing[0].historyAvailable = true;
+  const probes = [];
+  const stored = new Map([["codex:tasks:session:goal", true],
+    ["codex:tasks:session:hold", { armedAt: now - 60000, taskId: "saved-hold" }]]);
+  const pane = await paneHarness(stored, undefined, "session", { ppid: "4242", push: true, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    pgrep: async args => { probes.push(args[2]); return { exitCode: 0, stdout: "123", stderr: "" }; },
+    toolCall: async request => { calls.push(request); return { result: {} }; },
+    replay: () => assert.fail("a push-capable job does not need pane replay"),
+  });
   await pane.tick();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.filter((request) => request.tool === "Bash"), [], "no goal, no hold");
-  await pane.goal("all three jobs merged", "Goal set: all three jobs merged");
+  assert.ok(probes.some(pattern => pattern.includes('the codex plugin stops this when they end') && pattern.endsWith(': session')));
+  assert.equal(calls.filter(request => request.tool === "Bash").length, 0);
+  pane.list([{ ...pane.listing[0], status: "queued" }]);
+  Object.assign(pane.live, { status: "completed", activeRoundId: null, endedAt: new Date(now).toISOString() });
+  pane.touch();
+  pane.viewTick();
   await pane.tick();
-  await new Promise((resolve) => setImmediate(resolve));
-  const holds = calls.filter((request) => request.tool === "Bash");
-  assert.equal(holds.length, 1);
-  assert.equal(holds[0].run_in_background, true);
-  assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*while :; do sleep 3600; done; : session$/);
-  assert.deepEqual(calls.filter((request) => request.tool === "Monitor"), []);
-  await pane.tick();
-  assert.equal(calls.filter((request) => request.tool === "Bash").length, 1, "a settling hold is not armed twice");
-  pages = [[{ type: "job.completed", seq: "3" }]];
+  assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "a queued round can still display its predecessor");
   pane.list([{ ...pane.listing[0], status: "completed" }]);
   await pane.tick();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.filter((request) => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "hold-1" }]);
-  const batches = [...pane.files].filter(([file]) => file.startsWith("/tmp/codex-channel/4242.spool/"));
-  assert.match(batches.at(-1)[1].lines.at(-1).text, /job\.completed/);
-  // Its stop reaches nobody, should the host report it.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.filter(request => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "saved-hold" }]);
   const dropped = await pane.prompt({ origin: { kind: "task-notification" },
-    text: "<task-notification><task-id>hold-1</task-id><status>killed</status></task-notification>" }, async () => assert.fail("reached the director"));
+    text: "<task-notification><task-id>saved-hold</task-id><status>killed</status></task-notification>" }, async () => assert.fail("hold stop reached the director"));
   assert.ok(dropped.drop);
 });
 
 test("a goal cleared, or ended on an answer with no hold up, drops the hold", async () => {
   const calls = [];
-  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
-    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]],
+  const now = Date.now();
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
     // A resumed session takes its goal from the transcript.
     messages: [{ role: "user", text: "<command-name>/goal</command-name>\n<command-args>ship it</command-args>" }],
     toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: `hold-${calls.length}` } }; },
@@ -1139,6 +1181,7 @@ test("without the channel no hold is armed", async () => {
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242",
     toolCall: async (request) => { calls.push(request.tool); return { result: { taskId: "m1" } }; },
     replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }) });
+  await pane.goal("all jobs merged", "Goal set: all jobs merged");
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter((tool) => tool === "Bash"), []);
@@ -1212,6 +1255,7 @@ test("branch stops inherited pane monitors and watches only its own dispatches",
     },
     process: { run: async (args, options) => {
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs\n", stderr: "" };
+      if (args[0] === "pgrep" && options.pgrep) return options.pgrep(args)
       if (args[0] === "pgrep") return { exitCode: 1, stdout: "", stderr: "" };
       observed.push({ cwd: options.cwd, sessionId: options.env.CODEX_COMPANION_SESSION_ID });
       const id = options.cwd.slice(-1);
