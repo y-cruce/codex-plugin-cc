@@ -98,6 +98,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
       "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",
       "  node scripts/codex-companion.mjs observe replay <job-id> [--after <cursor>] [--limit <n>] --jsonl",
+      "  node scripts/codex-companion.mjs observe ack <job-id> --ids <notification-id,...>",
+      "  node scripts/codex-companion.mjs observe reported --session <id> --jobs <job-id,...> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe view-path <job-id> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",

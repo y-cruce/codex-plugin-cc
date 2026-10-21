@@ -9,10 +9,11 @@ import { readHistory, cursorFor, cleanupHistory } from "./job-event-store.mjs";
 import { createLiveView, questionIds, questionText, renderJobEvent } from "./job-event-model.mjs";
 import { ObservationClient } from "./observation-client.mjs";
 import { readObservationJson, observationRoots, observationJobs, observationThreads, resolveObservationRoot } from "./observation-paths.mjs";
-import { liveStatus } from "./live-commands.mjs";
+import { acknowledgeNotifications, liveStatus } from "./live-commands.mjs";
 import { claimQuestion } from "./question-report.mjs";
 import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 import { resolveJobHistory } from "./history-resolver.mjs";
+import { recordTerminalReports } from "./job-events.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ");
@@ -30,6 +31,21 @@ async function findJob(location, id) {
   const job = terminal(recorded?.status) ? recorded : (await observationJobs(location.stateDir)).find((entry) => entry.job.id === id)?.job ?? recorded;
   if (!job) throw errorFor("UNKNOWN_JOB", `UNKNOWN_JOB ${id}`);
   return job;
+}
+
+// The pane pushes a question or a note from its replay row alone, so the row
+// carries what the director answers from: the request and question ids with
+// every option, or the note with the request it is waiting on.
+function replayRow(event) {
+  const p = event.payload ?? {};
+  if (event.type === "question.opened") {
+    return { ...event, text: `request=${p.requestId}${questionIds(p.fields)}: ${questionText(p.fields, p.message)}` };
+  }
+  if (event.type === "director.notified") {
+    const pending = p.pendingRequestId == null ? "" : `pending_request=${p.pendingRequestId} `;
+    return { ...event, text: `${pending}${oneLine(p.message)}` };
+  }
+  return event;
 }
 
 function history(location, id, options = {}) {
@@ -268,7 +284,8 @@ export async function handleObserve(argv) {
     rejectUnknownOptions: true,
     optionContext: "observe follow"
   } : {
-    valueOptions: ["cwd", "after", "limit", "until", "max-seconds", ...(command === "threads" ? ["finished-after"] : [])],
+    valueOptions: ["cwd", "after", "limit", "until", "max-seconds", ...(command === "threads" ? ["finished-after"] : []),
+      ...(command === "ack" ? ["ids"] : []), ...(command === "reported" ? ["session", "jobs"] : [])],
     booleanOptions: ["json", "jsonl", "verbose", "quiet"],
     rejectUnknownOptions: true,
     optionContext: `observe ${command}`
@@ -296,6 +313,12 @@ export async function handleObserve(argv) {
           historyAvailable: Boolean(manifest && !manifest.tombstone) };
       }));
       await write(`${JSON.stringify({ jobs: result })}\n`);
+      return;
+    }
+    if (command === "reported") {
+      const jobs = String(options.jobs ?? "").split(",").filter(Boolean);
+      if (!options.session || !jobs.length) throw errorFor("INVALID_ARGUMENT", "Pass --session <id> --jobs <job-id,...>");
+      await write(`${JSON.stringify({ recorded: await recordTerminalReports(cwd, options.session, jobs) })}\n`);
       return;
     }
     if (command === "threads") {
@@ -359,15 +382,22 @@ export async function handleObserve(argv) {
         const page = await history(location, id, { after, limit: Math.min(256, remaining) });
         committedSeq ??= page.committedSeq;
         const events = page.events.filter((event) => BigInt(event.seq) <= BigInt(committedSeq));
-        for (const event of events) await write(`${JSON.stringify(event)}\n`);
+        for (const event of events) await write(`${JSON.stringify(replayRow(event))}\n`);
         remaining -= events.length;
         after = page.nextCursor;
         if (page.caughtUp === true || (page.caughtUp === undefined &&
           (!events.length || events.at(-1).seq === committedSeq))) break;
       } while (remaining > 0);
       await write(`${JSON.stringify({ type: "end", nextCursor: after, committedSeq })}\n`);
+    } else if (command === "ack") {
+      // A note the pane delivered itself, over the director channel or a
+      // prompt, is marked read the way the events stream marks the ones it prints.
+      const ids = String(options.ids ?? "").split(",").filter(Boolean);
+      if (!ids.length) throw errorFor("INVALID_ARGUMENT", "Pass --ids <notification-id,...>");
+      await acknowledgeNotifications(cwd, job, ids);
+      await write(`${JSON.stringify({ acknowledged: ids })}\n`);
     } else if (command === "follow") await follow(location, job, options);
-    else throw errorFor("INVALID_ARGUMENT", "Usage: observe list | threads | replay | view-path | follow");
+    else throw errorFor("INVALID_ARGUMENT", "Usage: observe list | threads | replay | view-path | follow | ack | reported");
   } catch (error) {
     const payload = { type: "error", code: error.code ?? "OBSERVATION_FAILED", message: error.message,
       earliestAvailableCursor: error.earliestAvailableCursor };

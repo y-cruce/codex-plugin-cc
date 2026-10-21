@@ -171,6 +171,15 @@ test("follow notification records the pending request at emission", async (t) =>
   assert.equal(repeated.code, 0, repeated.stderr);
   assert.match(repeated.stdout, /^QUESTION_PENDING job=.*request=question-1 ids=source still unanswered: Which source\?$/m);
   assert.doesNotMatch(repeated.stdout, /^QUESTION /m);
+  // The pane pushes from replay rows alone, so they carry what the director answers from.
+  const replay = await observe(t, h, "replay", jobId, "--jsonl");
+  const rows = replay.stdout.trim().split("\n").map(JSON.parse);
+  assert.equal(rows.find((row) => row.type === "question.opened")?.text, "request=question-1 ids=source: Which source?");
+  const note = rows.find((row) => row.type === "director.notified");
+  assert.equal(note?.text, "pending_request=question-1 Source decision needed");
+  const acked = await observe(t, h, "ack", jobId, "--ids", note.payload.notificationId);
+  assert.equal(acked.code, 0, acked.stderr);
+  assert.deepEqual(JSON.parse(acked.stdout), { acknowledged: [note.payload.notificationId] });
 });
 
 

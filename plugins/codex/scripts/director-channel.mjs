@@ -29,6 +29,8 @@ const SPOOL_MS = 500;
 const PROBE_MS = 2000;
 // The pane loads with the session; a minute covers a slow start.
 const PROBES = 30;
+// How long the pane holds its lines for a probe still on its way.
+const HOLD_MS = 15000;
 export const PROBE = "codex-director-channel-probe";
 
 const INSTRUCTIONS = "Each message from this channel reports one event of a Codex job this session dispatched, "
@@ -48,7 +50,8 @@ export function channelMessage(line) {
 }
 
 export function paths(claudePid, dir = DIR) {
-  return { confirmed: path.join(dir, `${claudePid}.confirmed.json`), spool: path.join(dir, `${claudePid}.spool`) };
+  return { confirmed: path.join(dir, `${claudePid}.confirmed.json`), probing: path.join(dir, `${claudePid}.probing.json`),
+    spool: path.join(dir, `${claudePid}.spool`) };
 }
 
 function main() {
@@ -79,6 +82,7 @@ function main() {
   const probe = () => {
     if (fs.existsSync(files.confirmed) || ++probes > PROBES) {
       clearInterval(probing);
+      fs.rmSync(files.probing, { force: true });
       return;
     }
     send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: {
@@ -91,6 +95,7 @@ function main() {
     clearInterval(timer);
     clearInterval(probing);
     fs.rmSync(files.confirmed, { force: true });
+    fs.rmSync(files.probing, { force: true });
     fs.rmSync(files.spool, { recursive: true, force: true });
     process.exit(0);
   };
@@ -98,6 +103,13 @@ function main() {
   // A confirmation left by an earlier server for a reused pid proves nothing.
   fs.rmSync(files.confirmed, { force: true });
   fs.mkdirSync(files.spool, { recursive: true });
+  // While this says a probe is on its way, the pane holds its lines instead of
+  // arming a Monitor: after a /reload-plugins the old server's confirmation is
+  // gone for the seconds the new probe takes, and a Monitor armed in them
+  // reported an ending the channel had already delivered.
+  // Bounded well short of the probes: without the flag no probe comes back, and
+  // the Monitor that session needs should not wait the full minute.
+  fs.writeFileSync(files.probing, JSON.stringify({ at: Date.now(), until: Date.now() + HOLD_MS }));
   const timer = setInterval(drain, SPOOL_MS);
   process.on("SIGTERM", leave);
   process.on("SIGINT", leave);

@@ -63,7 +63,7 @@ type State = {
   unreadable: Map<string, number>
   owners: Map<string, string[]>
   rootIds: Map<string, Set<string>>
-  pending: { jobId: string; cwd: string; text: string; type?: string }[]
+  pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string }[]
   worker: string
   toEnd: boolean
   pinned: boolean
@@ -79,6 +79,9 @@ type State = {
   // scripts/director-channel.mjs), '' until found, null where there is none.
   channel: string | null | ''
   channelOn: boolean
+  // A probe is on its way (the server says so): lines wait for it, and no
+  // Monitor is armed in the meantime.
+  channelHold: boolean
   channelBatches: number
 }
 
@@ -311,7 +314,50 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
   const on = Boolean(base && await $.fs.exists(`${base}.confirmed.json`))
   if (on && !state.channelOn) stopMonitors($, state)
   state.channelOn = on
-  if (!on) await ensureMonitors($, state, live, now)
+  state.channelHold = !on && Boolean(base) && await probing($, base!, now)
+  if (!on && !state.channelHold) await ensureMonitors($, state, live, now)
+}
+
+async function probing($: EngineInterface, base: string, now: number) {
+  try {
+    const until = (JSON.parse(await $.fs.read(`${base}.probing.json`)) as { until?: number }).until
+    return typeof until === 'number' && now < until
+  } catch {
+    return false
+  }
+}
+
+// A note the pane delivered is marked read, as the events stream marks the
+// ones it prints; left unread, status kept counting it as undelivered.
+async function acknowledge($: EngineInterface, state: State, lines: State['pending']) {
+  const notes = new Map<string, { cwd: string; ids: string[] }>()
+  for (const line of lines) {
+    if (!line.notificationId) continue
+    const entry = notes.get(line.jobId) ?? { cwd: line.cwd, ids: [] }
+    entry.ids.push(line.notificationId)
+    notes.set(line.jobId, entry)
+  }
+  for (const [jobId, { cwd, ids }] of notes) {
+    await companion($, state, cwd, ['ack', jobId, '--ids', ids.join(',')]).catch(error => {
+      $.ui.log(`Codex tasks ack ${jobId}: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    })
+  }
+}
+
+// An ending sent over the channel goes into the record the events stream keeps
+// of the endings it reported: a Monitor armed later, in a session resumed
+// without the channel, reported it again otherwise.
+async function recordEndings($: EngineInterface, state: State, lines: State['pending']) {
+  const endings = new Map<string, Set<string>>()
+  for (const line of lines) {
+    if (!line.type?.startsWith('job.')) continue
+    endings.set(line.cwd, (endings.get(line.cwd) ?? new Set()).add(line.jobId))
+  }
+  for (const [cwd, jobs] of endings) {
+    await companion($, state, cwd, ['reported', '--session', state.sessionId, '--jobs', [...jobs].join(',')]).catch(error => {
+      $.ui.log(`Codex tasks record endings: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    })
+  }
 }
 
 // One file per batch, named to sort in the order written; the server reads and
@@ -694,7 +740,7 @@ async function pollOnce($: EngineInterface, state: State) {
       owners: rows.owners, provisional: rows.provisional })
     if (changed) $.ui.invalidate('ui.render')
     const ledger: Ledger = { ...state.ledger }
-    const lines: { jobId: string; cwd: string; text: string; type: string }[] = []
+    const lines: { jobId: string; cwd: string; text: string; type: string; notificationId?: string }[] = []
     if (stale()) return
     // A watch that expired just before the last job finished still needs to
     // restart and catch its terminal. Recent finished rows keep that root watched.
@@ -738,7 +784,7 @@ async function pollOnce($: EngineInterface, state: State) {
           const args = ['replay', job.id, '--limit', '8']
           if (receipt.cursor) args.push('--after', receipt.cursor)
           const rows = (await companion($, state, cwd, args)).trim().split('\n')
-            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string }] } catch { return [] } })
+            .flatMap(row => { try { return [JSON.parse(row) as { type: string; seq?: string; text?: string; nextCursor?: string; committedSeq?: string; payload?: { notificationId?: string } }] } catch { return [] } })
           if (stale()) return
           const events = rows.filter(row => row.seq)
           // A reload whose ledger lost this job rebuilds its cursor from the
@@ -760,11 +806,16 @@ async function pollOnce($: EngineInterface, state: State) {
             // Left unclaimed: the reconciliation below still settles the ending.
             if (event.type.startsWith('job.') && historical(event.seq!)) continue
             const line = pushLine(job.label ?? job.id, event, view)
+            // An ending the reconciliation already reported, from the view, in
+            // an earlier poll whose replay did not have the event yet: the
+            // event arriving later is the same ending, not a second one.
+            const reported = event.type.startsWith('job.') && receipt.terminal === event.type.slice(4)
             // An ending read in the same poll that first lists the job as over
             // is still news if this pane saw the job before: claiming it here
             // without a line left the reconciliation below nothing to report.
             const ending = event.type.startsWith('job.') && !first && !foreign
-            if ((announce || ending) && line) lines.push({ jobId: job.id, cwd, text: line, type: event.type })
+            const notificationId = event.type === 'director.notified' ? event.payload?.notificationId || undefined : undefined
+            if ((announce || ending) && line && !reported) lines.push({ jobId: job.id, cwd, text: line, type: event.type, notificationId })
             // Claimed here as well, or the reconciliation below reports the same
             // ending a second time once this cursor has moved past it.
             if (event.type.startsWith('job.')) receipt.terminal = event.type.slice(4)
@@ -840,10 +891,12 @@ async function pollOnce($: EngineInterface, state: State) {
         await sendToChannel($, state, mine)
         if (stale()) return
         state.pending = []
+        await acknowledge($, state, mine)
+        await recordEndings($, state, mine)
       } catch (error) {
         $.ui.log(`Codex tasks channel: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
       }
-    } else if (state.push && mine.length && !state.busy) {
+    } else if (state.push && mine.length && !state.busy && !state.channelHold) {
       // A plugin's own submit skips this plugin's prompt.submit hooks, so the
       // text itself is what the director reads; keep it short and let it fetch
       // the detail with the companion.
@@ -853,7 +906,10 @@ async function pollOnce($: EngineInterface, state: State) {
       // cursors this round advanced are committed either way, so a refusal must
       // not make every job re-read and re-report the events already seen.
       if (stale()) return
-      if (!result.drop) state.pending = []
+      if (!result.drop) {
+        state.pending = []
+        await acknowledge($, state, mine.slice(0, 6))
+      }
     }
     state.ledger = ledger
     await saveLedger($, state)
@@ -1059,7 +1115,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
-    liveRoots: new Set<string>(), channel: '', channelOn: false, channelBatches: 0,
+    liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, channelBatches: 0,
   }
 
   on('session.start', async ($, e, next) => {

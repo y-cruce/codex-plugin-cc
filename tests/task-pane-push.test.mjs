@@ -37,6 +37,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   dirs.add(workspaceRoot);
   const statPaths = [];
   const observed = [];
+  const acks = [];
   const base = options.fallback ? "/tmp/codex-companion/main" : "/home/test/.claude/plugins/data/codex/state/main";
   const jobPath = `${base}/jobs/job-a.json`;
   const viewPath = `${base}/thread-records/record-a/live-view.json`;
@@ -50,6 +51,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   };
   files.set(jobPath, { id: "job-a", sessionId, workspaceRoot, status: "running" });
   files.set(viewPath, live);
+  for (const [file, value] of options.preset ?? []) files.set(file, value);
   const listing = [{ id: "record-a", recordId: "record-a", jobId: "job-a", label: live.label,
     status: "running", sessionIds: [sessionId], viewPath, historyAvailable: false }];
   let threads = listing;
@@ -98,10 +100,12 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       },
     },
     process: { run: async (args, init) => {
+      if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep") return { exitCode: options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
+      if (args.includes("ack") || args.includes("reported")) { acks.push(args); return { exitCode: 0, stdout: "{}", stderr: "" }; }
       observed.push(init.cwd);
       if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(args), stderr: '' };
       if (threadRead) {
@@ -117,7 +121,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       notify: async (text) => { notices.push(text); if (options.notify) return options.notify(); return { isSent: true, channel: "terminal_bell" }; },
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
-  registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, false);
+  registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, options.push ?? false);
   // A round writes the ledger only when it changed, so one that changed nothing
   // is done once its queued work has drained.
   const settle = async (previous) => {
@@ -129,7 +133,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, observed, writes: () => writes,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, observed, acks, writes: () => writes,
     autocomplete: async (text) => { const token = /\S*$/.exec(text)[0]; return hooks.get("prompt.autocomplete:")(engine,
       { text, token, cursor: text.length, start: text.length - token.length }, async () => ({ suggestions: [] })); },
     removeDir: (path) => { dirs.delete(path); },
@@ -933,6 +937,69 @@ test("a cursor rebuilt after reload does not replay a terminal already in histor
   await pane.tick();
   assert.deepEqual(pane.toasts.filter((text) => /job\.failed/.test(text)), ["Alpha task · job.failed: new failure"]);
   assert.equal(afters.at(-1), "c3");
+});
+
+test("an ending reported from the view is not reported again when its event is replayed", async () => {
+  let pages = [];
+  const pane = await paneHarness(new Map(), undefined, "session", { replay: () => {
+    const events = pages.shift() ?? [];
+    return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "0"}`, committedSeq: events.at(-1)?.seq ?? "0" }]
+      .map((row) => JSON.stringify(row)).join("\n");
+  } });
+  pane.list([{ ...pane.listing[0], historyAvailable: true }]);
+  await pane.tick();
+  // The view says the job is over before its job.completed is committed.
+  Object.assign(pane.live, { status: "completed", activeRoundId: null, endedAt: new Date().toISOString(),
+    lastMessage: { kind: "assistant", text: "done", at: "" } });
+  pane.touch();
+  pane.viewTick();
+  await pane.tick();
+  pages = [[{ type: "job.completed", seq: "7" }]];
+  pane.list([{ ...pane.listing[0], status: "completed", historyAvailable: true }]);
+  await pane.tick();
+  await pane.tick();
+  assert.equal(pane.toasts.filter((text) => /job\.completed/.test(text)).length, 1, pane.toasts.join("\n"));
+});
+
+test("with the channel on, a note goes to the spool with its body and is acknowledged", async () => {
+  let pages = [[{ type: "director.notified", seq: "2", payload: { notificationId: "n1", message: "need a decision", pendingRequestId: null },
+    text: "need a decision" }]];
+  // Seen once before the note, so it is news.
+  pages.unshift([]);
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { at: 1 }]], replay: () => {
+      const events = pages.shift() ?? [];
+      return [...events, { type: "end", nextCursor: `c${events.at(-1)?.seq ?? "0"}`, committedSeq: events.at(-1)?.seq ?? "0" }]
+        .map((row) => JSON.stringify(row)).join("\n");
+    } });
+  pane.listing[0].historyAvailable = true;
+  await pane.tick();
+  await pane.tick();
+  const batches = [...pane.files].filter(([file]) => file.startsWith("/tmp/codex-channel/4242.spool/"));
+  assert.equal(batches.length, 1);
+  assert.match(batches[0][1].lines[0].text, /director\.notified: need a decision/);
+  assert.deepEqual(pane.acks.map((args) => args.slice(args.indexOf("ack"), args.indexOf("--cwd"))), [["ack", "job-a", "--ids", "n1"]]);
+  // An ending sent the same way is recorded for a later events watch.
+  pages.push([{ type: "job.completed", seq: "3" }]);
+  pane.list([{ ...pane.listing[0], status: "completed" }]);
+  await pane.tick();
+  assert.deepEqual(pane.acks.at(-1).slice(pane.acks.at(-1).indexOf("reported"), pane.acks.at(-1).indexOf("--cwd")),
+    ["reported", "--session", "session", "--jobs", "job-a"]);
+});
+
+test("while a probe is on its way the pane arms no Monitor, and arms one once the hold is over", async () => {
+  const calls = [];
+  const now = Date.now();
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", watch: false, now,
+    preset: [["/tmp/codex-channel/4242.probing.json", { at: now, until: now + 15000 }]],
+    toolCall: async (request) => { calls.push(request.tool); return { result: { taskId: "m1" } }; },
+    replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }) });
+  await pane.tick();
+  assert.deepEqual(calls.filter((tool) => tool === "Monitor"), []);
+  pane.advance(20000);
+  await pane.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((tool) => tool === "Monitor"), ["Monitor"]);
 });
 
 test("branch stops inherited pane monitors and watches only its own dispatches", async () => {

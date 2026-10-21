@@ -40,6 +40,9 @@ test("the server probes the route until the pane confirms it, then stops", async
   write({ id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } });
   await until(() => messages.length >= 1);
   assert.deepEqual(messages[0].result.capabilities, { experimental: { "claude/channel": {} } });
+  // The pane holds its lines while this says a probe is coming.
+  const probing = JSON.parse(fs.readFileSync(files.probing, "utf8"));
+  assert.ok(probing.until > Date.now());
   write({ method: "notifications/initialized" });
   const probes = () => messages.filter((m) => m.method === "notifications/claude/channel" && m.params.content.includes(PROBE));
   await until(() => probes().length >= 2);
@@ -49,6 +52,7 @@ test("the server probes the route until the pane confirms it, then stops", async
   const settled = probes().length;
   await new Promise((r) => setTimeout(r, 2500));
   assert.equal(probes().length, settled, "no probe after the confirmation");
+  assert.equal(fs.existsSync(files.probing), false, "nothing to hold for once confirmed");
 });
 
 test("the server forwards each spooled batch in order and removes its files when Claude Code goes", async (t) => {

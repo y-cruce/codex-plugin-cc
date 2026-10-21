@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
-import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
+import { recordTerminalReports, streamJobEvents, terminalReportsPath } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { checkJobLiveness, ownerProcessAlive } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
-import { makeTempDir } from "./helpers.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const job = { id: "job-1", threadId: "thread-1", status: "running" };
 
@@ -479,4 +479,16 @@ test("live broker deadline closes a socket even when initialize never replies", 
   await assert.rejects(CodexAppServerClient.connect(root, {
     brokerEndpoint: `unix://${socketPath}`, brokerTimeoutMs: 50
   }), /Live broker request timed out/);
+});
+
+test("endings delivered elsewhere join an existing watch record and never start one", async (t) => {
+  isolateTestEnvironment(t);
+  const repo = makeTempDir();
+  assert.equal(await recordTerminalReports(repo, "s1", ["job-a"]), false);
+  const file = terminalReportsPath(repo, "s1");
+  assert.equal(fs.existsSync(file), false);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(["job-old"]));
+  assert.equal(await recordTerminalReports(repo, "s1", ["job-a", "job-old"]), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).sort(), ["job-a", "job-old"]);
 });
