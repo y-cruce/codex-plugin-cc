@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { JobEventStore } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
+import { terminalReportsPath } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
@@ -117,6 +118,14 @@ test("observe falls back to HOME data root, pins history/result reads, and merge
   assert.equal(thread.viewPath, path.join(recent.stateDir, "job-history/task-shared/live-view.json"));
   const current = await h.cli(["view-path", "task-shared"], { CLAUDE_PLUGIN_DATA: path.dirname(path.dirname(old.stateDir)) });
   assert.equal(current.stdout.trim(), path.join(old.stateDir, "job-history/task-shared/live-view.json"));
+  // The pane runs `reported` this way too; the watch keeps its record in the plugin's data.
+  const record = terminalReportsPath(recent.stateDir, "s1");
+  fs.mkdirSync(path.dirname(record), { recursive: true });
+  fs.writeFileSync(record, JSON.stringify(["task-old"]));
+  const reported = await h.cli(["reported", "--session", "s1", "--jobs", "task-shared"]);
+  assert.equal(reported.code, 0, reported.stderr);
+  assert.deepEqual(JSON.parse(reported.stdout), { recorded: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(record, "utf8")).sort(), ["task-old", "task-shared"]);
   const missing = await h.cli(["view-path", "missing"]);
   assert.equal(missing.code, 1);
   assert.equal(missing.stderr.trim(), "UNKNOWN_JOB missing");

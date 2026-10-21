@@ -14,16 +14,16 @@ import { questionIds, questionText } from "./job-event-model.mjs";
 export const DEFAULT_QUESTION_REMIND_MS = 120000;
 
 // The endings a session's watch has reported, kept across watches.
-export function terminalReportsPath(cwd, session) {
-  return path.join(resolveStateDir(cwd), "event-monitors", `${createHash("sha256").update(session).digest("hex")}.json`);
+export function terminalReportsPath(stateDir, session) {
+  return path.join(stateDir, "event-monitors", `${createHash("sha256").update(session).digest("hex")}.json`);
 }
 
 // An ending the director heard some other way (the tasks pane's channel) is
 // added to the watch's record, or a watch armed later -- a session resumed
 // without the channel -- reports it again. With no record yet there is
 // nothing to add: a first watch counts every finished job as already reported.
-export async function recordTerminalReports(cwd, session, jobIds) {
-  const file = terminalReportsPath(cwd, session);
+export async function recordTerminalReports(stateDir, session, jobIds) {
+  const file = terminalReportsPath(stateDir, session);
   let reported;
   try {
     reported = new Set(JSON.parse(await fs.readFile(file, "utf8")));
@@ -55,7 +55,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const roundContext = dependencies.roundContext ?? ((cwd, jobId) => readRoundContext(cwd, jobId));
   // Monitor processes expire; a session's baseline and terminal receipts must not.
   const terminalReportsFile = session === undefined ? null : dependencies.terminalReportsFile
-    ?? terminalReportsPath(cwd, session);
+    ?? terminalReportsPath(resolveStateDir(cwd), session);
   let reported = new Set();
   let initialized = !terminalReportsFile;
   if (terminalReportsFile) {

@@ -318,7 +318,12 @@ export async function handleObserve(argv) {
     if (command === "reported") {
       const jobs = String(options.jobs ?? "").split(",").filter(Boolean);
       if (!options.session || !jobs.length) throw errorFor("INVALID_ARGUMENT", "Pass --session <id> --jobs <job-id,...>");
-      await write(`${JSON.stringify({ recorded: await recordTerminalReports(cwd, options.session, jobs) })}\n`);
+      // The pane runs this without CLAUDE_PLUGIN_DATA, so the record is looked
+      // for where `list` looks for jobs: the watch keeps it in the plugin's data.
+      const roots = process.env.CLAUDE_PLUGIN_DATA ? [resolveStateDir(cwd)] : await observationRoots(cwd);
+      let recorded = false;
+      for (const stateDir of roots) recorded = await recordTerminalReports(stateDir, options.session, jobs) || recorded;
+      await write(`${JSON.stringify({ recorded })}\n`);
       return;
     }
     if (command === "threads") {
