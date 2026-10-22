@@ -1324,6 +1324,17 @@ async function handleCancel(argv) {
     );
   }
 
+  // ACP acknowledges the ended turn before its worker persists the result and
+  // fails queued rounds. Let that worker finish instead of killing its group.
+  if (job.executor === "acp" && interrupt.interrupted) {
+    const status = interrupt.terminal?.status ?? "cancelled";
+    const payload = { jobId: job.id, status, title: job.title,
+      turnInterruptAttempted: true, turnInterrupted: true };
+    outputCommandResult(payload, status === "cancelled" ? renderCancelReport(job)
+      : `Job ${job.id} ended ${status} while cancellation was requested.\n`, options.json);
+    return;
+  }
+
   terminateProcessTree(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");
 

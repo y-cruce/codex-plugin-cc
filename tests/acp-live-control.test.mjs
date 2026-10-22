@@ -27,7 +27,7 @@ function recordingPrompts(file) {
     .map((entry) => entry.params.prompt.map((block) => block.text).join("\n"));
 }
 
-async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold", label = null) {
+async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold", label = null, detached = false) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
@@ -35,7 +35,7 @@ async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permis
   const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile };
   const child = spawn(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
     "--executor-command", process.execPath, "--executor-args", JSON.stringify([AGENT]),
-    "--executor-mode", mode, ...(label ? ["--label", label] : []), "--json", prompt], { cwd, env });
+    "--executor-mode", mode, ...(label ? ["--label", label] : []), "--json", prompt], { cwd, env, detached });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -88,6 +88,34 @@ async function waitForExit(task, timeoutMs = 15000) {
 }
 
 const cases = [
+  {
+    name: "cancel lets the ACP worker finish its receipt and settle queued rounds",
+    run: async (t) => {
+      const h = await startTask(t, "default", "cancel-late", null, true);
+      const queued = h.cli("message", h.job.id, "--queue", "must-not-run");
+      assert.equal(queued.status, 0, queued.stderr);
+      const queuedJobId = JSON.parse(queued.stdout).queuedJobId;
+      const cancelled = h.cli("cancel", h.job.id);
+      assert.equal(cancelled.status, 0, cancelled.stderr);
+      assert.equal(JSON.parse(cancelled.stdout).status, "cancelled");
+      assert.equal(JSON.parse(cancelled.stdout).turnInterrupted, true, cancelled.stdout + fs.readFileSync(h.job.logFile, "utf8"));
+      const exited = await waitForExit(h);
+      assert.equal(exited.code, 1, JSON.stringify(exited));
+      assert.equal(exited.signal, null);
+      const stopped = await readRoundContext(h.cwd, h.job.id);
+      assert.equal(stopped.receipt.status, "cancelled");
+      assert.equal(stopped.receipt.job.result.terminal.status, "cancelled");
+      const pending = await readRoundContext(h.cwd, queuedJobId);
+      assert.equal(pending.receipt.status, "failed");
+      assert.equal(readStoredJob(h.cwd, queuedJobId).status, "failed");
+      assert.deepEqual(recordingPrompts(h.recording), ["cancel-late"]);
+      const history = await readRecordHistory(h.cwd, stopped.recordId);
+      assert.deepEqual(history.events.filter(event => event.type.startsWith("job.")).map(event => [event.jobId, event.type]), [
+        [h.job.id, "job.started"], [h.job.id, "job.cancelled"],
+        [queuedJobId, "job.started"], [queuedJobId, "job.failed"]
+      ]);
+    }
+  },
   {
     name: "--queue preserves FIFO, refuses mid-turn messages and binds each next round",
     run: async (t) => {

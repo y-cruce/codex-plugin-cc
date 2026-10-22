@@ -114,7 +114,8 @@ export async function cancelLiveJob(cwd, job) {
       executorSessionId: sessionId,
       turnId: job.turnId
     }), { brokerTimeoutMs: 15000 });
-    return { attempted: true, interrupted: Boolean(result.interrupted), transport: job.executor ?? "codex", detail: result.note ?? null };
+    return { attempted: true, interrupted: Boolean(result.interrupted), transport: job.executor ?? "codex", detail: result.note ?? null,
+      terminal: result.terminal ?? null };
   } catch (error) {
     return { attempted: true, interrupted: false, transport: job.executor ?? "codex", detail: error.message };
   }
