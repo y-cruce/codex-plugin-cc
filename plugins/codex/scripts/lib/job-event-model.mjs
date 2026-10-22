@@ -214,6 +214,9 @@ export function jobConfig(job) {
 
 export function createLiveView(job, options = {}) {
   const executor = job.executor ?? "codex";
+  const command = String(job.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
+  const acpLabel = /^dsh(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
+    : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder" : "ACP";
   const view = {
     schemaVersion: 1,
     jobId: job.id ?? job.jobId,
@@ -223,7 +226,7 @@ export function createLiveView(job, options = {}) {
     endedAt: job.completedAt ?? null,
     threadId: job.executorSessionId ?? job.threadId ?? null,
     turnId: job.turnId ?? null,
-    executor: { kind: executor, label: executor === "acp" ? "Qoder" : "Codex" },
+    executor: { kind: executor, label: executor === "acp" ? acpLabel : "Codex" },
     ...jobConfig(job),
     activeCommands: [],
     lastMessage: null,

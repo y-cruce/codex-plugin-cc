@@ -643,6 +643,7 @@ async function executeTaskRun(request) {
     command: request.executorCommand,
     args: request.executorArgs,
     modeId: request.executorMode,
+    permissionPolicy: request.executorPermissions,
     modelId: request.executorModel,
     effortId: request.executorEffort,
     title: taskMetadata.title,
@@ -733,7 +734,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
 }
 
 function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId,
-  executor, executorCommand, executorArgs, executorMode, executorModel, executorEffort }) {
+  executor, executorCommand, executorArgs, executorMode, executorModel, executorEffort, executorPermissions }) {
   return {
     cwd,
     model,
@@ -750,6 +751,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     executorCommand,
     executorArgs,
     executorMode,
+    executorPermissions,
     executorModel,
     executorEffort
   };
@@ -928,7 +930,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -947,6 +949,7 @@ async function handleTask(argv) {
   let executorMode = null;
   let executorModel = null;
   let executorEffort = null;
+  let executorPermissions = null;
   if (executor === "acp") {
     executorCommand = options["executor-command"] ?? process.env.CODEX_COMPANION_ACP_COMMAND ?? null;
     const executorArgsText = options["executor-args"] ?? process.env.CODEX_COMPANION_ACP_ARGS ?? "[]";
@@ -958,6 +961,10 @@ async function handleTask(argv) {
     executorMode = options["executor-mode"] ?? process.env.CODEX_COMPANION_ACP_MODE ?? null;
     executorModel = options["executor-model"] ?? process.env.CODEX_COMPANION_ACP_MODEL ?? null;
     executorEffort = options["executor-effort"] ?? process.env.CODEX_COMPANION_ACP_EFFORT ?? null;
+    executorPermissions = options["executor-permissions"] ?? process.env.CODEX_COMPANION_ACP_PERMISSIONS ?? null;
+    if (executorPermissions !== null && !["ask", "allow-once"].includes(executorPermissions)) {
+      throw new Error("--executor-permissions must be ask or allow-once.");
+    }
     if (!executorCommand) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
   }
 
@@ -1005,7 +1012,8 @@ async function handleTask(argv) {
     executorArgs,
     executorMode,
     executorModel,
-    executorEffort
+    executorEffort,
+    executorPermissions
   });
   job.request = request;
 

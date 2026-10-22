@@ -15,6 +15,7 @@ const HEADERS: [field: string, header: string][] = [
   ['mode', 'MODE'], ['name', 'NAME'], ['cwd', 'CWD'], ['thread', 'THREAD'], ['base', 'BASE'],
   ['write', 'WRITE'], ['effort', 'EFFORT'], ['model', 'MODEL'], ['siblings', 'SIBLINGS'], ['sandbox', 'SANDBOX'],
   ['executor', 'EXECUTOR'], ['executor_mode', 'EXECUTOR_MODE'], ['executor_effort', 'EXECUTOR_EFFORT'],
+  ['executor_command', 'EXECUTOR_COMMAND'], ['executor_args', 'EXECUTOR_ARGS'], ['executor_permissions', 'EXECUTOR_PERMISSIONS'],
 ]
 
 const CWD = { type: 'string', description: 'Absolute path of the repository (or worktree) the job runs in.' }
@@ -40,7 +41,10 @@ const TOOLS = [
         model: { type: 'string', description: 'MODEL: only when the user asks, or luna for bulk mechanical work.' },
         siblings: { type: 'string', description: 'SIBLINGS: one line naming the other running tasks.' },
         sandbox: { type: 'string', enum: ['full', 'network', 'default'], description: 'SANDBOX: only when the user asks.' },
-        executor: { type: 'string', enum: ['codex', 'qoder', 'acp'], description: 'EXECUTOR: only when the user asks.' },
+        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'acp'], description: 'EXECUTOR: only when the user asks.' },
+        executor_command: { type: 'string', description: 'EXECUTOR_COMMAND: override the ACP executable.' },
+        executor_args: { type: 'array', items: { type: 'string' }, description: 'EXECUTOR_ARGS: arguments for the ACP executable; dsh defaults to --profile acp.' },
+        executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP permission policy. dsh defaults to allow-once; ask forwards offered choices to the director.' },
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor.' },
         executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for a non-Codex executor.' },
       },
@@ -110,7 +114,10 @@ export function dispatchInput(input: ToolInput): string {
   for (const [field, header] of HEADERS) {
     const value = input[field]
     if (value === undefined || value === null || value === '' || value === false) continue
-    const line = value === true ? 'yes' : String(value)
+    if (field === 'executor_args' && (!Array.isArray(value) || value.some(arg => typeof arg !== 'string'))) {
+      throw new Error('executor_args must be an array of strings')
+    }
+    const line = field === 'executor_args' ? JSON.stringify(value) : value === true ? 'yes' : String(value)
     if (/[\r\n]/.test(line)) throw new Error(`${field} must be one line`)
     lines.push(`${header}: ${line}`)
   }

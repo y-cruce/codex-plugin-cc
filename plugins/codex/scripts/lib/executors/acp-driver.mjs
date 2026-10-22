@@ -188,6 +188,7 @@ export class AcpExecutorJobPort {
     this.args = options.args ?? [];
     this.env = options.env ?? process.env;
     this.modeId = options.modeId ?? null;
+    this.permissionPolicy = options.permissionPolicy ?? null;
     this.modelId = options.modelId ?? null;
     this.effortId = options.effortId ?? null;
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
@@ -220,7 +221,7 @@ export class AcpExecutorJobPort {
       const owner = { ...job, executorSessionId: event.identity.sessionId, turnId: event.identity.turnId };
       const payload = { ...event.payload, threadId: event.identity.sessionId, turnId: event.identity.turnId };
       if (event.type === "question.opened") this.director.publish(owner, event.type, payload);
-      else if (event.type === "permission.requested" && this.modeId !== "yolo") {
+      else if (event.type === "permission.requested" && !this.autoApprovePermissions()) {
         this.director.publish(owner, "question.opened", { ...permissionQuestion({ requestId: payload.requestId,
           turnId: payload.turnId, payload }), threadId: payload.threadId });
       } else if (["question.resolved", "question.closed", "permission.resolved"].includes(event.type)) {
@@ -268,7 +269,7 @@ export class AcpExecutorJobPort {
       clientCapabilities: { elicitation: { form: {} }, plan: {} }, clientInfo: { name: "codex-companion", version: "1" } });
     const sessionCaps = this.initializeResponse.agentCapabilities?.sessionCapabilities ?? {};
     this.capabilities.resumeSession = Boolean(sessionCaps.resume);
-    this.capabilities.sessionModes = true;
+    this.capabilities.sessionModes = false;
     this.control = new AcpControlServer(this, this.runtime, this.cwd, this.job.id);
     this.controlEndpoint = await this.control.start();
   }
@@ -281,6 +282,7 @@ export class AcpExecutorJobPort {
     this.recordId = binding.recordId ?? this.job.id;
     this.adapter.bindSession(sessionId);
     this.modes = response.modes ?? null;
+    this.capabilities.sessionModes = Boolean(this.modes);
     this.configOptions = response.configOptions ?? [];
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
   }
@@ -461,15 +463,21 @@ export class AcpExecutorJobPort {
   takeQueuedPrompt() { return this.queuedPrompts.shift() ?? null; }
   drainQueuedPrompts() { return this.queuedPrompts.splice(0); }
 
+  autoApprovePermissions() {
+    return this.permissionPolicy === "allow-once" || (this.permissionPolicy !== "ask" && this.modeId === "yolo");
+  }
+
   requestPermission(params) {
     const requestId = `permission:${crypto.randomUUID()}`;
     const payload = normalizeAcpPermission(params, requestId);
     const emitted = this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,
       "session/request_permission");
-    if (this.modeId === "yolo") {
-      const option = payload.options.find((item) => item.kind === "allow_always") ??
-        payload.options.find((item) => item.kind === "allow_once") ??
-        payload.options.find((item) => item.kind.startsWith("allow")) ?? null;
+    if (this.autoApprovePermissions()) {
+      const option = this.permissionPolicy === "allow-once"
+        ? payload.options.find((item) => item.kind === "allow_once") ?? null
+        : payload.options.find((item) => item.kind === "allow_always") ??
+          payload.options.find((item) => item.kind === "allow_once") ??
+          payload.options.find((item) => item.kind.startsWith("allow")) ?? null;
       const outcome = option ? { outcome: "selected", optionId: option.optionId } : { outcome: "cancelled" };
       return emitted.then(async () => {
         await this.adapter.emit("permission.resolved", { requestId, outcome: outcome.outcome,

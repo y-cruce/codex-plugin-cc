@@ -216,7 +216,9 @@ export class AcpEventAdapter {
     // together, and the whole of it is attributed to whoever was speaking when
     // it closed, so each window opens a message of its own.
     const fallback = `${this.turnId}/${role === "reasoning" ? "reasoning" : role}/${this.speaker}`;
-    const messageId = String(update.messageId ?? fallback);
+    // DSH can share a source id between thoughts and the answer. Canonical ids
+    // must distinguish roles, including in the persisted live-view projection.
+    const messageId = `${role}:${String(update.messageId ?? fallback)}`;
     const previous = this.currentMessages.get(role);
     if (previous && previous !== messageId) await this.flushMessage(role);
     if (!this.messages.has(messageId)) {

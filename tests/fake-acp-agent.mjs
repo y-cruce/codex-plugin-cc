@@ -34,9 +34,10 @@ async function waitForRelease(file) {
 }
 
 const modes = { currentModeId: "default", availableModes: ["default", "acceptEdits", "auto", "dontAsk", "yolo"].map((id) => ({ id, name: id, description: null })) };
+const dsh = process.env.ACP_FAKE_DSH === "1";
 
 function modelValues() {
-  return (process.env.ACP_FAKE_MODEL_OPTIONS ?? "dfmodel,efficient,performance").split(",").filter(Boolean);
+  return (process.env.ACP_FAKE_MODEL_OPTIONS ?? (dsh ? "deepseek-official/flash" : "dfmodel,efficient,performance")).split(",").filter(Boolean);
 }
 
 function reasoningEffortValues() {
@@ -57,13 +58,17 @@ class FakeAgent {
   constructor(connection) {
     this.connection = connection;
     this.sessions = new Map();
+    if (dsh && process.env.ACP_FAKE_SESSION_FILE && fs.existsSync(process.env.ACP_FAKE_SESSION_FILE)) {
+      this.sessions = new Map(JSON.parse(fs.readFileSync(process.env.ACP_FAKE_SESSION_FILE, "utf8")));
+    }
     if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "unsupported") this.setSessionConfigOption = undefined;
   }
 
   initialize(params) {
     record({ method: "initialize", params });
     if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
-    return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true,
+    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: dsh ? "deepseek-harness" : "qodercli", version: "test" },
+      agentCapabilities: { loadSession: !dsh,
       sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true } }, authMethods: [] };
   }
 
@@ -72,7 +77,8 @@ class FakeAgent {
     const sessionId = `fake-${crypto.randomUUID()}`;
     this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null, cancelCount: 0 });
-    return { sessionId, modes, configOptions: configOptions() };
+    this.persist();
+    return { sessionId, ...(dsh ? {} : { modes }), configOptions: configOptions() };
   }
 
   loadSession() { throw new Error("session/load must not be used"); }
@@ -80,13 +86,21 @@ class FakeAgent {
 
   resumeSession(params) {
     record({ method: "session/resume", params });
+    if (dsh && !this.sessions.has(params.sessionId)) throw new Error("unknown persisted session");
     const session = this.sessions.get(params.sessionId) ?? { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null };
     this.sessions.set(params.sessionId, session);
-    return { modes, configOptions: configOptions(session.model, session.effort) };
+    return { ...(dsh ? {} : { modes }), configOptions: configOptions(session.model, session.effort) };
+  }
+
+  persist() {
+    if (dsh && process.env.ACP_FAKE_SESSION_FILE) {
+      fs.writeFileSync(process.env.ACP_FAKE_SESSION_FILE, JSON.stringify([...this.sessions]));
+    }
   }
 
   setSessionMode(params) {
+    if (dsh) throw new Error("DSH does not support session/set_mode");
     record({ method: "session/set_mode", params });
     this.sessions.get(params.sessionId).mode = params.modeId;
     return {};
@@ -143,6 +157,25 @@ class FakeAgent {
   async prompt(params) {
     const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     record({ method: "session/prompt", params });
+    if (dsh) {
+      const session = this.sessions.get(params.sessionId);
+      if (text.startsWith("remember:")) session.remembered = text.slice(9);
+      this.persist();
+      if (text.startsWith("remember:")) {
+        const response = await this.connection.requestPermission({ sessionId: params.sessionId,
+          toolCall: { toolCallId: "remember-tool", title: "Remember context", kind: "execute", status: "pending" },
+          options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" },
+            { optionId: "forever", name: "Allow always", kind: "allow_always" }] });
+        record({ method: "permission/result", outcome: response.outcome });
+        await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "remembered" } });
+        return { stopReason: "end_turn" };
+      }
+      if (text === "recall") {
+        await this.update(params.sessionId, { sessionUpdate: "agent_thought_chunk", messageId: "shared-id", content: { type: "text", text: "private reasoning" } });
+        await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", messageId: "shared-id", content: { type: "text", text: session.remembered ?? "missing context" } });
+        return { stopReason: "end_turn" };
+      }
+    }
     if (text === "transport-failure") process.exit(23);
     if (text === "hold") {
       await waitForRelease(process.env.ACP_FAKE_RELEASE_FILE);

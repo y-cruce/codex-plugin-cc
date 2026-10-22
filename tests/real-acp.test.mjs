@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-import { resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
 import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
 import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
@@ -13,7 +13,7 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 const QODER = "/Users/xingjian.ym/.qoder/entry/qoder";
 
-test("installed Qoder ACP: read-only prompt streams into event history and live view", { skip: !enabled, timeout: 120000 }, (t) => {
+test("installed Qoder ACP: read-only prompt streams into event history and live view", { skip: !enabled, timeout: 120000 }, async (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir("qoder-acp-"));
   initGitRepo(cwd);
@@ -29,7 +29,7 @@ test("installed Qoder ACP: read-only prompt streams into event history and live 
   assert.equal(run("git", ["status", "--short"], { cwd }).stdout, before);
   const job = listJobs(cwd)[0];
   assert.equal(job.executorModel, "efficient");
-  const view = JSON.parse(fs.readFileSync(resolveLiveViewPath(cwd, job.id), "utf8"));
+  const view = JSON.parse(fs.readFileSync((await resolveJobHistory(cwd, job.id)).liveView, "utf8"));
   assert.equal(view.executor.label, "Qoder");
   assert.equal(view.status, "completed");
   assert.equal(view.lastMessage.text, "QODER_REAL_OK");

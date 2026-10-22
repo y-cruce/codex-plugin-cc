@@ -122,6 +122,7 @@ export async function runAcpTurn(cwd, options = {}) {
     status: "running", title: options.title ?? "ACP Task" };
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
     args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId,
+    permissionPolicy: options.permissionPolicy,
     createQueuedRound: options.createQueuedRound });
   const eventPump = (async () => {
     for await (const event of port.events()) {

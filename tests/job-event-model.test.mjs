@@ -568,7 +568,7 @@ test("empty terminal input is hidden only from tail, nonempty input remains visi
 });
 
 test("live view consumes canonical payload and ignores contradictory raw source", () => {
-  const job = { id: "job-canonical", executor: "acp", threadId: "session-1" };
+  const job = { id: "job-canonical", executor: "acp", threadId: "session-1", request: { executorCommand: "qoder" } };
   const view = createLiveView(job);
   const event = createCanonicalEvent({
     job,

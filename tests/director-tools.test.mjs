@@ -34,6 +34,12 @@ test("dispatchInput writes the headers dispatch.sh reads, then the brief", () =>
     "MODE: continue\nNAME: locate x\nCWD: /repo\nTHREAD: t-1\nWRITE: yes\nEXECUTOR: codex\n\nFind it.\n",
   );
   assert.equal(dispatchInput({ mode: "investigate", name: "n", cwd: "/r", brief: "b\n", write: false, base: "" }), "MODE: investigate\nNAME: n\nCWD: /r\n\nb\n");
+  const dsh = dispatchInput({ mode: "continue", name: "next", cwd: "/repo", brief: "Recall it.", thread: "session-1",
+    executor: "dsh", executor_command: "/custom/dsh", executor_args: ["--profile", "acp", "line\nbreak"], executor_permissions: "ask" });
+  assert.match(dsh, /EXECUTOR: dsh\n/);
+  assert.match(dsh, /EXECUTOR_COMMAND: \/custom\/dsh\nEXECUTOR_ARGS: \["--profile","acp","line\\nbreak"\]\nEXECUTOR_PERMISSIONS: ask\n/);
+  assert.throws(() => dispatchInput({ brief: "x", executor_args: "acp" }), /array of strings/);
+  assert.throws(() => dispatchInput({ brief: "x", executor_args: [1] }), /array of strings/);
 });
 
 test("dispatchInput refuses a header value that would start another header, and an empty brief", () => {
