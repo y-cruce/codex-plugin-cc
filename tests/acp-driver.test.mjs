@@ -67,24 +67,18 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("ACP model selection defaults to the 1M model, and an explicit model still wins", async () => {
+test("ACP model selection keeps the agent default unless a model is named", async () => {
   for (const row of [
-    { id: "default", values: ["dfmodel", "efficient", "performance"], expected: "dfmodel" },
-    { id: "explicit", values: ["dfmodel", "efficient", "performance"], modelId: "efficient", expected: "efficient" },
-    { id: "unavailable", values: ["efficient", "performance"], expected: null }
+    { id: "default", expected: null },
+    { id: "explicit", modelId: "efficient", expected: "efficient" }
   ]) {
-    const h = recordingPort([{ type: "select", id: "model", currentValue: row.values[0],
-      options: row.values.map((value) => ({ value, name: value })) }], { modelId: row.modelId });
-    const choice = h.port.modelChoice({});
-    await h.port.applyModel("session-1", h.response, choice.modelId, { soft: choice.soft });
+    const values = ["dfmodel", "efficient", "performance"];
+    const h = recordingPort([{ type: "select", id: "model", currentValue: values[0],
+      options: values.map((value) => ({ value, name: value })) }], { modelId: row.modelId });
+    await h.port.applyModel("session-1", h.response, h.port.modelId);
     const request = h.requests.find((entry) => entry.params.configId === "model");
     assert.equal(request?.params.value ?? null, row.expected, row.id);
-    if (row.expected) {
-      assert.equal(h.response.configOptions.find((option) => option.id === "model").currentValue, row.expected, row.id);
-    } else {
-      assert.match(h.progress.map((update) => update.stderrMessage ?? "").join("\n"),
-        /ACP model dfmodel is not available on this agent; keeping its default/i, row.id);
-    }
+    assert.equal(h.response.configOptions.find((option) => option.id === "model").currentValue, row.expected ?? values[0], row.id);
   }
 });
 
