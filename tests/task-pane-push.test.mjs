@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,6 +55,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const workspaceRoot = options.workspaceRoot ?? "/work";
   dirs.add(workspaceRoot);
   const statPaths = [];
+  const refusedReads = [];
   const observed = [];
   const acks = [];
   const base = options.fallback ? "/tmp/codex-companion/main" : "/home/test/.claude/plugins/data/codex/state/main";
@@ -110,6 +112,11 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path); files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
+        // The hooks host rejects reads over 4 MiB; stat still succeeds.
+        if (Buffer.byteLength(text) > 4 * 1024 * 1024) {
+          refusedReads.push(path);
+          throw new Error("File exceeds 4 MiB read limit");
+        }
         if (path === viewReadPath && viewRead) {
           const wait = viewRead;
           viewRead = null;
@@ -155,7 +162,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, observed, acks, writes: () => writes,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, refusedReads, observed, acks, writes: () => writes,
     autocomplete: async (text) => { const token = /\S*$/.exec(text)[0]; return hooks.get("prompt.autocomplete:")(engine,
       { text, token, cursor: text.length, start: text.length - token.length }, async () => ({ suggestions: [] })); },
     removeDir: (path) => { dirs.delete(path); },
@@ -704,6 +711,76 @@ test("live rows reconcile with disk even after dropping out or exhausting the qu
       } else if (ending === "missing" || !(query instanceof Error)) assert.doesNotMatch(rendered, /Alpha task/);
       else assert.match(rendered, new RegExp(["view", "inactive"].includes(ending) ? "completed" : ending), `${query}: ${ending}`);
     }
+  }
+});
+
+test("large ACP results and history cannot hold a completed row behind replay backoff", async (t) => {
+  const directory = makeTempDir("codex-pane-large-");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const sized = (value, bytes) => {
+    value.fixturePadding = "";
+    value.fixturePadding = "x".repeat(bytes - Buffer.byteLength(JSON.stringify(value)));
+    return value;
+  };
+  const put = (file, value) => {
+    const target = path.join(directory, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, typeof value === "string" ? value : JSON.stringify(value));
+  };
+  for (const [jobBytes, viewBytes, seq, segmentBytes] of [
+    [4373518, 277707, 43863, 40651680],
+    [4923239, 333791, 49166, 45710896],
+    [1024, 4194305, 1, 2048],
+    [4373518, 4194305, 1, 2048],
+  ]) {
+    let failReplay = false;
+    let replays = 0;
+    const workspaceRoot = jobBytes > 4194304 && viewBytes > 4194304 ? "/work" : "/work/acp";
+    const pane = await paneHarness(new Map(), undefined, "session", { workspaceRoot, replay: () => {
+      replays++;
+      if (failReplay) throw new Error("replay timed out");
+      return '{"type":"end","nextCursor":"0"}';
+    } });
+    pane.listing[0].historyAvailable = true;
+    failReplay = true;
+    for (let i = 0; i < 5; i++) await pane.tick();
+    assert.match(pane.debugLogs.join("\n"), /replay timed out/);
+    const before = replays;
+    const endedAt = new Date().toISOString();
+    const job = sized({ ...pane.files.get(pane.jobPath), executor: "acp", status: "completed", completedAt: endedAt }, jobBytes);
+    const live = sized({ ...pane.live, status: "completed", activeRoundId: null, endedAt,
+      executor: { kind: "acp", label: "Qoder" }, rounds: [{ jobId: "job-a", sessionId: "session" }],
+      history: { continuity: "complete", committedSeq: String(seq) } }, viewBytes);
+    // A real on-disk observation fixture: history size does not affect thread discovery.
+    const events = Array.from({ length: seq }, (_, i) => ({ seq: String(i + 1), jobId: "job-a", type: "message.delta", payload: { text: "x".repeat(700) } }));
+    const batch = { events, sha256: "0".repeat(64) };
+    events.at(-1).payload.text += "x".repeat(segmentBytes - Buffer.byteLength(JSON.stringify(batch)) - 1);
+    batch.sha256 = createHash("sha256").update(JSON.stringify(events)).digest("hex");
+    put("jobs/job-a.json", job);
+    put("job-index/job-a.json", { schemaVersion: 1, jobId: "job-a", roundId: "job-a", recordId: "record-a" });
+    put("thread-records/record-a/live-view.json", live);
+    put("thread-records/record-a/manifest.json", { schemaVersion: 1, recordId: "record-a", streamId: "fixture",
+      committedSeq: String(seq), earliestSeq: "1", segments: [{ file: "000001.events", bytes: segmentBytes, firstSeq: "1", lastSeq: String(seq) }] });
+    put("thread-records/record-a/segments/000001.events", `${JSON.stringify(batch)}\n`);
+    const [{ thread }] = await observationThreads(directory);
+    assert.equal(thread.status, "completed");
+    pane.list([{ ...thread, viewPath: pane.viewPath }]);
+    pane.files.set(pane.jobPath, job);
+    pane.files.set(pane.viewPath, live);
+    pane.viewTick(true);
+    await new Promise(resolve => setImmediate(resolve));
+    const timely = await pane.render();
+    const listed = pane.observed.length;
+    pane.touch();
+    await pane.tick();
+    if (jobBytes > 4194304 && workspaceRoot !== "/work") {
+      assert.equal(pane.observed.slice(listed).includes(workspaceRoot), false, "oversized jobs drop a foreign root from discovery");
+    }
+    if (jobBytes <= 4194304 || viewBytes <= 4194304) assert.doesNotMatch(timely, /running/, "the independent view tick must settle readable terminal status");
+    assert.equal(replays, before, "terminal status must bypass replay backoff");
+    assert.ok(pane.refusedReads.length > 0, "exercise the host's actual byte limit");
+    assert.match(await pane.render(), /completed/);
+    assert.doesNotMatch(await pane.render(), /running/);
   }
 });
 

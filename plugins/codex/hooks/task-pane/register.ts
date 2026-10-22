@@ -8,7 +8,7 @@ import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 
-type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null
+type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null; endedAt?: string | null
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean; live?: boolean }
 type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
   startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
@@ -599,17 +599,30 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
       if (generation !== state.generation) return
       const cached = state.views.get(id)
       if (stat.mtimeMs === state.mtimes.get(id) && !(reconcile && cached && !DONE.includes(cached.status))) continue
-      let view = JSON.parse(await $.fs.read(path)) as LiveView
+      let view = cached
+      let read = false
+      try {
+        view = JSON.parse(await $.fs.read(path)) as LiveView
+        read = true
+      } catch (error) {
+        // A large/temporarily unreadable view can still be ended by its job.
+        if (!cached || (error as { code?: string }).code === 'ENOENT') throw error
+      }
       if (generation !== state.generation) return
-      if (view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
+      if (!view || view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
       const file = jobFileOf(path, view)
       if (file) {
-        const job = JSON.parse(await $.fs.read(file)) as { status: string; completedAt?: string }
+        const job = await $.fs.read(file).then(text => JSON.parse(text) as { status: string; completedAt?: string }).catch(error => {
+          // Job results can exceed the host's 4 MiB read cap. Keep a readable
+          // live view even then; deletion still removes the row below.
+          if ((error as { code?: string }).code === 'ENOENT') throw error
+          return null
+        })
         if (generation !== state.generation) return
-        if (DONE.includes(job.status)) {
+        if (job && DONE.includes(job.status)) {
           view = { ...view, status: job.status as LiveView['status'], activeRoundId: null,
             endedAt: job.completedAt ?? view.endedAt ?? new Date(await $.clock.now()).toISOString() }
-        } else if (view.history.continuity === 'legacy') {
+        } else if (job && view.history.continuity === 'legacy') {
           view = { ...view, status: job.status as LiveView['status'], endedAt: null }
         }
       }
@@ -617,7 +630,7 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
       const owners = state.owners.get(id) ?? (view.rounds ?? []).map(round => round.sessionId).filter((sessionId): sessionId is string => Boolean(sessionId))
       const foreign = owners.length > 0 && !owners.includes(state.sessionId)
       if (state.paths.get(id) !== path) continue
-      state.mtimes.set(id, stat.mtimeMs)
+      if (read) state.mtimes.set(id, stat.mtimeMs)
       state.views.set(id, { ...view, foreign })
       changed = true
     } catch (error) {
@@ -862,6 +875,15 @@ async function pollOnce($: EngineInterface, state: State) {
     await each(found, async ({ thread, cwd }) => {
       const job = { id: thread.jobId, label: thread.label, status: thread.status }
       const direct = state.channelOn && thread.directorPush === true
+      let view = state.views.get(thread.id)
+      // Status is independent of replay: a large result/view or a backed-off
+      // history read must not keep a row running after the listing ended it.
+      if (view && DONE.includes(job.status) && !isOver(view)) {
+        view = { ...view, status: job.status as LiveView['status'], activeRoundId: null,
+          endedAt: thread.endedAt ?? new Date(now).toISOString() }
+        state.views.set(thread.id, view)
+        $.ui.invalidate('ui.render')
+      }
       // A job dispatched seconds ago is listed before its event history is
       // written, so one failure means "not yet", not "never". Keep trying, and
       // back off only once it has failed a few polls in a row.
@@ -876,16 +898,7 @@ async function pollOnce($: EngineInterface, state: State) {
         const foreign = thread.sessionIds.length > 0 && !thread.sessionIds.includes(state.sessionId)
         ledger[job.id] = { ...ledger[job.id] }
         const receipt = ledger[job.id]!
-        const view = state.views.get(thread.id)
         if (view && Boolean(view.foreign) !== foreign) state.views.set(thread.id, { ...view, foreign })
-        // The owner process writes the ending, so a job whose owner died never
-        // wrote one and its view says running for ever -- the pane kept a task
-        // killed an hour ago in its tabs and counted it among the live ones.
-        // The store knows better, and it is what the listing reports.
-        if (view && DONE.includes(job.status) && !isOver(view)) {
-          state.views.set(thread.id, { ...view, status: job.status as LiveView['status'], activeRoundId: null,
-            endedAt: view.tail.at(-1)?.at ?? new Date(await $.clock.now()).toISOString() })
-        }
         // A legacy job predates the event store, and one that died before its
         // first event never opened one: no history is the answer, not a failure
         // worth retrying. Replaying it until the give-up count spends five
