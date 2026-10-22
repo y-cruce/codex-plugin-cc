@@ -26,6 +26,7 @@ import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStat
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
 import { handleTasks } from "./lib/director-tasks.mjs";
+import { gcPluginState } from "./lib/state-gc.mjs";
 import { askPane, renderPaneReply } from "./lib/pane-channel.mjs";
 import { readRoundContext } from "./lib/history-resolver.mjs";
 import { finishObservedJob } from "./lib/observation-client.mjs";
@@ -96,6 +97,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--days <n>] [--limit <n>]",
+      "  node scripts/codex-companion.mjs gc [--dry-run] [--json]",
       "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
       "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",
@@ -1384,6 +1386,18 @@ async function main() {
   }
 
   switch (subcommand) {
+    case "gc": {
+      const { options } = parseCommandInput(argv, { booleanOptions: ["dry-run", "json"], rejectUnknownOptions: true });
+      const result = gcPluginState({ dryRun: Boolean(options["dry-run"]) });
+      if (options.json) outputResult(result, true);
+      else if (result.skipped) console.log(`GC skipped: ${result.skipped}`);
+      else {
+        for (const row of result.candidates) console.log(`${result.dryRun ? "Would delete" : "Deleted"} ${row.stateDir} (${row.reason}, ${row.bytes} bytes, ${row.jobs} jobs)`);
+        for (const [rule, total] of Object.entries(result.summary.byRule)) console.log(`${rule}: ${total.directories} directories, ${total.bytes} bytes, ${total.jobs} jobs`);
+        console.log(`Total: ${result.summary.directories} directories, ${result.summary.bytes} bytes, ${result.summary.jobs} jobs; ${result.prunedEntries} index entries pruned`);
+      }
+      break;
+    }
     case "observe":
       await handleObserve(argv);
       break;

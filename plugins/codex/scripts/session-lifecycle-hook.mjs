@@ -9,6 +9,7 @@ import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { deliveryRoot, registerDirectorTranscript } from "./lib/director-delivery.mjs";
+import { scheduleStateGc } from "./lib/state-gc.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -102,6 +103,7 @@ async function main() {
 
   if (eventName === "SessionStart") {
     handleSessionStart(input);
+    scheduleStateGc();
     return;
   }
 

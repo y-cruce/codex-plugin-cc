@@ -104,6 +104,49 @@ export function pruneSessionTaskIndexes(stateRoot, now = Date.now()) {
   } catch (error) { if (error.code !== "ENOENT") throw error; }
 }
 
+// Keep completion markers and unrelated lines. The normal writer lock avoids
+// losing concurrent appends; atomic replacement preserves the index's idle age.
+export function pruneMissingStateTaskEntries(stateRoot) {
+  const directory = path.dirname(sessionTaskIndexPath(stateRoot, ""));
+  let names;
+  try {
+    if (!fs.lstatSync(directory).isDirectory()) return 0;
+    names = fs.readdirSync(directory);
+  } catch (error) { if (error.code === "ENOENT") return 0; throw error; }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const file = path.join(directory, name);
+    if (!fs.lstatSync(file).isFile()) continue;
+    try { if (!fs.lstatSync(`${file}.lock`).isFile()) continue; }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    withIndexLock(file, () => {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile()) return;
+      const contents = fs.readFileSync(file, "utf8");
+      let count = 0;
+      const kept = contents.split("\n").filter(line => {
+        let row;
+        try { row = JSON.parse(line); } catch { return true; }
+        if (typeof row?.stateDir !== "string" || path.dirname(path.resolve(row.stateDir)) !== path.resolve(stateRoot)) return true;
+        try { fs.lstatSync(row.stateDir); return true; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        count++;
+        return false;
+      });
+      if (!count) return;
+      const temporary = `${file}.${process.pid}.tmp`;
+      try {
+        fs.writeFileSync(temporary, kept.join("\n"), { flag: "wx" });
+        fs.utimesSync(temporary, stat.atime, stat.mtime);
+        fs.renameSync(temporary, file);
+      } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+      removed += count;
+    });
+  }
+  return removed;
+}
+
 // writeJobFile is shared by initial dispatches and queued follow-up rounds.
 export function indexSessionTask(stateDir, job) {
   if (!job.sessionId) return;
