@@ -10,7 +10,7 @@ import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run, within } from "./helpers.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -81,6 +81,49 @@ test("a backgrounded ACP round stores its payload in the round receipt", (t) => 
   assert.equal(stored.status, 0, stored.stderr);
   assert.doesNotMatch(stored.stdout, /No captured result payload/);
   assert.match(stored.stdout, /Basic complete/);
+});
+
+test("a backgrounded ACP session startup failure reaches the director channel without a thread or turn", async (t) => {
+  isolateTestEnvironment(t);
+  process.env.CODEX_COMPANION_SESSION_ID = "acp-startup-owner";
+  const cwd = fs.realpathSync(makeTempDir());
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-failed-"));
+  const recording = path.join(cwd, "acp-recording.jsonl");
+  const messages = [];
+  const channel = new DirectorChannel({ dir, send: async message => {
+    const event = eventFromRef(message.params.meta.delivery);
+    await acceptDirectorEvents([event], "channel", async () => { messages.push({ ...message.params, event }); return {}; });
+  } });
+  t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  await channel.start(process.env.CODEX_COMPANION_SESSION_ID);
+  await channel.handle({ action: "confirm", sessionId: channel.sessionId, instance: channel.instance, nonce: channel.nonce });
+  const launch = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath,
+    "--executor-args", JSON.stringify([AGENT]), "--executor-model", "no-such-model", "--background", "--json", "basic"],
+    { cwd, env: { ...process.env, ACP_FAKE_RECORDING: recording } });
+  assert.equal(launch.status, 0, launch.stderr);
+  const { jobId, status } = JSON.parse(launch.stdout);
+  assert.equal(status, "queued");
+  const failed = await waitFor(() => {
+    const job = readJobFile(resolveJobFile(cwd, jobId));
+    return job.status === "failed" && job;
+  }, "ACP startup failure");
+  assert.match(failed.errorMessage, /ACP model no-such-model is not available/);
+  assert.equal(failed.threadId ?? null, null);
+  assert.equal(failed.turnId ?? null, null);
+  const calls = fs.readFileSync(recording, "utf8").trim().split("\n").map(JSON.parse);
+  assert.ok(calls.some(call => call.method === "session/new"));
+  assert.ok(!calls.some(call => call.method === "session/prompt"));
+  await waitFor(() => messages.length, "job_failed channel message after ACP startup failure", 5000);
+  await channel.replay();
+  assert.equal(messages.length, 1);
+  const [{ meta, content, event }] = messages;
+  assert.equal(meta.event, "job_failed");
+  assert.equal(meta.job, jobId);
+  assert.equal(meta.session, failed.sessionId);
+  assert.equal(event.payload.errorMessage, failed.errorMessage);
+  assert.equal(event.threadId, null);
+  assert.equal(event.turnId, null);
+  assert.match(content, /ACP model no-such-model is not available/);
 });
 
 test("runAcpTurn publishes questions and permissions with the persisted owner on a confirmed channel", async (t) => {

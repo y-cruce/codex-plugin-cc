@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import process from "node:process";
+import { DirectorPublisher } from "./director-delivery.mjs";
 import { finishObservedJob } from "./observation-client.mjs";
 import { jobStatusForTerminal } from "./executor-port.mjs";
 
@@ -184,6 +185,9 @@ export function failTrackedJob(job, error) {
   writeJobFile(job.workspaceRoot, job.id, failed);
   // The independent receipt must survive an unavailable index lock.
   try { upsertJob(job.workspaceRoot, failed); } catch {}
+  // Startup can fail before an executor emits a terminal event, and its
+  // observation endpoint may already be closed when the runner gets here.
+  new DirectorPublisher().publish(failed, "job.failed");
 }
 
 function writeReportFile(workspaceRoot, jobId, rendered) {
