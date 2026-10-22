@@ -38,7 +38,7 @@ export function paths(claudePid, dir = channelDirectory()) {
 }
 
 export class DirectorChannel {
-  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send, retryMs = 1000, rescanMs = 30000 }) {
+  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send, retryMs = 1000, rescanMs = 30000, probeMs = 2000 }) {
     this.root = root;
     this.files = paths(claudePid, dir);
     this.instance = randomUUID();
@@ -47,6 +47,9 @@ export class DirectorChannel {
     this.send = send;
     this.retryMs = retryMs;
     this.rescanMs = rescanMs;
+    this.probeMs = probeMs;
+    // Set once the host has initialized; only then may probes be sent.
+    this.initialized = false;
     this.sessionId = null;
     this.epoch = 0;
     this.confirmed = false;
@@ -123,6 +126,28 @@ export class DirectorChannel {
     this.watcher.on("error", () => this.queueReplay());
     this.saveRoute();
     if (this.confirmed) await this.replay();
+    else if (this.initialized) this.startProbing();
+  }
+
+  // Probes until a prompt.submit confirms one, 30 at most. A bind to a new
+  // session starts over: `claude -r` binds the session it resumes only after
+  // its picker, by when the first round may have run out unseen.
+  startProbing() {
+    clearInterval(this.probing);
+    durableJson(this.files.probing, { at: Date.now(), until: Date.now() + HOLD_MS, nonce: this.nonce });
+    let probes = 0;
+    const probe = () => {
+      if (this.confirmed || ++probes > 30) {
+        clearInterval(this.probing);
+        fs.rmSync(this.files.probing, { force: true });
+        return;
+      }
+      this.send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: {
+        content: `${PROBE} ${this.nonce}: checking that this channel reaches the session. No action needed.`, meta: { event: "probe" },
+      } }).catch(() => {});
+    };
+    probe();
+    this.probing = setInterval(probe, this.probeMs);
   }
 
   saveRoute() {
@@ -207,6 +232,7 @@ export class DirectorChannel {
     clearInterval(this.heartbeat);
     clearInterval(this.safety);
     clearInterval(this.retention);
+    clearInterval(this.probing);
     this.watcher?.close();
     clearTimeout(this.retry);
     for (const socket of this.sockets) socket.destroy();
@@ -230,23 +256,10 @@ async function main() {
   const send = (message) => new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve()));
   const channel = new DirectorChannel({ send });
   await channel.start(process.env.CLAUDE_CODE_SESSION_ID);
-  let probing;
-  let probes = 0;
-  const probe = () => {
-    if (channel.confirmed || ++probes > 30) {
-      clearInterval(probing);
-      fs.rmSync(channel.files.probing, { force: true });
-      return;
-    }
-    send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: {
-      content: `${PROBE} ${channel.nonce}: checking that this channel reaches the session. No action needed.`, meta: { event: "probe" },
-    } }).catch(() => {});
-  };
   let leaving = false;
   const leave = async () => {
     if (leaving) return;
     leaving = true;
-    clearInterval(probing);
     await channel.close();
     process.exit(0);
   };
@@ -255,7 +268,10 @@ async function main() {
   readline.createInterface({ input: process.stdin }).on("line", (line) => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
-    if (message.method === "notifications/initialized" && !probing) { probe(); probing = setInterval(probe, 2000); }
+    if (message.method === "notifications/initialized" && !channel.initialized) {
+      channel.initialized = true;
+      if (!channel.confirmed) channel.startProbing();
+    }
     if (message.id === undefined) return;
     if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: {
       protocolVersion: message.params?.protocolVersion ?? "2025-06-18", serverInfo: { name: "codex-director-channel", version: "1.0.0" },

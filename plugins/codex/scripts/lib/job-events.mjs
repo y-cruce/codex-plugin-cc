@@ -39,6 +39,14 @@ function oneLine(text) {
   return String(text ?? "").replace(/[\r\n]+/g, " ");
 }
 
+// Claude Code cuts a Monitor line at 500 characters, and the ingress accepts an
+// event only by a whole tag ending a line: a longer line has its tag on the next.
+const MONITOR_LINE_CHARS = 500;
+function taggedLine(line, event) {
+  const tag = deliveryTag(event);
+  return `${line}${line.length + 1 + tag.length > MONITOR_LINE_CHARS ? "\n" : " "}${tag}`;
+}
+
 // Fallback also drains accepted items after their broker has exited. This
 // reads only the session outbox, never command deltas or the history cursor.
 function outboxLine(event) {
@@ -63,7 +71,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const emit = async (job, type, payload, output) => {
     const event = directorEvent(job, type, payload, directorStateDir);
     if (!event) { await writeLine(await output()); return true; }
-    return deliverDirectorEvents([event], "monitor", async () => writeLine(`${await output()} ${deliveryTag(event)}`));
+    return deliverDirectorEvents([event], "monitor", async () => writeLine(taggedLine(await output(), event)));
   };
   const now = dependencies.now ?? Date.now;
   const progressAt = dependencies.progressAt ?? lastJobProgressAt;
@@ -98,7 +106,7 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       for (const event of pendingEvents(deliveryRoot(directorStateDir), session)) {
         if (signal?.aborted) break;
         if (!isDirectorEventPending(event) || confirmedRoute(event)) continue;
-        await deliverDirectorEvents([event], "monitor", () => writeLine(`${outboxLine(event)} ${deliveryTag(event)}`));
+        await deliverDirectorEvents([event], "monitor", () => writeLine(taggedLine(outboxLine(event), event)));
         lastActiveAt = now();
       }
     }

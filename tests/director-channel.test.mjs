@@ -115,6 +115,15 @@ async function monitor(h, live, job = h.job, ingress = true) {
   return lines;
 }
 
+test("a Monitor line past Claude Code's 500-character cut keeps its delivery tag whole", async (t) => {
+  const h = fixture(t);
+  const note = { id: "long", message: "长".repeat(400) };
+  const [written] = await monitor(h, { notifications: [note] }, h.job, false);
+  const shown = written.split("\n").map(line => line.length > 500 ? `${line.slice(0, 500)}...(truncated)` : line).join("\n");
+  assert.deepEqual(deliveryRefs(shown).map(eventFromRef).map(event => event?.eventId),
+    [directorEvent(h.job, "director.notified", note, h.stateDir).eventId]);
+});
+
 test("Monitor and channel share receipts in either switching order, including concurrent delivery", async (t) => {
   const h = fixture(t);
   const publisher = h.publisher();
@@ -320,6 +329,19 @@ test("the independent ingress hook binds lifecycle sessions, confirms probes and
   assert.deepEqual(runs.at(-1).slice(2), ["confirm", "4242", "cleared", "1-nonce"]);
   assert.ok((await submit(engine, { origin, text: '<channel session="first">old</channel>' }, async () => assert.fail("foreign event"))).drop);
   assert.equal(await submit(engine, { origin, text: '<channel session="cleared">note</channel>' }, async () => "passed"), "passed");
+});
+
+test("binding the session `claude -r` resumes probes again after the startup round ran out", async (t) => {
+  const h = fixture(t);
+  const probes = [];
+  const channel = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 1234, probeMs: 1, send: async (message) => { probes.push(message); } });
+  await channel.start("picker");
+  t.after(() => channel.close());
+  channel.initialized = true;
+  channel.startProbing();
+  await waitFor(() => probes.length === 30 && !fs.existsSync(channel.files.probing), "the startup round to run out");
+  await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
+  await waitFor(() => probes.length > 30, "a probe for the resumed session");
 });
 
 test("the MCP stdio server probes, restarts over a stale lease and replays accepted items before ACK", async (t) => {
