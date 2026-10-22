@@ -25,6 +25,7 @@ import { runAcpTurn } from "./lib/acp.mjs";
 import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
+import { handleTasks } from "./lib/director-tasks.mjs";
 import { askPane, renderPaneReply } from "./lib/pane-channel.mjs";
 import { readRoundContext } from "./lib/history-resolver.mjs";
 import { finishObservedJob } from "./lib/observation-client.mjs";
@@ -94,6 +95,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
+      "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--limit <n>]",
       "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
       "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",
@@ -1384,6 +1386,9 @@ async function main() {
   switch (subcommand) {
     case "observe":
       await handleObserve(argv);
+      break;
+    case "tasks":
+      await handleTasks(argv);
       break;
     case "setup":
       await handleSetup(argv);

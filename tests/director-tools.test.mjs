@@ -1,5 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { listDirectorTasks } from "../plugins/codex/scripts/lib/director-tasks.mjs";
+import { createLiveView } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 import { directorTools, dispatchInput, pluginDataDir, registerDirectorTools, startDirectorTools } from "../plugins/codex/hooks/director-tools/register.ts";
 
 const WORKER = "/home/test/.claude/skills/code-director/scripts/dispatch.sh";
@@ -16,7 +23,7 @@ function harness({ root = "/plugin", files = [WORKER, COMPANION, "/repo"], exitC
     plugin: { name: "codex", root },
     env: { get: async (name) => ({ HOME: "/home/test", TMPDIR: "/tmp/" })[name] },
     fs: { exists: async (path) => exists.has(path), write: async (path, text) => { writes.set(path, text); } },
-    session: { id: async () => "session-1" },
+    session: { id: async () => "session-1", cwd: async () => "/repo" },
     clock: { now: async () => 1000 },
     tool: { register: async (spec) => { registered.push(spec); return { tool: `mcp__codex__${spec.name}` }; } },
     process: { run: async (argv, init) => { runs.push({ argv, init }); return { exitCode, stdout, stderr }; } },
@@ -50,7 +57,7 @@ test("dispatchInput refuses a header value that would start another header, and 
 test("the tools are registered in the prompt's tool list only where dispatch.sh is installed", async () => {
   const installed = harness();
   await startDirectorTools(installed.$, installed.tools);
-  assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status", "cancel"]);
+  assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status", "tasks", "cancel"]);
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
@@ -147,4 +154,63 @@ test("an installed plugin's companion runs with the plugin's data folder, where 
   await startDirectorTools(fresh.$, fresh.tools);
   await fresh.call("status", { cwd: "/repo" });
   assert.equal(fresh.runs[0].init.env.CLAUDE_PLUGIN_DATA, undefined, "no folder yet: the companion's own fallback");
+});
+
+test("tasks lists this session across stores, filters names and repositories, and collapses queued rounds", async (t) => {
+  isolateTestEnvironment(t);
+  const home = fs.realpathSync(makeTempDir());
+  const tmpDir = path.join(home, "tmp");
+  const configDir = path.join(home, ".claude");
+  const repoA = path.join(home, "projects", "alpha");
+  const repoB = path.join(home, "projects", "beta");
+  const repoC = path.join(home, "projects", "gamma");
+  const currentData = process.env.CLAUDE_PLUGIN_DATA;
+  for (const repo of [repoA, repoB, repoC]) fs.mkdirSync(repo, { recursive: true });
+  const put = (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(value));
+  };
+  const original = { id: "job-original", label: "Fix queued receipts", sessionId: "session-1", workspaceRoot: repoA,
+    status: "completed", executor: "acp", executorSessionId: "thread-dsh", createdAt: "2026-10-22T01:00:00Z",
+    updatedAt: "2026-10-22T05:00:00Z", request: { executorCommand: "dsh", executorArgs: ["--profile", "acp"] } };
+  const queued = { ...original, id: "job-queued", status: "queued", recordId: "record-a", executorSessionId: null,
+    pid: process.pid, createdAt: "2026-10-22T02:00:00Z" };
+  writeJobFile(repoA, original.id, original);
+  writeJobFile(repoA, queued.id, queued);
+  const stateDir = resolveStateDir(repoA);
+  const history = threadRecordPaths(stateDir, "record-a");
+  put(path.join(stateDir, "job-index", `${original.id}.json`),
+    { schemaVersion: 1, jobId: original.id, roundId: original.id, recordId: "record-a" });
+  put(history.liveView, { ...createLiveView(original), recordId: "record-a", latestRoundId: original.id });
+  put(history.manifest, { threadId: "thread-dsh" });
+  // A different plugin data store and a fallback store are both discovered.
+  process.env.CLAUDE_PLUGIN_DATA = path.join(configDir, "plugins", "data", "codex-other");
+  writeJobFile(repoB, "job-pending", { id: "job-pending", label: "Inspect pending thread", sessionId: "session-1",
+    workspaceRoot: repoB, status: "running", pid: process.pid, createdAt: "2026-10-22T03:00:00Z" });
+  put(path.join(tmpDir, "codex-companion", "gamma", "jobs", "job-foreign.json"), {
+    id: "job-foreign", label: "Review export", sessionId: "session-2", workspaceRoot: repoC,
+    executor: "acp", executorSessionId: "thread-qoder", request: { executorCommand: "qodercli" },
+    status: "completed", createdAt: "2026-10-22T04:00:00Z"
+  });
+  process.env.CLAUDE_PLUGIN_DATA = currentData;
+  const pending = "Inspect pending thread · thread=pending · codex · running · job=job-pending · ~/projects/beta";
+  const resumed = "Fix queued receipts · thread=thread-dsh · dsh · queued · job=job-queued · ~/projects/alpha";
+  const foreign = "Review export · thread=thread-qoder · qoder · completed · job=job-foreign · ~/projects/gamma · other session=session-2";
+  for (const [name, input, expected, flags] of [
+    ["session only", {}, [pending, resumed], []],
+    ["name query", { query: "QUEUED" }, [resumed], ["--query", "QUEUED"]],
+    ["one repository", { cwd: repoA }, [resumed], ["--cwd", repoA]],
+    ["all sessions", { all: true }, [foreign, pending, resumed], ["--all"]],
+    ["limit", { limit: 1 }, [pending, "1 older not shown"], ["--limit", "1"]],
+    ["no match", { query: "missing" }, ["No matching tasks."], ["--query", "missing"]],
+  ]) {
+    const result = await listDirectorTasks({ sessionId: "session-1", home, configDir, tmpDir, ...input });
+    assert.equal(result, expected.join("\n"), name);
+    const h = harness({ files: [WORKER, COMPANION, "/repo", repoA], stdout: result });
+    await startDirectorTools(h.$, h.tools);
+    assert.deepEqual(await h.call("tasks", input), { result }, name);
+    assert.deepEqual(h.runs[0].argv, ["node", COMPANION, "tasks", ...flags], name);
+    assert.equal(h.runs[0].init.cwd, input.cwd ?? "/repo", name);
+    assert.equal(h.runs[0].init.env.CODEX_COMPANION_SESSION_ID, "session-1", name);
+  }
 });

@@ -96,6 +96,22 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD, detail: { type: 'boolean' } }, required: ['cwd'] },
   },
   {
+    name: 'tasks',
+    description: 'List threads dispatched by this Claude session across repositories, newest first (20 by default). '
+      + 'Use it to find a thread to continue or check what this session has running without reading results. '
+      + 'Each line has the name, thread id (pending until known), executor, status, latest job and repository. '
+      + '`all: true` includes other sessions and marks their lines.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Case-insensitive substring of the task name.' },
+        cwd: CWD,
+        all: { type: 'boolean', description: 'Include tasks from other Claude sessions.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum threads to show; default 20.' },
+      },
+    },
+  },
+  {
     name: 'cancel',
     description: 'End a running or queued job now: the companion\'s cancel command. It interrupts the Codex turn and '
       + 'stops the job\'s process; files it already changed stay. To change a job\'s direction, use message with '
@@ -191,6 +207,11 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'status':
       return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', cwd,
         input.detail === true ? '--json' : '--brief'], cwd, 30_000)
+    case 'tasks':
+      return run($, context, ['node', context.companion, 'tasks',
+        ...(text(input.query) ? ['--query', text(input.query)] : []), ...(cwd ? ['--cwd', cwd] : []),
+        ...(input.all === true ? ['--all'] : []), ...(input.limit === undefined ? [] : ['--limit', String(input.limit)])],
+      cwd || await $.session.cwd(), 30_000)
     case 'cancel':
       // Without a job the companion picks one itself; a tool call names it.
       if (!job) return { deny: 'job is required' }
@@ -256,5 +277,6 @@ export function registerDirectorTools(on: On, tools: DirectorTools) {
   on('tool.call', { tool: 'mcp__codex__answer' }, ($, e) => answerCall($, tools, 'answer', e as unknown as ToolInput))
   on('tool.call', { tool: 'mcp__codex__result' }, ($, e) => answerCall($, tools, 'result', e as unknown as ToolInput))
   on('tool.call', { tool: 'mcp__codex__status' }, ($, e) => answerCall($, tools, 'status', e as unknown as ToolInput))
+  on('tool.call', { tool: 'mcp__codex__tasks' }, ($, e) => answerCall($, tools, 'tasks', e as unknown as ToolInput))
   on('tool.call', { tool: 'mcp__codex__cancel' }, ($, e) => answerCall($, tools, 'cancel', e as unknown as ToolInput))
 }
