@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Brokers dial this server at the event's handler. The durable session outbox
 // is watched by its consumer for recovery, including producer death before IPC.
-// A slow rescan repairs missed watch events; ordinary history is never polled.
+// A slow rescan repairs missed watch events and incrementally recovers receipts.
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -10,7 +10,8 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { acquireWriter, releaseWriter } from "./lib/job-event-store.mjs";
 import { channelDirectory, channelRequest, deliveryRoot, deliverDirectorEvents, durableJson,
-  pendingEvents, readJson, sessionDirectory, deliveryRef, isDirectorEventPending, touchDirectorSession, sweepDirectorSessions } from "./lib/director-delivery.mjs";
+  pendingEvents, readJson, sessionDirectory, deliveryRef, isDirectorEventPending, touchDirectorSession, sweepDirectorSessions,
+  recoverConsumedDirectorEvents } from "./lib/director-delivery.mjs";
 
 export const PROBE = "codex-director-channel-probe";
 const HOLD_MS = 15000;
@@ -193,6 +194,7 @@ export class DirectorChannel {
   async replay() {
     const sessionId = this.sessionId;
     try {
+      await recoverConsumedDirectorEvents(this.root, sessionId);
       for (const event of pendingEvents(this.root, sessionId)) {
         if (isDirectorEventPending(event)) await this.deliver(event);
       }

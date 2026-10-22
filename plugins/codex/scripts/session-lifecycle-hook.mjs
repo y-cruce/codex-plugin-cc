@@ -8,6 +8,7 @@ import { terminateProcessTree } from "./lib/process.mjs";
 import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { deliveryRoot, registerDirectorTranscript } from "./lib/director-delivery.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -81,6 +82,7 @@ export function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  registerDirectorTranscript(deliveryRoot(), input.session_id, input.transcript_path);
 }
 
 export async function handleSessionEnd(input) {

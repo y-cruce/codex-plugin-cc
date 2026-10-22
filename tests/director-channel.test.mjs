@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { DirectorChannel, channelMessage, paths } from "../plugins/codex/scripts/director-channel.mjs";
 import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending, durableJson, touchDirectorSession, sweepDirectorSessions, sessionDirectory, INACTIVE_SESSION_MS } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
@@ -13,6 +14,8 @@ import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { admitDirector, directorIngress } from "../plugins/codex/hooks/director-channel/register.ts";
 import { isolateTestEnvironment, makeTempDir, waitFor } from "./helpers.mjs";
 import { runIngress } from "../plugins/codex/scripts/director-ingress.mjs";
+import { handleSessionStart } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
+import { scanConsumedDirectorEvents } from "../plugins/codex/scripts/lib/director-consumed.mjs";
 
 // The pane runs the director ingress ahead of its own prompt.submit; this is that chain.
 const through = (director) => async ($, e, next) => {
@@ -237,6 +240,70 @@ test("an item waits for ingress without another copy until the channel rebinds",
   await channel.handle({ action: "bind", sessionId: "other", instance: channel.instance });
   await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
   await waitFor(() => h.sent.length === 2);
+});
+
+test("consumed channel input survives a missing ingress receipt and a new channel instance", async (t) => {
+  for (const row of [
+    { role: "system", tagged: true, consumed: true },
+    { role: "system", tagged: false, consumed: true },
+    { role: "user", tagged: true, consumed: true },
+    { role: "user", tagged: false, consumed: true },
+    { role: "system", tagged: false, consumed: false },
+  ]) await t.test(JSON.stringify(row), async (t) => {
+    const h = fixture(t);
+    const transcript = path.join(h.dir, `${h.job.sessionId}.jsonl`);
+    fs.writeFileSync(transcript, "");
+    handleSessionStart({ session_id: h.job.sessionId, transcript_path: transcript });
+    const send = async message => { h.sent.push(message.params); };
+    let channel = await h.start(send);
+    await h.confirm(channel);
+    const note = { id: "unacknowledged", message: "already in the model input" };
+    const event = directorEvent(h.job, "director.notified", note, h.stateDir);
+    h.publisher().publish(h.job, event.type, note, h.stateDir);
+    await waitFor(() => h.sent.length === 1);
+    const attributes = Object.entries(channelMessage(event).meta)
+      .filter(([key]) => row.tagged || key !== "delivery").map(([key, value]) => `${key}="${value}"`).join(" ");
+    const text = `<channel source="plugin:codex:director" ${attributes}>${event.text}</channel>`;
+    const content = [{ type: "text", text: "queued prefix" }, { type: "text", text }];
+    const blob = row.role === "user" ? createHash("sha256").update(JSON.stringify({
+      content: content.map(block => ({ text: block.text, type: block.type })), role: "user",
+    })).digest("hex") : "b".repeat(64);
+    const append = records => fs.appendFileSync(transcript, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    const user = block => ({ type: "user", sessionId: h.job.sessionId, message: { role: "user", content: [block] } });
+    append([user(content[0])]);
+    // Recover once between adjacent user records and the request referencing
+    // their merged input, as happens when a new process resumes the cursor.
+    await channel.replay();
+    append([user(content[1])]);
+    append([{ type: "attachment", sessionId: h.job.sessionId, attachment: { type: "queued_command", prompt: text } }]);
+    if (row.role === "system") append([
+      { type: "api-request-blob", sessionId: h.job.sessionId, hash: blob, message: { role: row.role, content: [{ type: "text", text }] } },
+    ]);
+    const request = { type: "api-request", sessionId: h.job.sessionId, tail: [blob] };
+    if (row.consumed) append([request]);
+    else fs.appendFileSync(transcript, JSON.stringify(request).slice(0, -1));
+    assert.equal(wasDelivered(event), false, "post-next accept never ran");
+    await channel.close();
+    channel = await h.start(send);
+    await h.confirm(channel);
+    assert.equal(h.sent.length, row.consumed ? 1 : 2, "only input referenced by a model request suppresses replay");
+    assert.equal(wasDelivered(event), row.consumed);
+    await channel.close();
+    assert.equal((await monitor(h, { notifications: [], questions: [] }, h.job, false)).length, row.consumed ? 0 : 1,
+      "Monitor uses the same consumption recovery");
+    if (!row.consumed) fs.appendFileSync(transcript, "}\n");
+    channel = await h.start(send);
+    await h.confirm(channel);
+    assert.ok(wasDelivered(event), "a later request consumes a blob scanned on an earlier recovery");
+    const receipt = { ...readJson(eventPaths(event).receipt), at: "2000-01-01T00:00:00.000Z" };
+    durableJson(eventPaths(event).receipt, receipt);
+    const cursor = readJson(path.join(sessionDirectory(h.root, h.job.sessionId), "consumed.json"));
+    append([request]);
+    assert.equal(scanConsumedDirectorEvents(transcript, h.job.sessionId, cursor).bytesRead,
+      Buffer.byteLength(JSON.stringify(request) + "\n"), "recovery reads only the appended records");
+    await channel.replay();
+    assert.deepEqual(readJson(eventPaths(event).receipt), receipt, "recovery never refreshes an existing receipt");
+  });
 });
 
 test("answered, closed and expired questions stay retired across channel and Monitor replay", async (t) => {

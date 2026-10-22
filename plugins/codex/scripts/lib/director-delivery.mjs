@@ -7,6 +7,7 @@ import { acquireWriter, releaseWriter } from "./job-event-store.mjs";
 import { questionIds, questionText } from "./job-event-model.mjs";
 import { resolveStateDirAtWorkspaceRoot } from "./state.mjs";
 import { deliveryRefs, stripDeliveryTags } from "./director-refs.mjs";
+import { scanConsumedDirectorEvents } from "./director-consumed.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export const channelDirectory = () => path.join(os.tmpdir(), "codex-channel");
@@ -80,6 +81,58 @@ async function lock(directory) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+}
+
+export function registerDirectorTranscript(root, sessionId, source) {
+  if (!sessionId || typeof source !== "string" || !path.isAbsolute(source)
+    || path.basename(source) !== `${sessionId}.jsonl`) return;
+  const file = path.join(sessionDirectory(root, sessionId), "transcript.json");
+  if (readJson(file)?.source !== source) durableJson(file, { source });
+}
+
+function directorTranscript(root, sessionId) {
+  const known = readJson(path.join(sessionDirectory(root, sessionId), "transcript.json"))?.source;
+  if (known) return known;
+  const supplied = process.env.CODEX_COMPANION_TRANSCRIPT_PATH;
+  if (supplied && path.isAbsolute(supplied) && path.basename(supplied) === `${sessionId}.jsonl`) {
+    registerDirectorTranscript(root, sessionId, supplied);
+    return supplied;
+  }
+  // A plugin reload may predate registration of the transcript location. Find
+  // that session once without reading other sessions' contents.
+  if (!/^[a-f0-9-]{36}$/.test(sessionId)) return null;
+  const projects = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
+  let entries;
+  try { entries = fs.readdirSync(projects, { withFileTypes: true }); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const sources = entries.filter(entry => entry.isDirectory()).map(entry => path.join(projects, entry.name, `${sessionId}.jsonl`))
+    .filter(file => fs.existsSync(file)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  if (sources.length) registerDirectorTranscript(root, sessionId, sources[0]);
+  return sources[0] ?? null;
+}
+
+export async function recoverConsumedDirectorEvents(root, sessionId) {
+  const source = directorTranscript(root, sessionId);
+  if (!source) return;
+  const directory = sessionDirectory(root, sessionId);
+  const file = path.join(directory, "consumed.json");
+  const previous = readJson(file);
+  let stat;
+  try { stat = fs.statSync(source); }
+  catch (error) { if (error.code === "ENOENT") return; throw error; }
+  if (previous?.source === source && previous.dev === stat.dev && previous.ino === stat.ino && previous.offset === stat.size) return;
+  const recovery = path.join(directory, "recovery");
+  const lease = await lock(recovery);
+  try {
+    const saved = readJson(file);
+    const { cursor, eventIds } = scanConsumedDirectorEvents(source, sessionId, saved);
+    const events = eventIds.map(id => readJson(path.join(directory, "outbox", `${id}.json`)))
+      .filter(event => event?.sessionId === sessionId && eventPaths(event).directory === directory);
+    await commitDirectorEvents(events, "consumed");
+    // Commit receipts before advancing: interrupted recovery safely repeats the
+    // same input, and commitDirectorEvents preserves any existing receipt's at.
+    if (JSON.stringify(cursor) !== JSON.stringify(saved)) durableJson(file, cursor);
+  } finally { await releaseWriter(recovery, lease); }
 }
 
 export const INACTIVE_SESSION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -191,9 +244,14 @@ const attemptFile = (event, route) => path.join(eventPaths(event).directory, "at
 // another process (the hooks module, through scripts/director-ingress.mjs).
 export async function reserveDirectorEvents(events, route, { attemptMs = 5000 } = {}) {
   const pending = [];
+  const recovered = new Set();
   for (const event of new Map(events.filter(Boolean).map((e) => [e.eventId, e])).values()) {
     retainEvent(event);
     const paths = eventPaths(event);
+    if (!recovered.has(paths.directory)) {
+      await recoverConsumedDirectorEvents(deliveryRoot(event.stateDir), event.sessionId);
+      recovered.add(paths.directory);
+    }
     const lease = await lock(paths.lock);
     const attempt = attemptFile(event, route);
     try {
