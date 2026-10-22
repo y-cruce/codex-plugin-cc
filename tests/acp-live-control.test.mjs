@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
+import { directorEvent } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { readRecordHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { paneBody } from "../plugins/codex/hooks/task-pane/pane.ts";
 import { readRoundContext } from "../plugins/codex/scripts/lib/history-resolver.mjs";
@@ -26,7 +27,7 @@ function recordingPrompts(file) {
     .map((entry) => entry.params.prompt.map((block) => block.text).join("\n"));
 }
 
-async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold") {
+async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold", label = null) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
@@ -34,7 +35,7 @@ async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permis
   const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile };
   const child = spawn(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
     "--executor-command", process.execPath, "--executor-args", JSON.stringify([AGENT]),
-    "--executor-mode", mode, "--json", prompt], { cwd, env });
+    "--executor-mode", mode, ...(label ? ["--label", label] : []), "--json", prompt], { cwd, env });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -90,7 +91,8 @@ const cases = [
   {
     name: "--queue preserves FIFO, refuses mid-turn messages and binds each next round",
     run: async (t) => {
-      const h = await startTask(t);
+      const label = "acp channel test queue retry";
+      const h = await startTask(t, "default", "hold", label);
       const job = h.job;
       const queued = h.cli("message", job.id, "--queue", "queued-next");
       assert.equal(queued.status, 0, queued.stderr);
@@ -100,6 +102,7 @@ const cases = [
       const second = await sendLiveCommand(h.cwd, job.id, "message", { queue: true }, "queued-second");
       const queuedJobIds = [accepted.queuedJobId, second.queuedJobId];
       assert.equal(new Set([job.id, ...queuedJobIds]).size, 3);
+      for (const id of queuedJobIds) assert.equal(readStoredJob(h.cwd, id).label, label);
       const refused = h.cli("message", job.id, "mid-turn");
       assert.equal(refused.status, 1);
       assert.match(refused.stderr, /cannot add a message to the active turn/i);
@@ -115,6 +118,13 @@ const cases = [
       const result = await waitForExit(h);
       assert.equal(result.code, 0, result.stderr);
       assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-next", "queued-second"]);
+      for (const id of queuedJobIds) {
+        const queuedJob = readStoredJob(h.cwd, id);
+        assert.equal(queuedJob.label, label);
+        assert.ok(directorEvent({ ...queuedJob, sessionId: "queue-name-test" }, "job.completed").text.includes(`[${label}]`));
+      }
+      const threads = await observationThreads(resolveStateDir(h.cwd));
+      assert.equal(threads[0].thread.label, label);
 
       const continuation = await readRoundContext(h.cwd, accepted.queuedJobId);
       assert.equal(continuation.recordId, original.recordId);

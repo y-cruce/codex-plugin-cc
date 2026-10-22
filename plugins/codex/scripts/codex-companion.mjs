@@ -602,7 +602,8 @@ async function executeTaskRun(request) {
     createQueuedRound: ({ input, sourceJobId, sessionId, controlEndpoint, recordId }) => {
       const prompt = input.map((item) => item.text).join("\n");
       const metadata = buildTaskRunMetadata({ prompt, resumeLast: true, executor: "acp" });
-      const queuedJob = { ...buildTaskJob(workspaceRoot, metadata, request.write, request.sandbox, request.network, null, "acp"),
+      const label = readStoredJob(workspaceRoot, sourceJobId)?.label;
+      const queuedJob = { ...buildTaskJob(workspaceRoot, metadata, request.write, request.sandbox, request.network, label, "acp"),
         ...(request.executorMode ? { executorMode: request.executorMode } : {}),
         ...(request.executorModel ? { executorModel: request.executorModel } : {}) };
       const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, jobId: queuedJob.id });
