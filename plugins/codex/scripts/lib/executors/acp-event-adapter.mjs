@@ -72,6 +72,22 @@ function commandText(tool) {
   return tool.title ?? "";
 }
 
+// A shell tool arrives titled with the agent's own word for it -- DSH sends
+// "bash" -- and the command it runs in rawInput. A row that shows the title
+// alone says only "bash"; the command joins it the way a Codex command row
+// carries the command it ran. A call that never had a title of its own has
+// only its id there, which names nothing to a reader, so the command stands
+// in its place.
+function toolTitle(tool) {
+  const title = vendorTool(tool) && tool._files === false && ["edit", "delete", "move"].includes(tool.kind)
+    ? vendorTool(tool)
+    : tool.title ?? tool.name ?? vendorTool(tool);
+  const command = typeof tool.rawInput?.command === "string" ? tool.rawInput.command.trim() : "";
+  if (!command) return title ?? String(tool.toolCallId);
+  const named = title && title !== String(tool.toolCallId) ? title : null;
+  return named ? `${named}: ${command}` : command;
+}
+
 function toolSnapshot(tool) {
   return {
     toolCallId: String(tool.toolCallId),
@@ -81,9 +97,7 @@ function toolSnapshot(tool) {
     // reads as "Read · Read …/register.ts". The name is worth having only
     // where the title misleads: a tool that calls itself an edit and changes
     // no file is Qoder's task list, and "Edit file" is not what it did.
-    title: vendorTool(tool) && tool._files === false && ["edit", "delete", "move"].includes(tool.kind)
-      ? vendorTool(tool)
-      : tool.title ?? tool.name ?? vendorTool(tool) ?? String(tool.toolCallId),
+    title: toolTitle(tool),
     kind: tool.kind ?? "other",
     status: tool.status ?? "pending",
     content: toolContent(tool),
@@ -390,8 +404,13 @@ export function normalizeAcpQuestion(params, requestId, receivedAt) {
     fields, url: params.url ?? null, openedAt: receivedAt, expiresAt: null };
 }
 
-export function normalizeAcpPermission(params, requestId) {
-  return { requestId, tool: toolSnapshot({ ...params.toolCall, toolCallId: params.toolCall.toolCallId }),
+export function normalizeAcpPermission(params, requestId, remembered = null) {
+  const toolCall = params.toolCall ?? {};
+  // DSH's request_permission names only the tool call it is for: what the tool
+  // is, and the command it runs, came with the tool event a moment earlier.
+  const known = remembered ?? {};
+  return { requestId, tool: toolSnapshot({ ...toolCall, toolCallId: toolCall.toolCallId,
+    title: toolCall.title ?? known.title, rawInput: toolCall.rawInput ?? known.rawInput }),
     options: (params.options ?? []).map((option) => ({ optionId: String(option.optionId), name: option.name,
       kind: option.kind ?? "unknown" })) };
 }

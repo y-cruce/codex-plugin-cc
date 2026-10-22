@@ -2,8 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { createLiveView } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { listJobs } from "../plugins/codex/scripts/lib/state.mjs";
@@ -43,6 +45,30 @@ test("DSH-shaped ACP sessions resume across processes and keep thoughts out of t
   assert.deepEqual(requests.filter(item => item.method === "session/resume").map(item => item.params.sessionId), [sessionId]);
   assert.deepEqual(requests.find(item => item.method === "permission/result").outcome, { outcome: "selected", optionId: "allow" });
   assert.equal(requests.some(item => ["session/load", "session/set_mode", "session/set_config_option"].includes(item.method)), false);
+});
+
+test("a permission request describes the tool announced under the same call", async () => {
+  // DSH's request_permission carries only the tool's id, and the question read
+  // as that id: the title and command arrived with the tool event just before.
+  const cases = [
+    ["only the call id", { toolCallId: "tool-1" }, "Permission requested: bash: touch /tmp/marker && echo MADE"],
+    ["its own title", { toolCallId: "tool-1", title: "Run command" },
+      "Permission requested: Run command: touch /tmp/marker && echo MADE"],
+    ["its own command", { toolCallId: "tool-1", rawInput: { command: "echo MADE" } },
+      "Permission requested: bash: echo MADE"],
+  ];
+  for (const [name, toolCall, expected] of cases) {
+    const port = new AcpExecutorJobPort({ job: { id: "permissions" }, permissionPolicy: "ask" });
+    port.adapter = new AcpEventAdapter(() => {}, { job: { id: "permissions" } });
+    port.adapter.bindSession("session-1");
+    await port.adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "tool-1",
+      title: "bash", kind: "other", status: "in_progress", rawInput: { command: "touch /tmp/marker && echo MADE" } } });
+    void port.requestPermission({ toolCall, options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }] });
+    await setImmediate();
+    const [permission] = port.liveStatus().permissions;
+    assert.equal(permission.message, expected, name);
+    assert.equal(permission.message.includes("tool-1"), false, name);
+  }
 });
 
 test("one-shot permission policy never selects a lasting grant", async () => {

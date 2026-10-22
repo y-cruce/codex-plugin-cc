@@ -64,6 +64,25 @@ test("an ACP edit that changes no file is reported as the tool it is", async () 
   assert.deepEqual(real[0].payload.files.map((file) => file.path), ["/repo/a.ts"]);
 });
 
+test("an ACP tool row names the command it runs", async () => {
+  // DSH reports its shell as an "other" tool whose title is the word "bash",
+  // so the row drew "bash" and the command it ran never reached the pane.
+  const cases = [
+    ["the agent's own name for it", { title: "bash", rawInput: { command: "touch /tmp/marker && echo MADE" } },
+      "bash: touch /tmp/marker && echo MADE"],
+    ["a call that never had a title", { rawInput: { command: "npm test" } }, "npm test"],
+    ["a tool that runs no command", { title: "Read …/acp.mjs", kind: "read", rawInput: { path: "acp.mjs" } }, "Read …/acp.mjs"],
+  ];
+  for (const [name, update, expected] of cases) {
+    const events = [];
+    const adapter = new AcpEventAdapter((event) => events.push(event), { job: { id: "job-1" } });
+    adapter.bindSession("session-1");
+    await adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "tool-1", status: "pending", ...update } });
+    assert.equal(events[0].payload.tool.title, expected, name);
+    assert.equal(renderJobEvent(events[0]), `Tool started: ${expected}`, name);
+  }
+});
+
 test("an ACP sub-agent is reported as a sub-agent, not as a tool called Agent", async () => {
   // Qoder runs a sub-agent through a tool call named "Agent" whose input names
   // the agent and what it was asked for. Routed as a tool, the row read "Agent"

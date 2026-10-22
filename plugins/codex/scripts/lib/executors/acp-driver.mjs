@@ -475,9 +475,15 @@ export class AcpExecutorJobPort {
     return this.permissionPolicy === "allow-once" || (this.permissionPolicy !== "ask" && this.modeId === "yolo");
   }
 
-  requestPermission(params) {
+  async requestPermission(params) {
+    // The tool this asks about was announced by an earlier update, and the
+    // adapter applies updates asynchronously while the protocol delivers this
+    // request independently of them. Reading its table too early would leave
+    // the question with nothing but the call's id.
+    await this.updateTail;
     const requestId = `permission:${crypto.randomUUID()}`;
-    const payload = normalizeAcpPermission(params, requestId);
+    const remembered = this.adapter.tools?.get(String(params.toolCall?.toolCallId)) ?? null;
+    const payload = normalizeAcpPermission(params, requestId, remembered);
     const emitted = this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,
       "session/request_permission");
     if (this.autoApprovePermissions()) {
