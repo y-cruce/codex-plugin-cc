@@ -165,6 +165,7 @@ async function readBlock(handle, block) {
   return events;
 }
 
+/** @param {string} cwd @param {string} jobId @param {{ stateDir?: string }} [options] */
 export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
   const location = await resolveJobHistory(cwd, jobId, { stateDir });
   const directory = location.directory;
@@ -185,6 +186,7 @@ export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
   return false;
 }
 
+/** @param {string} cwd @param {string} jobId @param {{ after?: *, limit?: number, stateDir?: string }} [options] */
 export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDir } = {}) {
   const location = await resolveJobHistory(cwd, jobId, { stateDir });
   if (location.layout !== "thread-record") return readHistoryLocation(location, { after, limit, roundId: null });
@@ -198,6 +200,7 @@ export async function readHistory(cwd, jobId, { after, limit = Infinity, stateDi
   return readHistoryLocation(location, { after, limit, roundId: jobId, firstSeq });
 }
 
+/** @param {string} cwd @param {string} recordId @param {{ after?: *, limit?: number, stateDir?: string }} [options] */
 export async function readRecordHistory(cwd, recordId, { after, limit = Infinity, stateDir } = {}) {
   const root = stateDir ?? stateDirFor(cwd);
   return readHistoryLocation(threadRecordPaths(root, recordId), { after, limit, roundId: null });
@@ -260,6 +263,7 @@ export class JobEventStore {
     this.jobId = jobId;
     this.directory = options.directory ?? resolveHistoryDir(cwd, jobId);
     this.threadRecord = options.threadRecord ?? null;
+    /** @type {Record<string, any>} */
     this.options = {
       flushMs: 50,
       batchBytes: 262144,
