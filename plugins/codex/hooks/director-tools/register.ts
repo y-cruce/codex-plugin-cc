@@ -100,13 +100,15 @@ const TOOLS = [
     description: 'List threads dispatched by this Claude session across repositories, newest first (20 by default). '
       + 'Use it to find a thread to continue or check what this session has running without reading results. '
       + 'Each line has the name, thread id (pending until known), executor, status, latest job and repository. '
-      + '`all: true` includes other sessions and marks their lines.',
+      + '`all: true` includes other sessions from the last 3 days and marks their lines; `days` widens that window. '
+      + 'This session has no time limit.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Case-insensitive substring of the task name.' },
         cwd: CWD,
-        all: { type: 'boolean', description: 'Include tasks from other Claude sessions.' },
+        all: { type: 'boolean', description: 'Include other Claude sessions\' tasks created in the last 3 days.' },
+        days: { type: 'integer', minimum: 1, description: 'Lookback days for other sessions with all: true; default 3. This session has no time limit.' },
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum threads to show; default 20.' },
       },
     },
@@ -210,7 +212,8 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'tasks':
       return run($, context, ['node', context.companion, 'tasks',
         ...(text(input.query) ? ['--query', text(input.query)] : []), ...(cwd ? ['--cwd', cwd] : []),
-        ...(input.all === true ? ['--all'] : []), ...(input.limit === undefined ? [] : ['--limit', String(input.limit)])],
+        ...(input.all === true ? ['--all'] : []), ...(input.days === undefined ? [] : ['--days', String(input.days)]),
+        ...(input.limit === undefined ? [] : ['--limit', String(input.limit)])],
       cwd || await $.session.cwd(), 30_000)
     case 'cancel':
       // Without a job the companion picks one itself; a tool call names it.

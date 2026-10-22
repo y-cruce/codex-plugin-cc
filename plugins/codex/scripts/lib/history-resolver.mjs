@@ -27,10 +27,10 @@ export function resolveLegacyJobHistory(cwd, jobId, { stateDir = stateDirFor(cwd
   return legacyJobHistoryPaths(stateDir, jobId);
 }
 
-export async function resolveJobHistoryAtStateDir(stateDir, jobId) {
+export async function resolveJobHistoryAtStateDir(stateDir, jobId, index = undefined) {
   const legacy = legacyJobHistoryPaths(stateDir, jobId);
   const file = jobIndexPath(stateDir, jobId);
-  const index = await readJson(file);
+  if (index === undefined) index = await readJson(file);
   if (!index) return legacy;
   if (index.schemaVersion !== 1 || index.jobId !== jobId || index.roundId !== jobId || typeof index.recordId !== "string") {
     throw corruptIndex(file);

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsAsync from "node:fs/promises";
+import { parseSessionTaskIndex, sessionTaskIndexPath } from "../plugins/codex/scripts/lib/session-task-index.mjs";
 import path from "node:path";
 import { listDirectorTasks } from "../plugins/codex/scripts/lib/director-tasks.mjs";
 import { createLiveView } from "../plugins/codex/scripts/lib/job-event-model.mjs";
@@ -161,6 +163,9 @@ test("tasks lists this session across stores, filters names and repositories, an
   const home = fs.realpathSync(makeTempDir());
   const tmpDir = path.join(home, "tmp");
   const configDir = path.join(home, ".claude");
+  const transcript = path.join(configDir, "projects", "repo", "session-1.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, "");
   const repoA = path.join(home, "projects", "alpha");
   const repoB = path.join(home, "projects", "beta");
   const repoC = path.join(home, "projects", "gamma");
@@ -201,6 +206,7 @@ test("tasks lists this session across stores, filters names and repositories, an
     ["name query", { query: "QUEUED" }, [resumed], ["--query", "QUEUED"]],
     ["one repository", { cwd: repoA }, [resumed], ["--cwd", repoA]],
     ["all sessions", { all: true }, [foreign, pending, resumed], ["--all"]],
+    ["wider history", { all: true, days: 14 }, [foreign, pending, resumed], ["--all", "--days", "14"]],
     ["limit", { limit: 1 }, [pending, "1 older not shown"], ["--limit", "1"]],
     ["no match", { query: "missing" }, ["No matching tasks."], ["--query", "missing"]],
   ]) {
@@ -212,5 +218,96 @@ test("tasks lists this session across stores, filters names and repositories, an
     assert.deepEqual(h.runs[0].argv, ["node", COMPANION, "tasks", ...flags], name);
     assert.equal(h.runs[0].init.cwd, input.cwd ?? "/repo", name);
     assert.equal(h.runs[0].init.env.CODEX_COMPANION_SESSION_ID, "session-1", name);
+  }
+});
+
+test("session task index migrates once, keeps old own threads, bounds all by days and expires only idle indexes", async (t) => {
+  isolateTestEnvironment(t);
+  const home = fs.realpathSync(makeTempDir());
+  const configDir = path.join(home, ".claude");
+  const transcript = path.join(configDir, "projects", "repo", "session-1.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, "");
+  const now = Date.now();
+  const ago = days => new Date(now - days * 86_400_000);
+  const indexedRepo = path.join(home, "indexed");
+  fs.mkdirSync(indexedRepo);
+  const job = { id: "indexed", label: "Indexed task", sessionId: "session-1", workspaceRoot: indexedRepo,
+    threadId: "thread-indexed", status: "completed", createdAt: ago(20).toISOString() };
+  writeJobFile(indexedRepo, job.id, job);
+  const queued = { ...job, id: "queued", recordId: "retained", status: "queued", pid: process.pid, createdAt: ago(4).toISOString() };
+  writeJobFile(indexedRepo, queued.id, queued);
+  writeJobFile(indexedRepo, queued.id, queued);
+  const indexedState = resolveStateDir(indexedRepo);
+  const root = path.dirname(indexedState);
+  const indexFile = sessionTaskIndexPath(root, job.sessionId);
+  assert.equal(parseSessionTaskIndex(fs.readFileSync(indexFile, "utf8")).entries.length, 2);
+  const history = threadRecordPaths(indexedState, "retained");
+  fs.mkdirSync(path.join(indexedState, "job-index"), { recursive: true });
+  fs.mkdirSync(history.rounds, { recursive: true });
+  fs.writeFileSync(path.join(indexedState, "job-index", "indexed.json"),
+    JSON.stringify({ schemaVersion: 1, jobId: job.id, roundId: job.id, recordId: "retained" }));
+  fs.writeFileSync(path.join(history.rounds, "indexed.json"), JSON.stringify({ job }));
+  fs.writeFileSync(history.liveView, JSON.stringify({ threadId: job.threadId }));
+  fs.unlinkSync(path.join(indexedState, "jobs", "indexed.json"));
+  fs.utimesSync(path.join(indexedState, "jobs"), ago(1), ago(1));
+  const seed = (id, label, owner, age) => {
+    const repo = path.join(home, id);
+    fs.mkdirSync(repo);
+    const state = resolveStateDir(repo);
+    fs.mkdirSync(path.join(state, "jobs"), { recursive: true });
+    const file = path.join(state, "jobs", `${id}.json`);
+    fs.writeFileSync(file, JSON.stringify({ ...job, id, label, sessionId: owner, workspaceRoot: repo,
+      threadId: `thread-${id}`, createdAt: ago(age).toISOString() }));
+    // The legacy current-session job is discovered during the first migration.
+    const time = owner === "session-1" ? new Date(now + 1000) : ago(age);
+    fs.utimesSync(path.join(state, "jobs"), time, time);
+    return file;
+  };
+  seed("legacy", "Legacy task", "session-1", 1);
+  seed("recent", "Recent foreign", "session-2", 2);
+  const oldFile = seed("old", "Older foreign", "session-2", 5);
+  const ancientFile = seed("ancient", "Ancient foreign", "session-3", 10);
+  const retired = sessionTaskIndexPath(root, "retired");
+  fs.writeFileSync(retired, "");
+  for (const file of [indexFile, retired]) fs.utimesSync(file, ago(8), ago(8));
+  fs.rmSync(path.join(path.dirname(indexFile), ".gc"), { force: true });
+  const reads = [];
+  const directories = [];
+  const readFile = fsAsync.readFile;
+  const readdir = fsAsync.readdir;
+  t.mock.method(fsAsync, "readFile", async (file, ...args) => { reads.push(String(file)); return readFile(file, ...args); });
+  t.mock.method(fsAsync, "readdir", async (file, ...args) => { directories.push(String(file)); return readdir(file, ...args); });
+  for (const [name, input, labels, readsOld, scans] of [
+    ["concurrent first migration", { parallel: true }, ["Legacy task", "Indexed task"], false, true],
+    ["warm index without time limit", {}, ["Legacy task", "Indexed task"], false, false],
+    ["all defaults to three days", { all: true }, ["Legacy task", "Recent foreign", "Indexed task"], false, true],
+    ["wider other-session history", { all: true, days: 7 }, ["Legacy task", "Recent foreign", "Indexed task", "Older foreign"], true, true],
+    ["history beyond index retention", { all: true, days: 14 }, ["Legacy task", "Recent foreign", "Indexed task", "Older foreign", "Ancient foreign"], true, true],
+    ["missing index migrates again", { missingIndex: true }, ["Legacy task", "Indexed task"], false, true],
+  ]) {
+    if (name === "warm index without time limit") fs.utimesSync(indexFile, ago(8), ago(8));
+    if (input.missingIndex) {
+      fs.unlinkSync(indexFile);
+      fs.utimesSync(path.join(indexedState, "jobs"), new Date(now + 1000), new Date(now + 1000));
+    }
+    reads.length = directories.length = 0;
+    const list = () => listDirectorTasks({ sessionId: "session-1", home, configDir,
+      tmpDir: path.join(home, "tmp"), all: input.all, days: input.days });
+    const outputs = await Promise.all(Array.from({ length: input.parallel ? 2 : 1 }, list));
+    for (const output of outputs) {
+      assert.deepEqual(output.split("\n").map(line => line.split(" · ")[0]), labels, name);
+      assert.match(output, /Indexed task .*job=queued/, name);
+    }
+    assert.equal(reads.includes(oldFile), readsOld, name);
+    assert.equal(directories.includes(root), scans, name);
+    const contents = fs.readFileSync(indexFile, "utf8");
+    const parsed = parseSessionTaskIndex(contents);
+    assert.equal(parsed.complete, true, name);
+    assert.equal(parsed.entries.length, 3, name);
+    assert.equal(contents.split("\n").filter(line => line.includes('"complete":true')).length, 1, name);
+    assert.ok(fs.statSync(indexFile).mtimeMs > now - 3_600_000, name);
+    assert.equal(fs.existsSync(retired), false, name);
+    assert.equal(fs.existsSync(ancientFile), true, name);
   }
 });

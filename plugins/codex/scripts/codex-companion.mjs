@@ -95,7 +95,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--limit <n>]",
+      "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--days <n>] [--limit <n>]",
       "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
       "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",

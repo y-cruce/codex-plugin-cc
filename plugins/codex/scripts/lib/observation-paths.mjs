@@ -23,40 +23,55 @@ export async function observationRoots(cwd) {
     .map((entry) => path.join(data, entry.name, "state", key)), path.join(os.tmpdir(), "codex-companion", key)])];
 }
 
-export async function observationJobs(stateDir) {
+export async function mapConcurrent(items, visit, limit = 16) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const at = next++;
+      results[at] = await visit(items[at]);
+    }
+  }));
+  return results;
+}
+
+export async function observationJobs(stateDir, { concurrency = 1, since = 0 } = {}) {
   const state = await readObservationJson(path.join(stateDir, "state.json"));
   const jobs = new Map((state?.jobs ?? []).map((job) => [job.id, { job, stateDir, mtime: 0 }]));
-  for (const name of await fs.readdir(path.join(stateDir, "jobs")).catch((error) => {
+  const names = async directory => fs.readdir(path.join(stateDir, directory)).catch(error => {
     if (error.code === "ENOENT") return []; throw error;
-  })) {
-    if (!name.endsWith(".json")) continue;
+  });
+  const recent = async file => !since || (await fs.stat(file)).mtimeMs >= since;
+  const files = await names("jobs");
+  for (const entry of await mapConcurrent(files.filter(name => name.endsWith(".json")), async name => {
     const file = path.join(stateDir, "jobs", name);
     try {
+      const stat = await fs.stat(file);
+      if (stat.mtimeMs < since) return null;
       const job = await readObservationJson(file);
-      if (job) jobs.set(job.id, { job, stateDir, mtime: (await fs.stat(file)).mtimeMs, hasJobFile: true });
+      return job ? { job, stateDir, mtime: stat.mtimeMs, hasJobFile: true } : null;
     } catch (error) { if (error.code !== "ENOENT") throw error; }
-  }
-  for (const id of await fs.readdir(path.join(stateDir, "job-history")).catch((error) => {
-    if (error.code === "ENOENT") return []; throw error;
-  })) {
-    if (jobs.has(id)) continue;
-    const job = (await readObservationJson(path.join(stateDir, "job-history", id, "manifest.json")))?.metadata?.job;
-    if (job) jobs.set(id, { job, stateDir, mtime: 0 });
-  }
-  for (const name of await fs.readdir(path.join(stateDir, "job-index")).catch((error) => {
-    if (error.code === "ENOENT") return []; throw error;
-  })) {
-    if (!name.endsWith(".json")) continue;
+  }, concurrency)) if (entry) jobs.set(entry.job.id, entry);
+  for (const entry of await mapConcurrent((await names("job-history")).filter(id => !jobs.has(id)), async id => {
+    const file = path.join(stateDir, "job-history", id, "manifest.json");
+    try {
+      if (!(await recent(file))) return null;
+      const job = (await readObservationJson(file))?.metadata?.job;
+      return job ? { job, stateDir, mtime: 0 } : null;
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }, concurrency)) if (entry) jobs.set(entry.job.id, entry);
+  for (const entry of await mapConcurrent((await names("job-index")).filter(name => name.endsWith(".json")), async name => {
     const file = path.join(stateDir, "job-index", name);
     try {
+      if (jobs.has(name.slice(0, -5)) || !(await recent(file))) return null;
       const index = await readObservationJson(file);
-      if (!index || index.schemaVersion !== 1 || index.jobId !== index.roundId || jobs.has(index.jobId)) continue;
-      const history = await resolveJobHistoryAtStateDir(stateDir, index.jobId);
+      if (!index || index.schemaVersion !== 1 || index.jobId !== index.roundId || jobs.has(index.jobId)) return null;
+      const history = await resolveJobHistoryAtStateDir(stateDir, index.jobId, index);
       const receipt = await readObservationJson(history.roundReceipt);
       const job = receipt?.job;
-      if (job?.id === index.jobId) jobs.set(index.jobId, { job, stateDir, mtime: (await fs.stat(file)).mtimeMs });
+      return job?.id === index.jobId ? { job, stateDir, mtime: (await fs.stat(file)).mtimeMs } : null;
     } catch (error) { if (error.code !== "ENOENT") throw error; }
-  }
+  }, concurrency)) if (entry) jobs.set(entry.job.id, entry);
   return [...jobs.values()];
 }
 
