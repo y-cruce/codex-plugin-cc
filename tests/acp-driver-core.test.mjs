@@ -128,15 +128,21 @@ test("ACP permission and elicitation stay distinct and resolve through pending m
   const outcome = await within(automatic.done, 10000, "automatic yolo permission turn");
   assert.equal(outcome.status, "completed");
   assert.match(outcome.finalMessages.find((message) => message.role === "assistant").text, /"optionId":"allow-session"/);
-  const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
-  const question = await waitFor(() => [...h.port.questions.values()][0]);
-  assert.deepEqual(question.payload.fields.map((field) => field.kind), ["text", "single_select", "multi_select", "boolean"]);
-  await waitFor(() => messages.some(message => message.content.includes(question.requestId)));
-  assert.equal(messages.filter(message => message.meta.event.startsWith("job_")).length, 0, "turn completions are not job endings");
-  await h.port.answerQuestion({ requestId: question.requestId, action: "accept",
-    values: { name: "Ada", choice: "a", tags: ["x"], enabled: true } });
-  const terminal = await questionTurn.done;
-  assert.equal(terminal.status, "completed");
+  const content = { name: "Ada", choice: "a", tags: ["x", "y"], enabled: true };
+  let terminal;
+  for (const values of [content, { name: { answers: ["Ada"] }, choice: { answers: ["a"] },
+    tags: { answers: ["x", "y"] }, enabled: true }]) {
+    const questionTurn = await h.port.startTurn({ sessionId: h.session.sessionId, prompt: [{ type: "text", text: "question" }] });
+    const question = await waitFor(() => [...h.port.questions.values()][0]);
+    assert.deepEqual(question.payload.fields.map((field) => field.kind), ["text", "single_select", "multi_select", "boolean"]);
+    await waitFor(() => messages.some(message => message.content.includes(question.requestId)));
+    assert.equal(messages.filter(message => message.meta.event.startsWith("job_")).length, 0, "turn completions are not job endings");
+    await h.port.answerQuestion({ requestId: question.requestId, action: "accept", values });
+    terminal = await questionTurn.done;
+    assert.equal(terminal.status, "completed");
+    assert.deepEqual(JSON.parse(terminal.finalMessages.find((message) => message.role === "assistant").text),
+      { action: "accept", content });
+  }
   await h.port.adapter.completeJob(terminal);
   await waitFor(() => messages.some(message => message.meta.event === "job_completed"));
   assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 1);

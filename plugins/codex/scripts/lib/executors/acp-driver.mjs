@@ -86,6 +86,14 @@ function permissionQuestion(entry) {
       options: entry.payload.options.map((option) => ({ label: option.name, value: option.optionId })) }], expiresAt: null };
 }
 
+function elicitationContent(values, fields) {
+  return Object.fromEntries(Object.entries(values ?? {}).map(([id, value]) => {
+    if (!Array.isArray(value?.answers)) return [id, value];
+    const field = fields.find((item) => item.id === id);
+    return [id, field?.rawSchema.type === "array" ? value.answers : value.answers[0]];
+  }));
+}
+
 class AcpControlServer {
   constructor(port, runtime, cwd, jobId) {
     this.port = port;
@@ -508,7 +516,8 @@ export class AcpExecutorJobPort {
     if (!pending) throw Object.assign(new Error("Question is not pending."), { code: "REQUEST_NOT_PENDING" });
     this.settlePending(pending, "resolved");
     this.questions.delete(String(request.requestId));
-    const response = request.action === "accept" ? { action: "accept", content: request.values ?? {} } : { action: request.action };
+    const response = request.action === "accept"
+      ? { action: "accept", content: elicitationContent(request.values, pending.payload.fields) } : { action: request.action };
     pending.resolve(response);
     await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: request.action,
       values: request.values ?? null }, { requestId: pending.requestId }, response, "elicitation/create");

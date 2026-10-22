@@ -70,13 +70,16 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
       const answers = JSON.parse(fs.readFileSync(path.resolve(cwd, options["answers-file"]), "utf8"));
       if (question.kind === "permission") {
         const selected = answers?.optionId?.answers;
-        const optionId = Array.isArray(selected) && selected.length === 1 ? selected[0] : null;
+        const answer = Array.isArray(selected) && selected.length === 1 ? selected[0] : null;
         const offeredOptions = question.questions.find((item) => item.id === "optionId")?.options ?? [];
-        if (typeof optionId !== "string" || !offeredOptions.some((option) => option.value === optionId)) {
-          throw new Error("Answer a permission with exactly one offered option value under optionId.");
+        const matchingLabels = offeredOptions.filter((option) => option.label === answer);
+        const option = offeredOptions.find((option) => option.value === answer) ??
+          (matchingLabels.length === 1 ? matchingLabels[0] : null);
+        if (typeof answer !== "string" || !option) {
+          throw new Error("Answer a permission with exactly one offered option value or unique label under optionId.");
         }
         return client.request("executor/answer-permission", { ...params, turnId: question.turnId,
-          requestId: question.requestId, outcome: "selected", optionId });
+          requestId: question.requestId, outcome: "selected", optionId: option.value });
       }
       return client.request("executor/answer-question", { ...params, turnId: question.turnId,
         requestId: question.requestId, action: "accept", values: answers });
@@ -93,7 +96,7 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
     } else {
       const status = await client.request("executor/status", params);
       if (!status.capabilities?.midTurnSteer) {
-        throw new Error("This executor cannot add a message to the active turn. Retry with --interrupt.");
+        throw new Error("This executor cannot add a message to the active turn. Retry with --queue, or --interrupt to cancel the active turn first.");
       }
       result = await client.request("executor/steer", { ...params, prompt });
     }
