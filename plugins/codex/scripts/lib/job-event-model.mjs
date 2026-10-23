@@ -214,11 +214,18 @@ export function jobConfig(job) {
   return { model: trimmed(request.model), effort: trimmed(request.effort) };
 }
 
-export function createLiveView(job, options = {}) {
-  const executor = job.executor ?? "codex";
-  const command = String(job.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
+// The executor label a task list shows. An ACP dispatch is not always Qoder:
+// the command it was launched from names dsh, qoder, or some other agent, and a
+// record written before the launch was observed has nothing else to go on.
+export function executorView(job) {
+  const executor = job?.executor ?? "codex";
+  const command = String(job?.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
   const acpLabel = /^dsh(?:-[\w-]+)?(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
     : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder" : "ACP";
+  return { kind: executor, label: executor === "acp" ? acpLabel : "Codex" };
+}
+
+export function createLiveView(job, options = {}) {
   const view = {
     schemaVersion: 1,
     jobId: job.id ?? job.jobId,
@@ -228,7 +235,7 @@ export function createLiveView(job, options = {}) {
     endedAt: job.completedAt ?? null,
     threadId: job.executorSessionId ?? job.threadId ?? null,
     turnId: job.turnId ?? null,
-    executor: { kind: executor, label: executor === "acp" ? acpLabel : "Codex" },
+    executor: executorView(job),
     ...jobConfig(job),
     activeCommands: [],
     lastMessage: null,

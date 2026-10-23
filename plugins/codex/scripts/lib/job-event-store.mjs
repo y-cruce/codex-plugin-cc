@@ -5,6 +5,7 @@ import path from "node:path";
 import { assertCanonicalEventDraft } from "./executor-events.mjs";
 import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 import { resolveJobHistory, resolveLegacyJobHistory, stateDirFor } from "./history-resolver.mjs";
+import { executorView } from "./job-event-model.mjs";
 import { resolveStateDir } from "./state.mjs";
 import { historyCursorVersion, jobIndexPath, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
 
@@ -555,6 +556,10 @@ async function retireHistory(directory, current, now) {
   }
   job.id ??= current.jobId;
   job.status ??= current.metadata.status ?? previousView?.status;
+  // The executor label a task list shows is derived from the launch command.
+  // Keep just that piece of the request so a dsh dispatch is not reported as
+  // another ACP agent when the record has no earlier live view to reuse.
+  if (original.request?.executorCommand !== undefined) job.request = { executorCommand: original.request.executorCommand };
   const tombstone = {
     schemaVersion: 1, jobId: current.jobId, streamId: current.streamId,
     committedSeq: current.committedSeq, earliestSeq: String(BigInt(current.committedSeq) + 1n),
@@ -576,7 +581,7 @@ async function retireHistory(directory, current, now) {
     status: job.status, startedAt: previousView?.startedAt ?? job.startedAt ?? null,
     endedAt: previousView?.endedAt ?? job.completedAt ?? current.metadata.completedAt ?? null,
     threadId: previousView?.threadId ?? job.threadId ?? null, turnId: previousView?.turnId ?? job.turnId ?? null,
-    ...(previousView?.executor || job.executor ? { executor: previousView?.executor ?? { kind: job.executor, label: job.executor === "acp" ? "Qoder" : "Codex" } } : {}),
+    ...(previousView?.executor || job.executor ? { executor: previousView?.executor ?? executorView(job) } : {}),
     activeCommands: [], lastMessage: null, files: [],
     usage: { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0, cachedInputTokens: usage.cachedInputTokens ?? 0, complete: usage.complete ?? false },
     pendingQuestion: null, history: { committedSeq: current.committedSeq, continuity: "partial" }, tail: []

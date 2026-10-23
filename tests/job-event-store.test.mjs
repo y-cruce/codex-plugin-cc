@@ -293,6 +293,21 @@ test("closed terminal histories replay without a writer and cleanup obeys age an
   assert.equal((await readHistory(cwd, "task-active")).events.length, 1);
 });
 
+test("a retired ACP record labels its executor from the command it launched", async (t) => {
+  const cwd = await fixture(t);
+  const store = await new JobEventStore(cwd, "task-acp-dsh").initialize({
+    job: { id: "task-acp-dsh", executor: "acp", request: { executorCommand: "/usr/local/bin/dsh" } },
+    status: "failed",
+    completedAt: "2026-01-01T00:00:00.000Z"
+  });
+  store.append(event());
+  await store.close();
+  const cleaned = await cleanupHistory(cwd, { now: Date.parse("2026-09-15T00:00:00Z") });
+  assert.ok(cleaned.removed.includes("task-acp-dsh"));
+  const view = JSON.parse(await fs.readFile(resolveLiveViewPath(cwd, "task-acp-dsh"), "utf8"));
+  assert.deepEqual(view.executor, { kind: "acp", label: "DSH" });
+});
+
 test("a crash between segment fsync and manifest publication never exposes the unpublished batch", async (t) => {
   const cwd = await fixture(t);
   const moduleUrl = new URL("../plugins/codex/scripts/lib/job-event-store.mjs", import.meta.url).href;
