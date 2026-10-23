@@ -93,7 +93,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }),
       messages: async () => options.messages ?? [] },
     env: { get: async (name) => name === "TMPDIR" ? options.tmpdir ?? "/tmp" : "/home/test" },
-    clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(() => { if (!options.unloaded?.()) fn(); }) },
+    clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => { timers.set(ms, fn); return { cancel: () => timers.delete(ms) }; }, after: (_ms, fn) => setImmediate(() => { if (!options.unloaded?.()) fn(); }) },
     store: { get: async (key) => { if (options.storeRead) await options.storeRead(key); return stored.get(key); }, set: async (key, value) => {
       if (options.storeWrite) await options.storeWrite(key, value);
       if (key === `codex:tasks:${sessionId}` && failWrites-- > 0) throw new Error("Lock file is already being held");
@@ -187,7 +187,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     viewTick: (unchanged = false) => { if (!unchanged) mtime++; timers.get(500)(); },
     touch: () => { mtime++; },
     list: (value) => { threads = value === true ? listing : value; },
-    tick: async () => { const previous = writes; timers.get(2000)(); await settle(previous); },
+    tick: async () => { const previous = writes; timers.get(2000)?.(); await settle(previous); },
     advance: (ms) => { now += ms; },
     dispatched: async (command) => {
       await hooks.get("tool.call:")(engine, { command }, async () => ({ stdout: "STATUS: started JOB: new-job NAME: New job" }));
@@ -914,7 +914,7 @@ test("forget uses task selectors and stays hidden until refresh rebuilds from di
 
 test("the pane answers shell requests to list, forget and refresh through the channel files", async () => {
   const stored = new Map();
-  const pane = await paneHarness(stored);
+  let pane = await paneHarness(stored);
   const dir = "/home/test/.claude/plugins/data/codex-tasks-pane";
   const ask = async (id, action, target) => {
     pane.files.set(`${dir}/session.request.json`, { id, action, target });
@@ -932,7 +932,8 @@ test("the pane answers shell requests to list, forget and refresh through the ch
   assert.match(forgot.text, /forgot Alpha task/);
   assert.deepEqual(forgot.rows, []);
   // Hidden rows stay hidden in the instance a reload starts.
-  assert.doesNotMatch(await (await paneHarness(stored)).render(), /Alpha task/);
+  pane = await paneHarness(stored);
+  assert.doesNotMatch(await pane.render(), /Alpha task/);
   const refreshed = await ask("4", "refresh");
   assert.match(refreshed.text, /refreshed · 1 tasks/);
   assert.deepEqual(refreshed.forgotten, []);
@@ -1339,6 +1340,41 @@ test("reload with a missing hold record adopts the shell and releases it without
   await reloaded.tick();
   assert.deepEqual(await within(once(shells[0], "exit"), 5000, "untracked hold exit"), [0, null]);
   assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the marker stops the shell without a taskId");
+});
+
+test("a replaced pane cannot release or rearm the new instance's goal hold", async () => {
+  const now = Date.now();
+  const key = "codex:tasks:session";
+  const stored = new Map([[`${key}:goal`, true]]);
+  const calls = [];
+  const markers = [];
+  const options = { ppid: "4242", push: true, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    fileWrite: async (file, text) => { if (file.endsWith(".goal-hold")) markers.push(text); },
+    toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+  };
+  const old = await paneHarness(stored, undefined, "session", options);
+  await old.tick();
+  const reading = old.holdThreadsRead();
+  old.list([{ ...old.listing[0], status: "completed" }]);
+  const pending = old.tick();
+  await within(reading.reading, 1000, "the retired pane poll");
+  const current = await paneHarness(stored, undefined, "session", options);
+  await current.tick();
+  const hold = structuredClone(stored.get(`${key}:hold`));
+  reading.release();
+  await pending;
+  await old.tick();
+  assert.deepEqual(markers, ["true"], "a retired poll cannot withdraw the current shell's marker");
+  assert.deepEqual(stored.get(`${key}:hold`), hold);
+  assert.equal(stored.get(`${key}:goal`), true);
+  const observed = old.observed.length;
+  old.list(true);
+  old.advance(20000);
+  await old.tick();
+  assert.equal(old.observed.length, observed, "the old instance stops polling after replacement");
+  assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
+  assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0);
 });
 
 test("reload finds the existing session goal hold and stops it without starting a second shell", async () => {

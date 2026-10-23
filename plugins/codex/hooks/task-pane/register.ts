@@ -88,6 +88,9 @@ type State = {
   // The background shell that keeps an active /goal waiting while jobs run
   // and the channel, not a Monitor, carries their events (see holdGoal).
   hold: Hold | null
+  instance: string
+  replaced: boolean
+  timers: { cancel(): void }[]
   // Whether this session has a /goal set, as far as the pane can tell; no
   // goal, no hold (see goalCommand).
   goal: boolean
@@ -166,10 +169,27 @@ function writeStore($: EngineInterface, state: State, key: string, value: unknow
   $.clock.after(0, () => { void flushStore($, state) })
 }
 
+// Reload can retire a module while one of its hooks still awaits next(). The
+// host leaves its timers running until that call ends, so each new pane claims
+// the session and the old one must stop without releasing the adopted shell.
+async function ownsPane($: EngineInterface, state: State): Promise<boolean> {
+  if (state.replaced || !state.key) return false
+  try {
+    if (await $.store.get(`${state.key}:instance`) === state.instance) return true
+  } catch { return true } // Keep the existing live-state fallback on a failed store read.
+  state.replaced = state.leaving = true
+  state.epoch += 1
+  state.pendingWrites.clear()
+  for (const timer of state.timers) timer.cancel()
+  state.timers = []
+  return false
+}
+
 async function flushStore($: EngineInterface, state: State) {
   if (state.writing) return
   state.writing = true
   try {
+    if (!await ownsPane($, state)) return
     for (const [key, value] of state.pendingWrites) {
       try {
         await $.store.set(key, value)
@@ -380,7 +400,7 @@ function recordHold($: EngineInterface, state: State) {
 
 async function releaseHold($: EngineInterface, state: State) {
   const hold = state.hold
-  if (!hold) return
+  if (!hold || !await ownsPane($, state)) return
   state.hold = null
   recordHold($, state)
   const file = holdFile(state)
@@ -427,6 +447,7 @@ async function setGoal($: EngineInterface, state: State, goal: boolean) {
 }
 
 async function holdGoal($: EngineInterface, state: State, active: boolean, sure: boolean, now: number) {
+  if (!await ownsPane($, state)) return
   if (!state.channelOn || !state.goal || !active) {
     // A listing that failed this poll may have hidden a live job.
     if (sure || !state.channelOn || !state.goal) await releaseHold($, state)
@@ -457,7 +478,8 @@ async function holdGoal($: EngineInterface, state: State, active: boolean, sure:
     command: holdCommand(sessionId, file),
     description: 'Codex jobs running (keeps /goal waiting)',
     run_in_background: true,
-  }).then(result => {
+  }).then(async result => {
+    if (!await ownsPane($, state)) return
     const output = result.result as { backgroundTaskId?: string; taskId?: string } | undefined
     const taskId = output?.backgroundTaskId ?? output?.taskId
     if (!taskId) return
@@ -716,6 +738,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   if (goal === undefined) goal = goalFromMessages(await Promise.resolve().then(() => $.session.messages()).catch(() => [])) ?? false
   // Reads from an ended session must not install their cache in its successor.
   if (epoch !== state.epoch) return
+  await $.store.set(`${key}:instance`, state.instance)
   state.leaving = false
   state.ledger = ledger
   state.saved = JSON.stringify(ledger)
@@ -767,6 +790,7 @@ async function saveLedger($: EngineInterface, state: State) {
 
 async function pollOnce($: EngineInterface, state: State) {
   try {
+    if (state.replaced) return
     let generation = state.generation
     const sessionId = await $.session.id()
     if (generation !== state.generation) return
@@ -776,6 +800,7 @@ async function pollOnce($: EngineInterface, state: State) {
       await bindSession($, state, sessionId)
       generation = state.generation
     }
+    if (!await ownsPane($, state)) return
     const epoch = state.epoch
     const stale = () => state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || generation !== state.generation
     if (state.tools.pending) {
@@ -822,6 +847,7 @@ async function pollOnce($: EngineInterface, state: State) {
       }
     })
     if (stale()) return
+    if (!await ownsPane($, state)) return
     // Load replacements off-screen. A slow or failed read must not empty the
     // current pane between removing old rows and reading their replacements.
     const beforeViews = new Map(state.views)
@@ -1228,15 +1254,19 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
         ? { opened: state.opened, shown: state.shown, dismissed: state.dismissed } : {}
       Object.assign(state, initialized, placement, { script: '', busy: state.busy, booting: state.booting, writing: state.writing, startError: undefined })
       if (placement.opened || placement.dismissed) writeStore($, state, `${state.key}:dismissed`, state.dismissed)
-      $.clock.every(500, () => { void refreshViews($, state, true) })
-      $.clock.every(2000, () => { void flushStore($, state); void discoverRoots($, state).then(() => poll($, state)).then(() => answer($, state)) })
+      state.timers.push($.clock.every(500, () => { if (!state.replaced) void refreshViews($, state, true) }))
+      state.timers.push($.clock.every(2000, async () => {
+        if (!await ownsPane($, state)) return
+        void flushStore($, state)
+        void discoverRoots($, state).then(() => poll($, state)).then(() => answer($, state))
+      }))
       // The heading's clock moves on its own, and nothing else asks for the redraw
       // that shows it: a job that is thinking writes no view file, so the pane
       // would sit at the second of the last event and then jump over the silence.
       // Asking only when the figure it draws has actually changed keeps a task
       // that has been running for an hour from rebuilding the trace every second.
-      $.clock.every(1000, async () => {
-        if (!state.opened) return
+      state.timers.push($.clock.every(1000, async () => {
+        if (state.replaced || !state.opened) return
         const now = await $.clock.now()
         state.now = now
         const clock = [...state.views.values()].filter(view => !isOver(view))
@@ -1244,7 +1274,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
         if (!clock || clock === state.clock) return
         state.clock = clock
         $.ui.invalidate('ui.render')
-      })
+      }))
       state.script = initialized.script
       void poll($, state)
     } catch (error) {
@@ -1290,6 +1320,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
+    instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
   }
 
   on('session.start', async ($, e, next) => {
