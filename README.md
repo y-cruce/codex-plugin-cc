@@ -398,7 +398,11 @@ Native subagent activity binds the child thread to the same job, including notif
 
 Writes are batched at 50 ms or 256 KiB and become visible only after durable commit. Histories rotate at 64 MiB, retain up to 1 GiB per job, and keep completed jobs for 30 days within a 20 GiB total budget. Retention removes oldest segments/jobs, never truncates individual payloads; expired cursors return `CURSOR_EXPIRED` and `earliestAvailableCursor`. Crashes or retention are marked as partial history. Legacy jobs do not acquire invented event history.
 
+Each repository retains its newest 150 jobs, always keeping queued and running jobs even if they exceed that cap. When a thread record has no retained or live round and no active writer, pruning removes it and its indexes; daily GC also reclaims records orphaned by earlier versions. Persisted events omit `source.raw` and keep command text output in `payload.outputText`. Resuming a pruned thread with `--thread` explains that its local history is unavailable; `--allow-other-repo` lets the executor try its own session history.
+
 写入以 50ms/256KiB 批量提交，公开游标只指向已持久化的数据。异常退出可能丢失尚未提交的批次，上游未提供重放的通知也无法补造。保留策略为单任务 1GiB、64MiB 分段、已结束任务 30 天、总量 20GiB；超限清理最旧历史并明确标记缺口。`job.log` 继续作为兼容文本日志，新增消费者不应解析它。
+
+每个仓库保留最近 150 个任务，排队和运行中的任务始终保留，必要时超过上限。线程记录的所有轮次均已淘汰、均已结束且没有活跃写入者时，清理记录及其索引；每日 GC 也回收旧版本遗留的孤儿记录。持久化事件移除 `source.raw`，命令文本输出保存在 `payload.outputText`。用 `--thread` 续接已清理线程时会提示本地历史不可用，加 `--allow-other-repo` 可让执行器尝试恢复自己的会话历史。
 
 The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
 

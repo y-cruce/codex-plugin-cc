@@ -1,18 +1,64 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
-import { directorEvent } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { directorEvent, eventPaths, reserveDirectorEvents } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
+import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
+import { normalizeCodexEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
 import { resolveJobHistory } from "../plugins/codex/scripts/lib/history-resolver.mjs";
-import { readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { JobEventStore, readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { renderJobEvent } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
 import { resultForPersistence } from "../plugins/codex/scripts/lib/persisted-result.mjs";
 import { renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
-import { readJobFile, resolveJobFile, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { readJobFile, resolveJobFile, resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { updateRoundReceipt } from "../plugins/codex/scripts/lib/thread-record-binding.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+
+test("segments and outbox omit raw and duplicate command text while retaining unknown payloads and live events", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  const job = { id: "compact-events", sessionId: "compact-session", workspaceRoot: cwd };
+  const output = "unique command output";
+  const command = normalizeCodexEvent({ method: "item/completed", params: { item: {
+    id: "command", type: "commandExecution", command: "echo output", status: "completed", exitCode: 0, aggregatedOutput: output
+  } } }, job);
+  const codexUnknown = normalizeCodexEvent({ method: "new/notification", params: { detail: "unknown codex data" } }, job);
+  const acpEvents = [];
+  const adapter = new AcpEventAdapter((event) => acpEvents.push(event), { job });
+  adapter.bindSession("thread");
+  const update = { sessionUpdate: "new_update", detail: "unknown acp data" };
+  await adapter.accept({ sessionId: "thread", update });
+  const events = [command, codexUnknown, ...acpEvents];
+  const original = structuredClone(events);
+  const committed = [];
+  const store = await new JobEventStore(cwd, job.id, { onCommit: (batch) => committed.push(...batch) }).initialize();
+  t.after(() => store.close());
+  for (const event of events) store.append(event);
+  await store.flush();
+  const stored = (await readHistory(cwd, job.id)).events;
+  for (const event of stored) assert.equal(Object.hasOwn(event.source, "raw"), false);
+  assert.deepEqual(stored[0].source, { protocol: "codex-app-server", method: "item/completed" });
+  assert.deepEqual(stored[0].payload.output, []);
+  assert.equal(stored[0].payload.outputText, output);
+  assert.equal(JSON.stringify(stored[0]).split(output).length - 1, 1);
+  assert.match(renderJobEvent(stored[0]), /unique command output/);
+  assert.deepEqual(stored[1].payload, { method: "new/notification", data: { detail: "unknown codex data" } });
+  assert.deepEqual(stored[2].payload, { method: "session/update:new_update", data: update });
+  assert.deepEqual(committed[0].source.raw, command.source.raw);
+  assert.deepEqual(events, original);
+  const stateDir = resolveStateDir(cwd);
+  const notification = { ...directorEvent(job, command.type, command.payload, stateDir), source: command.source };
+  await reserveDirectorEvents([notification], "test");
+  const outbox = JSON.parse(fs.readFileSync(eventPaths(notification).item, "utf8"));
+  assert.equal(Object.hasOwn(outbox.source, "raw"), false);
+  assert.equal(JSON.stringify(outbox).split(output).length - 1, 1);
+  const segment = path.join(store.directory, "segments", store.snapshot.segments[0].file);
+  assert.equal(fs.readFileSync(segment, "utf8").includes('"raw":'), false);
+});
 
 test("ACP persistence compacts replies and removes reasoning without changing result output or live events", async (t) => {
   isolateTestEnvironment(t);

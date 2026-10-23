@@ -6,13 +6,14 @@ import path from "node:path";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { indexSessionTask } from "./session-task-index.mjs";
 import { jobForPersistence } from "./persisted-result.mjs";
+import { liveJob, pruneThreadRecords } from "./thread-record-retention.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
-const MAX_JOBS = 50;
+const MAX_JOBS = 150;
 const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
 function nowIso() {
@@ -86,9 +87,13 @@ export function loadState(cwd) {
 }
 
 function pruneJobs(jobs) {
-  return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+  const sorted = [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+  const retained = new Set(sorted.filter(liveJob));
+  for (const job of sorted) {
+    if (retained.size >= MAX_JOBS) break;
+    retained.add(job);
+  }
+  return sorted.filter((job) => retained.has(job));
 }
 
 function removeFileIfExists(filePath) {
@@ -172,6 +177,9 @@ function writeState(cwd, state) {
   const temporaryFile = `${stateFile}.${process.pid}.tmp`;
   fs.writeFileSync(temporaryFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
   fs.renameSync(temporaryFile, stateFile);
+  if (previousJobs.some((job) => !retainedIds.has(job.id))) {
+    pruneThreadRecords(resolveStateDir(cwd), { keptJobs: nextJobs });
+  }
   return nextState;
 }
 

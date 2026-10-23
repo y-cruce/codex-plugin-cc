@@ -55,7 +55,7 @@ test("history is invisible until a durable batch commit and cursors resume witho
   await store.flush();
   assert.equal(committed.length, 2);
   const page = await readHistory(cwd, "task-one", { limit: 1 });
-  assert.equal(page.events[0].source.raw.params.delta, first.source.raw.params.delta);
+  assert.equal(page.events[0].payload.block.text, first.payload.block.text);
   assert.deepEqual((await readHistory(cwd, "task-one", { after: page.nextCursor })).events.map((value) => value.seq), ["2"]);
   assert.equal(resolveLiveViewPath(cwd, "task-one"), path.join(resolveHistoryDir(cwd, "task-one"), "live-view.json"));
 });
@@ -337,7 +337,7 @@ test("a crash between segment fsync and manifest publication never exposes the u
   assert.deepEqual((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events, []);
   assert.equal(store.append(event("after crash")).seq, "2");
   await store.flush();
-  assert.equal((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events[0].source.raw.params.delta, "after crash");
+  assert.equal((await readHistory(cwd, "task-midcommit", { after: cursor.trim() })).events[0].payload.block.text, "after crash");
 });
 
 test("retention publishes a complete projection checkpoint before removing old event segments", async (t) => {

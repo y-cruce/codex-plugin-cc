@@ -180,7 +180,7 @@ export interface CanonicalEventDraft<T extends CanonicalEventType = CanonicalEve
   receivedAt: string;
   timeBasis: "source" | "received";
   payload: CanonicalEventPayloadMap[T];
-  source: { protocol: "codex-app-server" | "acp" | "companion" | "local"; method: string; raw: unknown | null };
+  source: { protocol: "codex-app-server" | "acp" | "companion" | "local"; method: string; raw?: unknown | null };
   agent?: { id: string; path: string; parentId: string | null };
 }
 

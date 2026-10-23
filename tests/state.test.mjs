@@ -148,21 +148,36 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
 
-  const jobs = Array.from({ length: 51 }, (_, index) => {
+  const jobs = Array.from({ length: 152 }, (_, index) => {
     const jobId = `job-${index}`;
     const updatedAt = new Date(Date.UTC(2026, 0, 1, 0, index, 0)).toISOString();
     const logFile = resolveJobLogFile(workspace, jobId);
     const jobFile = resolveJobFile(workspace, jobId);
     fs.writeFileSync(logFile, `log ${jobId}\n`, "utf8");
-    fs.writeFileSync(jobFile, JSON.stringify({ id: jobId, status: "completed" }, null, 2), "utf8");
+    const status = index === 0 ? "running" : index === 1 ? "queued" : "completed";
+    fs.writeFileSync(jobFile, JSON.stringify({ id: jobId, status }, null, 2), "utf8");
     return {
       id: jobId,
-      status: "completed",
+      status,
       logFile,
       updatedAt,
       createdAt: updatedAt
     };
   });
+  const stateDir = path.dirname(stateFile);
+  const put = (relative, value) => {
+    const file = path.join(stateDir, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(value));
+  };
+  for (const [recordId, ids] of [["orphan", [3]], ["shared", [2, 150]]]) {
+    put(`thread-records/${recordId}/manifest.json`, { closed: true });
+    for (const id of ids) {
+      put(`thread-records/${recordId}/rounds/job-${id}.json`, { job: jobs[id], status: jobs[id].status });
+      put(`job-index/job-${id}.json`, { jobId: `job-${id}`, recordId });
+    }
+    put(`thread-index/${recordId}.json`, { recordId });
+  }
 
   fs.writeFileSync(
     stateFile,
@@ -184,24 +199,33 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
     jobs
   });
 
-  const prunedJobFile = resolveJobFile(workspace, "job-0");
-  const prunedLogFile = resolveJobLogFile(workspace, "job-0");
-  const retainedJobFile = resolveJobFile(workspace, "job-50");
-  const retainedLogFile = resolveJobLogFile(workspace, "job-50");
+  const prunedJobFile = resolveJobFile(workspace, "job-3");
+  const prunedLogFile = resolveJobLogFile(workspace, "job-3");
+  const retainedJobFile = resolveJobFile(workspace, "job-151");
+  const retainedLogFile = resolveJobLogFile(workspace, "job-151");
   const jobsDir = path.dirname(prunedJobFile);
 
   assert.equal(fs.existsSync(retainedJobFile), true);
   assert.equal(fs.existsSync(retainedLogFile), true);
+  assert.equal(fs.existsSync(prunedJobFile), false);
+  assert.equal(fs.existsSync(prunedLogFile), false);
+  for (const relative of ["thread-records/orphan", "job-index/job-3.json", "thread-index/orphan.json"]) {
+    assert.equal(fs.existsSync(path.join(stateDir, relative)), false, relative);
+  }
+  for (const relative of ["thread-records/shared", "job-index/job-2.json", "thread-index/shared.json"]) {
+    assert.equal(fs.existsSync(path.join(stateDir, relative)), true, relative);
+  }
 
   const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  assert.equal(savedState.jobs.length, 50);
+  const retainedIds = [...Array.from({ length: 148 }, (_, index) => `job-${151 - index}`), "job-1", "job-0"];
+  assert.equal(savedState.jobs.length, 150);
   assert.deepEqual(
     savedState.jobs.map((job) => job.id),
-    Array.from({ length: 50 }, (_, index) => `job-${50 - index}`)
+    retainedIds
   );
   assert.deepEqual(
     fs.readdirSync(jobsDir).sort(),
-    Array.from({ length: 50 }, (_, index) => `job-${index + 1}`)
+    retainedIds
       .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`])
       .sort()
   );

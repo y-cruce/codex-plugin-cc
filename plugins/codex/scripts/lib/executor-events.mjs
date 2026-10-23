@@ -92,7 +92,7 @@ export function assertCanonicalEventDraft(event) {
   if (!Number.isFinite(Date.parse(event.occurredAt))) throw eventError("occurredAt must be an ISO timestamp");
   if (!Number.isFinite(Date.parse(event.receivedAt))) throw eventError("receivedAt must be an ISO timestamp");
   if (!["source", "received"].includes(event.timeBasis)) throw eventError("timeBasis is invalid");
-  if (!isObject(event.source) || typeof event.source.protocol !== "string" || typeof event.source.method !== "string" || !Object.hasOwn(event.source, "raw")) {
+  if (!isObject(event.source) || typeof event.source.protocol !== "string" || typeof event.source.method !== "string") {
     throw eventError("source is invalid");
   }
   if (!isObject(event.payload)) throw eventError("payload must be an object");

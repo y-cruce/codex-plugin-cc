@@ -8,6 +8,7 @@ import { questionIds, questionText } from "./job-event-model.mjs";
 import { resolveStateDirAtWorkspaceRoot } from "./state.mjs";
 import { deliveryRefs, stripDeliveryTags } from "./director-refs.mjs";
 import { scanConsumedDirectorEvents } from "./director-consumed.mjs";
+import { eventForPersistence } from "./persisted-result.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export const channelDirectory = () => path.join(os.tmpdir(), "codex-channel");
@@ -207,7 +208,7 @@ function retainEvent(event) {
   }
   const paths = eventPaths(event);
   if (!fs.existsSync(paths.item) && isDirectorEventPending(event)) {
-    durableJson(paths.item, { ...event, acceptedAt: event.acceptedAt ?? new Date().toISOString() });
+    durableJson(paths.item, { ...eventForPersistence(event), acceptedAt: event.acceptedAt ?? new Date().toISOString() });
   }
 }
 

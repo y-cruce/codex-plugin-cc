@@ -7,9 +7,9 @@ import { upgradeLegacyJobEvent } from "./executors/codex-event-adapter.mjs";
 import { resolveJobHistory, resolveLegacyJobHistory, stateDirFor } from "./history-resolver.mjs";
 import { executorView } from "./job-event-model.mjs";
 import { resolveStateDir } from "./state.mjs";
-import { historyCursorVersion, jobIndexPath, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
+import { ACTIVE_STORES, historyCursorVersion, jobIndexPath, LEGACY_CURSOR_VERSION, THREAD_RECORD_CURSOR_VERSION, threadRecordPaths } from "./thread-records.mjs";
+import { eventForPersistence } from "./persisted-result.mjs";
 
-const ACTIVE_STORES = new Map();
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
 
@@ -127,6 +127,7 @@ async function loadManifest(directory) {
 }
 
 function encodeBatch(events) {
+  events = events.map(eventForPersistence);
   const data = JSON.stringify(events);
   return `${JSON.stringify({ events, sha256: createHash("sha256").update(data).digest("hex") })}\n`;
 }

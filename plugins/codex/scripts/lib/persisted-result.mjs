@@ -31,3 +31,17 @@ export function resultForPersistence(result) {
 export function jobForPersistence(job) {
   return job?.result ? { ...job, result: resultForPersistence(job.result) } : job;
 }
+
+// The live event keeps its protocol envelope; only disk copies are compacted.
+export function eventForPersistence(event) {
+  const stored = { ...event };
+  if (event.source) {
+    const { raw, ...source } = event.source;
+    stored.source = source;
+  }
+  // Renderers and projections read outputText. Preserve non-text attachments.
+  if (event.type === "command.completed" && typeof event.payload?.outputText === "string") {
+    stored.payload = { ...event.payload, output: event.payload.output.filter((block) => block.type !== "text") };
+  }
+  return stored;
+}

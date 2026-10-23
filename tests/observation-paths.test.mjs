@@ -154,7 +154,7 @@ test("observe falls back to HOME data root, pins history/result reads, and merge
   assert.equal(view.stdout.trim(), path.join(recent.stateDir, "job-history/task-shared/live-view.json"));
   const replay = await h.cli(["replay", "task-shared", "--jsonl"]);
   assert.equal(replay.code, 0, replay.stderr);
-  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).source.raw.params.item.text, "new");
+  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).payload.message.text, "new");
   const follow = await h.cli(["follow", "task-shared"]);
   assert.equal(follow.code, 0, follow.stderr);
   assert.match(follow.stdout, /result-new/);
@@ -211,7 +211,7 @@ test("observe resolves history-only jobs across data roots", async (t) => {
 
   const replay = await h.cli(["replay", entry.job.id, "--jsonl"]);
   assert.equal(replay.code, 0, replay.stderr);
-  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).source.raw.params.item.text, "history-only");
+  assert.equal(JSON.parse(replay.stdout.split("\n")[0]).payload.message.text, "history-only");
 
   const follow = await h.cli(["follow", entry.job.id]);
   assert.equal(follow.code, 0, follow.stderr);

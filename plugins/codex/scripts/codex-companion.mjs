@@ -409,7 +409,7 @@ function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "c
   }
 
   throw new Error(
-    `Thread ${threadId} is not tracked for this repository. Pass --allow-other-repo to resume a thread from another repository or one created outside this plugin.`
+    `Thread ${threadId} is not tracked for this repository; its local history may have been pruned. Pass --allow-other-repo to resume it using the executor's session history.`
   );
 }
 

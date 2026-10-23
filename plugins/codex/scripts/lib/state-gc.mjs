@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pruneMissingStateTaskEntries } from "./session-task-index.mjs";
+import { liveJob, pruneThreadRecords } from "./thread-record-retention.mjs";
+import { ACTIVE_STORES } from "./thread-records.mjs";
 
 const DAY = 86_400_000;
 
@@ -43,10 +45,13 @@ function inspectStateDir(stateDir, now) {
   let latest = 0;
   const jobs = new Map();
   const workspaces = new Set();
+  let hasThreadRecords = false;
+  let hasLiveJobs = false;
   const keep = reason => { throw Object.assign(new Error(reason), { keep: reason }); };
   function addJob(job) {
     if (!job || typeof job.id !== "string" || !path.isAbsolute(job.workspaceRoot ?? "")) keep("unknownJob");
     workspaces.add(job.workspaceRoot);
+    if (liveJob(job)) hasLiveJobs = true;
     if (job.status === "queued" || job.status === "running") {
       const alive = ownerAlive(job.pid);
       if (alive !== false) keep(alive ? "liveJob" : "unknownOwner");
@@ -58,11 +63,15 @@ function inspectStateDir(stateDir, now) {
     if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) keep("unsafeEntry");
     latest = Math.max(latest, stat.mtimeMs);
     if (stat.isDirectory()) {
+      if (ACTIVE_STORES.has(file)) keep("liveWriter");
+      if (/^thread-records\/[^/]+$/.test(relative)) hasThreadRecords = true;
       for (const name of fs.readdirSync(file)) visit(path.join(file, name), relative ? `${relative}/${name}` : name);
       return;
     }
     bytes += stat.size;
-    if (/^jobs\/[^/]+\.json$/.test(relative)) addJob(JSON.parse(fs.readFileSync(file, "utf8")));
+    if (relative.endsWith("/writer.lock")) {
+      if (ownerAlive(JSON.parse(fs.readFileSync(file, "utf8")).pid) !== false) keep("liveWriter");
+    } else if (/^jobs\/[^/]+\.json$/.test(relative)) addJob(JSON.parse(fs.readFileSync(file, "utf8")));
     else if (relative === "state.json") {
       const state = JSON.parse(fs.readFileSync(file, "utf8"));
       if (state.workspaceRoot) workspaces.add(state.workspaceRoot);
@@ -74,11 +83,13 @@ function inspectStateDir(stateDir, now) {
       addJob(JSON.parse(fs.readFileSync(file, "utf8")).job);
     } else if (/^thread-records\/[^/]+\/manifest\.json$/.test(relative)) {
       const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (!record.closed && ownerAlive(record.writerPid) !== false) keep("liveWriter");
       if (record.workspaceRoot) workspaces.add(record.workspaceRoot);
     }
   }
   try {
     visit(stateDir);
+    if (hasThreadRecords && hasLiveJobs) return { keep: "liveJob" };
     for (const workspace of workspaces) {
       if (!path.isAbsolute(workspace)) return { keep: "unknown" };
       try { fs.statSync(workspace); return { keep: "workspaceExists" }; }
@@ -112,7 +123,8 @@ export function gcPluginState({ dataDir = process.env.CLAUDE_PLUGIN_DATA, dryRun
       try { fs.futimesSync(marker, now / 1000, now / 1000); } finally { fs.closeSync(marker); }
     }
     const summary = { scanned: 0, directories: 0, bytes: 0, jobs: 0,
-      byRule: { workspaceMissing: { directories: 0, bytes: 0, jobs: 0 }, noJobs: { directories: 0, bytes: 0, jobs: 0 } },
+      byRule: { workspaceMissing: { directories: 0, bytes: 0, jobs: 0 }, noJobs: { directories: 0, bytes: 0, jobs: 0 },
+        orphanThreadRecords: { directories: 0, bytes: 0, jobs: 0 } },
       sessions: {}, kept: {} };
     const candidates = [];
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -127,21 +139,24 @@ export function gcPluginState({ dataDir = process.env.CLAUDE_PLUGIN_DATA, dryRun
       }
       if (candidate.keep) {
         summary.kept[candidate.keep] = (summary.kept[candidate.keep] ?? 0) + 1;
-        continue;
       }
-      candidates.push(candidate);
-      for (const total of [summary, summary.byRule[candidate.reason]]) {
-        total.directories++;
-        total.bytes += candidate.bytes;
-        total.jobs += candidate.jobs;
-      }
-      // Bytes are whole directories referenced by this session, not apportioned
-      // between sessions that share a store.
-      for (const [session, count] of Object.entries(candidate.sessions)) {
-        const total = summary.sessions[session] ??= { directories: 0, bytes: 0, jobs: 0 };
-        total.directories++;
-        total.bytes += candidate.bytes;
-        total.jobs += count;
+      const removals = candidate.keep
+        ? (entry.isDirectory() ? pruneThreadRecords(dir, { dryRun }) : []) : [candidate];
+      for (const removal of removals) {
+        candidates.push(removal);
+        for (const total of [summary, summary.byRule[removal.reason]]) {
+          total.directories++;
+          total.bytes += removal.bytes;
+          total.jobs += removal.jobs;
+        }
+        // Bytes are whole directories referenced by this session, not apportioned
+        // between sessions that share a store.
+        for (const [session, count] of Object.entries(removal.sessions)) {
+          const total = summary.sessions[session] ??= { directories: 0, bytes: 0, jobs: 0 };
+          total.directories++;
+          total.bytes += removal.bytes;
+          total.jobs += count;
+        }
       }
     }
     const prunedEntries = dryRun ? 0 : pruneMissingStateTaskEntries(root);

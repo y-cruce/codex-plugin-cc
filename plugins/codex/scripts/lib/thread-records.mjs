@@ -5,6 +5,7 @@ import path from "node:path";
 export const LEGACY_CURSOR_VERSION = 1;
 export const THREAD_RECORD_CURSOR_VERSION = 2;
 export const THREAD_RECORDS_ENABLED = true;
+export const ACTIVE_STORES = new Map();
 
 function identifier(value, label) {
   if (!value || path.basename(value) !== value || value === "." || value === "..") {

@@ -5,8 +5,54 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { gcPluginState, scheduleStateGc } from "../plugins/codex/scripts/lib/state-gc.mjs";
 import { parseSessionTaskIndex, sessionTaskIndexPath } from "../plugins/codex/scripts/lib/session-task-index.mjs";
+import { JobEventStore } from "../plugins/codex/scripts/lib/job-event-store.mjs";
+import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const DAY = 86_400_000;
+
+test("daily GC sweeps existing workspaces and preserves kept rounds, live jobs and writer leases", async (t) => {
+  isolateTestEnvironment(t);
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const put = (relative, value) => {
+    const file = path.join(stateDir, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(value));
+  };
+  const job = { id: "kept", status: "completed", workspaceRoot: workspace };
+  put("state.json", { jobs: [job] });
+  put("jobs/kept.json", job);
+  for (const [id, status] of [["kept", "completed"], ["orphan", "completed"], ["dead-writer", "completed"],
+    ["queued", "queued"], ["running", "running"], ["external-writer", "completed"]]) {
+    put(`thread-records/${id}/manifest.json`, { closed: true, workspaceRoot: workspace });
+    put(`thread-records/${id}/rounds/${id}.json`, { job: { ...job, id, status }, status });
+    put(`job-index/${id}.json`, { jobId: id, recordId: id });
+    put(`thread-index/${id}.json`, { recordId: id });
+  }
+  put("thread-records/external-writer/writer.lock", { pid: process.pid });
+  put("thread-records/dead-writer/writer.lock", { pid: 2147483647 });
+  const store = await new JobEventStore(workspace, "active-writer", {
+    directory: path.join(stateDir, "thread-records/active-writer"),
+    threadRecord: { recordId: "active-writer", workspaceRoot: workspace, executorKey: "codex", threadId: "thread" }
+  }).initialize();
+  t.after(() => store.close());
+  const dry = gcPluginState({ dryRun: true });
+  assert.deepEqual(dry.candidates.map(({ recordId }) => recordId).sort(), ["dead-writer", "orphan"]);
+  assert.equal(dry.summary.byRule.orphanThreadRecords.directories, 2);
+  assert.equal(fs.existsSync(path.join(stateDir, "thread-records/orphan")), true);
+  assert.equal(fs.existsSync(path.join(path.dirname(stateDir), ".gc")), false);
+  const result = gcPluginState();
+  assert.equal(result.summary.bytes, dry.summary.bytes);
+  for (const id of ["orphan", "dead-writer"]) {
+    for (const relative of [`thread-records/${id}`, `job-index/${id}.json`, `thread-index/${id}.json`]) {
+      assert.equal(fs.existsSync(path.join(stateDir, relative)), false, relative);
+    }
+  }
+  for (const id of ["kept", "queued", "running", "external-writer", "active-writer"]) {
+    assert.equal(fs.existsSync(path.join(stateDir, "thread-records", id)), true, id);
+  }
+});
 
 test("state GC keeps usable or uncertain stores, deletes only idle garbage, and prunes every session index once daily", (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-state-gc-"));
@@ -52,6 +98,7 @@ test("state GC keeps usable or uncertain stores, deletes only idle garbage, and 
     { name: "legacy-live", legacy: true, patch: { status: "queued", pid: process.pid } },
     { name: "history-only", history: "job-history/job/manifest.json", remove: true },
     { name: "thread-only", history: "thread-records/record/rounds/job.json", patch: { workspaceRoot: workspace } },
+    { name: "thread-live-dead-owner", history: "thread-records/record/rounds/job.json", patch: { status: "running", pid: 2147483647 } },
   ];
   for (const row of cases) {
     const dir = path.join(root, row.name);

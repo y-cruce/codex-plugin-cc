@@ -44,7 +44,7 @@ test("subAgentActivity of every kind binds buffered and future child events to o
         assert.equal(event.jobId, job.id);
         assert.deepEqual(event.agent, { id: "child", path: "review_41_44", parentId: "parent" });
         assert.match(renderJobEvent(event), /^\[review_41_44\] assistant:/);
-        assert.equal(event.source.raw.params.threadId, "child");
+        assert.equal(event.identity.sessionId, "child");
       }
       assert.equal(entry.view.lastMessage, null);
       assert.equal(entry.view.subAgents[0].status, kind);
