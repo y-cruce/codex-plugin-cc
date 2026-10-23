@@ -164,16 +164,25 @@ async function discard($: EngineInterface, path: string) {
 async function run($: EngineInterface, context: Context, argv: string[], cwd: string, timeoutMs: number, stdin?: string): Promise<Answer> {
   if (!cwd.startsWith('/')) return { deny: 'cwd must be an absolute path' }
   if (!(await $.fs.exists(cwd))) return { deny: `cwd does not exist: ${cwd}` }
-  const ran = await $.process.run(argv, {
-    cwd, stdin, timeoutMs,
-    // The plugin running this tool is the one whose pane watches the job, so its
-    // own companion is the one to use rather than whichever version is newest
-    // in the plugin cache.
-    env: {
-      CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
-      ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
-    },
-  })
+  let ran
+  try {
+    ran = await $.process.run(argv, {
+      cwd, stdin, timeoutMs,
+      // The plugin running this tool is the one whose pane watches the job, so its
+      // own companion is the one to use rather than whichever version is newest
+      // in the plugin cache.
+      env: {
+        CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
+        ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
+      },
+    })
+  } catch (error) {
+    // A run cut off at its limit rejects. Thrown out of the hook, the call fell
+    // through to the engine's "no tool.call hook answered this call", which
+    // read as a plugin fault and hid that the command may have taken effect.
+    const reason = error instanceof Error ? error.message : String(error)
+    return { deny: `${argv[2]} did not finish: ${reason}. Whether it took effect is unknown; check status before running it again.` }
+  }
   const out = [ran.stdout.trim(), ran.isStdoutTruncated ? '[output cut at 4 MiB]' : ''].filter(Boolean).join('\n')
   if (ran.exitCode === 0) return { result: out || '(no output)' }
   const err = ran.stderr.trim()

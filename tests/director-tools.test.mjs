@@ -118,6 +118,9 @@ test("answer writes the answers map as JSON for dispatch.sh answer", async () =>
   assert.deepEqual([argv[2], argv[3], argv[4]], ["answer", "j", "0"]);
   assert.deepEqual(JSON.parse(h.writes.get(argv[5])), answers);
   assert.deepEqual(await h.call("answer", { job: "j", cwd: "/repo", request: "0", answers: [] }), { deny: "answers must be an object keyed by question id" });
+  h.$.process.run = async () => { throw new Error("aborted: still running after 120000ms"); };
+  assert.deepEqual(await h.call("answer", { job: "j", cwd: "/repo", request: "0", answers }), {
+    deny: "answer did not finish: aborted: still running after 120000ms. Whether it took effect is unknown; check status before running it again." });
 });
 
 test("result, status and cancel run the plugin's companion directly", async () => {
