@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { indexSessionTask } from "./session-task-index.mjs";
+import { jobForPersistence } from "./persisted-result.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -229,11 +230,12 @@ export function getConfig(cwd) {
 }
 
 export function writeJobFile(cwd, jobId, payload) {
+  payload = jobForPersistence(payload);
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
   const temporaryFile = `${jobFile}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temporaryFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.writeFileSync(temporaryFile, `${JSON.stringify(payload)}\n`, "utf8");
     fs.renameSync(temporaryFile, jobFile);
     indexSessionTask(path.dirname(path.dirname(jobFile)), { ...payload, id: jobId });
   } finally {

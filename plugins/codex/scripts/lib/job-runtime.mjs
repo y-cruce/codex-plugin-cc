@@ -9,6 +9,7 @@ import { resolveStateDir, writeJobFile, upsertJob } from "./state.mjs";
 import { bindProvisionalDispatch, bufferProvisionalEvent, createProvisionalDispatch, failProvisionalDispatch,
   MAX_PROVISIONAL_BYTES, MAX_PROVISIONAL_EVENTS, updateRoundReceipt } from "./thread-record-binding.mjs";
 import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
+import { jobForPersistence } from "./persisted-result.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified",
@@ -23,6 +24,7 @@ function roundPrompt(job) {
 }
 
 function jobEvent(job, type, threadRecord = false) {
+  job = jobForPersistence(job);
   const completedAt = job.completedAt ?? new Date().toISOString();
   const status = type.slice(4);
   const errorMessage = job.errorMessage ?? job.result?.error?.message ?? null;

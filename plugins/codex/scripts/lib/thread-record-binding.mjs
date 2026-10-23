@@ -6,6 +6,7 @@ import { createCanonicalEvent } from "./executor-events.mjs";
 import { stateDirFor, resolveThreadRecord } from "./history-resolver.mjs";
 import { acquireWriter, atomicJson, JobEventStore, releaseWriter } from "./job-event-store.mjs";
 import { canonicalWorkspaceRoot, executorKeyFor, jobIndexPath, threadIndexHash, threadIndexPath, threadRecordPaths } from "./thread-records.mjs";
+import { jobForPersistence, resultForPersistence } from "./persisted-result.mjs";
 
 export const MAX_PROVISIONAL_EVENTS = 256;
 export const MAX_PROVISIONAL_BYTES = 1024 * 1024;
@@ -67,18 +68,20 @@ function receiptFor(provisional, recordId, events, records, job) {
     sessionId: started.sessionId ?? job.sessionId ?? null,
     prompt: started.prompt ?? job.request?.prompt ?? null,
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: true },
-    result: terminal?.payload?.result ?? job.result ?? null,
+    result: resultForPersistence(terminal?.payload?.result ?? job.result ?? null),
     status: terminal?.type.slice(4) ?? job.status ?? "running",
     startedAt: started.startedAt ?? job.startedAt ?? job.createdAt ?? null,
     endedAt: terminal?.payload?.completedAt ?? job.completedAt ?? null,
-    job
+    job: jobForPersistence(job)
   };
 }
 
 export async function updateRoundReceipt(location, round, job) {
   const current = await readJson(location.roundReceipt);
   if (!current) throw bindingError("UNKNOWN_ROUND", `No round receipt for ${round.jobId}`);
-  await writeJson(location.roundReceipt, { ...current, ...structuredClone(round), job: structuredClone(job ?? current.job) });
+  const receipt = { ...current, ...structuredClone(round), job: jobForPersistence(job ?? current.job) };
+  receipt.result = resultForPersistence(receipt.result);
+  await writeJson(location.roundReceipt, receipt);
 }
 
 async function appendEvents(store, events) {
@@ -110,7 +113,7 @@ async function abandonedRound(stateDir, jobId) {
   const status = TERMINAL_STATUSES.has(job.status) ? job.status : "failed";
   const message = status === job.status ? job.errorMessage ?? null : "owner process exited";
   const completedAt = job.completedAt ?? new Date().toISOString();
-  const ended = { ...job, status, completedAt, ...(message ? { errorMessage: message } : {}) };
+  const ended = jobForPersistence({ ...job, status, completedAt, ...(message ? { errorMessage: message } : {}) });
   const event = createCanonicalEvent({
     job: ended,
     type: `job.${status}`,
@@ -118,7 +121,7 @@ async function abandonedRound(stateDir, jobId) {
     occurredAt: completedAt,
     payload: { status, reason: { code: status === "cancelled" ? "cancelled" : status === "completed" ? "end_turn" : "backend_error",
       backendCode: status, message, retryable: false }, completedAt, finalMessages: [],
-      error: message ? { message } : null, result: job.result ?? null },
+      error: message ? { message } : null, result: ended.result ?? null },
     source: { protocol: "local", method: `job.${status}`, raw: null }
   });
   return { job: ended, event };

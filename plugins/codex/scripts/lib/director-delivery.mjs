@@ -51,7 +51,9 @@ export function directorEvent(job, type, payload = {}, stateDir = undefined) {
   let detail;
   if (type === "question.opened" || type === "question.reminder") detail = `request=${payload.requestId}${questionIds(payload.questions ?? payload.fields)}: ${questionText(payload.questions ?? payload.fields, payload.message, Infinity)}`;
   else if (type === "director.notified") detail = `${payload.pendingRequestId == null ? "" : `pending_request=${payload.pendingRequestId} `}${payload.message ?? ""}`;
-  else detail = job.errorMessage ?? job.result?.error?.message ?? job.result?.terminal?.finalMessages?.map((m) => m.text).join("\n") ?? "";
+  else detail = job.errorMessage ?? job.result?.error?.message
+    ?? job.result?.terminal?.finalMessages?.findLast((message) => message.role === "assistant")?.text
+    ?? job.result?.rawOutput ?? "";
   return { eventId, sessionId: job.sessionId, stateDir, jobId: job.id, roundId: job.roundId ?? job.id, label: job.label ?? null, reportFile: job.reportFile ?? null, type,
     payload: terminal ? { status: job.status, errorMessage: job.errorMessage ?? job.result?.error?.message ?? null, ...payload } : payload,
     threadId: payload.threadId ?? job.executorSessionId ?? job.threadId ?? null, turnId: payload.turnId ?? job.turnId ?? null,
