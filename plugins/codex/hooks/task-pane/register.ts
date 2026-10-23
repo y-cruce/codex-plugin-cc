@@ -352,11 +352,18 @@ async function probing($: EngineInterface, base: string, now: number) {
 // on and no Monitor armed nothing told it to wait: each turn ended, the goal
 // was judged not met, and the next turn began at once to say "still waiting".
 // While a job is live this shell stands in for the Monitor. It prints nothing
-// and never ends on its own; the pane stops it when the last job is over,
+// and ends when the pane withdraws its session marker after the last job,
 // including when the broker sent its ending before the pane reconciled it.
 // The shell reads as what it is in the goal's check-in, which quotes it.
-function holdCommand(sessionId: string) {
-  return `: Codex jobs running, /goal waits for them, the codex plugin stops this when they end; while :; do sleep 3600; done; : ${sessionId}`
+function holdFile(state: State) {
+  return state.channel ? `${state.channel}.${state.sessionId}.goal-hold` : null
+}
+
+function holdCommand(sessionId: string, file: string) {
+  const quoted = "'" + file.replace(/'/g, "'\\''") + "'"
+  // Two calls can already be in flight when a reload loses their replies.
+  // Only the sibling shell with the lowest PID waits; both follow the same stop marker.
+  return `: Codex jobs running, /goal waits for them, the codex plugin stops this when they end; [ "$(pgrep -a -P "$PPID" -f 'the codex plugin stops this when they end.*: ${sessionId}' | awk '$1 ~ /^[0-9]+$/ { print $1 }' | sort -n | head -n 1)" = "$$" ] || exit 0; while [ "$(cat ${quoted} 2>/dev/null)" = true ]; do sleep 1; done; : ${sessionId}`
 }
 
 async function holding($: EngineInterface, state: State): Promise<boolean> {
@@ -371,11 +378,17 @@ function recordHold($: EngineInterface, state: State) {
   writeStore($, state, `${state.key}:hold`, state.hold)
 }
 
-function releaseHold($: EngineInterface, state: State) {
+async function releaseHold($: EngineInterface, state: State) {
   const hold = state.hold
   if (!hold) return
   state.hold = null
   recordHold($, state)
+  const file = holdFile(state)
+  // A reload may have lost the taskId while Bash was starting. Its shell can
+  // still see this marker, even after the environment awaiting Bash is gone.
+  if (file) await $.fs.write(file, 'false').catch(error => {
+    $.ui.log(`Codex tasks goal hold: ${String(error)}`, { to: 'debug' })
+  })
   if (hold.taskId) stopMonitor($, state, hold.taskId)
 }
 
@@ -405,18 +418,18 @@ export function goalFromMessages(messages: { role: string; text: string }[]): bo
   return undefined
 }
 
-function setGoal($: EngineInterface, state: State, goal: boolean) {
+async function setGoal($: EngineInterface, state: State, goal: boolean) {
   if (state.goal === goal) return
   state.goal = goal
   if (state.key) writeStore($, state, `${state.key}:goal`, goal)
-  if (!goal) releaseHold($, state)
+  if (!goal) await releaseHold($, state)
   else $.clock.after(0, () => { void poll($, state) })
 }
 
 async function holdGoal($: EngineInterface, state: State, active: boolean, sure: boolean, now: number) {
   if (!state.channelOn || !state.goal || !active) {
     // A listing that failed this poll may have hidden a live job.
-    if (sure || !state.channelOn || !state.goal) releaseHold($, state)
+    if (sure || !state.channelOn || !state.goal) await releaseHold($, state)
     return
   }
   const hold = state.hold
@@ -431,12 +444,17 @@ async function holdGoal($: EngineInterface, state: State, active: boolean, sure:
   }
   const epoch = state.epoch
   const sessionId = state.sessionId
+  const file = holdFile(state)
+  if (!file) return
   const armed: Hold = { armedAt: now }
   state.hold = armed
-  recordHold($, state)
+  await $.fs.write(file, 'true')
+  // Publish the claim before Bash starts, including while its reply is pending.
+  await $.store.set(`${state.key}:hold`, armed)
+  if (state.leaving || state.epoch !== epoch || state.hold !== armed) return
   void $.tool.call({
     tool: 'Bash',
-    command: holdCommand(sessionId),
+    command: holdCommand(sessionId, file),
     description: 'Codex jobs running (keeps /goal waiting)',
     run_in_background: true,
   }).then(result => {
@@ -671,7 +689,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const epoch = ++state.epoch
   if (state.sessionId && sessionId !== state.sessionId) {
     stopMonitors($, state)
-    releaseHold($, state)
+    await releaseHold($, state)
     state.opened = state.shown = false
   }
   state.leaving = true
@@ -710,8 +728,9 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
     if (monitor.taskId) state.ownedMonitors.add(monitor.taskId)
   }
   for (const id of owned) state.ownedMonitors.add(id)
-  // A reload keeps the shell; the next poll finds it, or stops it.
-  state.hold = hold && typeof hold.armedAt === 'number' ? hold : null
+  // Probe once even when the record is absent: the old instance's queued store
+  // write or Bash reply may have been cancelled by the reload.
+  state.hold = hold && typeof hold.armedAt === 'number' ? hold : { armedAt: 0 }
   state.goal = goal === true
   $.ui.invalidate('ui.render')
 }
@@ -1317,7 +1336,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     resetRows(state)
     state.pending = []
     stopMonitors($, state)
-    releaseHold($, state)
+    await releaseHold($, state)
     return next(e)
   })
   on('prompt.submit', async ($, submitted, next) => {
@@ -1352,7 +1371,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (e.command === 'goal') {
       const result = await next(e)
       const goal = goalCommand(e.args, result.text)
-      if (goal !== undefined) setGoal($, state, goal)
+      if (goal !== undefined) await setGoal($, state, goal)
       return result
     }
     if (!/(^|:)tasks$/.test(e.command)) return next(e)

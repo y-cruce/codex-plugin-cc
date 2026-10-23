@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +18,7 @@ import { askPane, renderPaneReply } from "../plugins/codex/scripts/lib/pane-chan
 import { buildSingleJobSnapshot, readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
+import { isolateTestEnvironment, makeTempDir, waitFor, within } from "./helpers.mjs";
 
 // The pane runs the director ingress ahead of its own prompt.submit; this is that chain.
 const through = (director) => async ($, e, next) => {
@@ -90,8 +92,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     plugin: { name: "codex", root: "/plugin" },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }),
       messages: async () => options.messages ?? [] },
-    env: { get: async (name) => name === "TMPDIR" ? "/tmp" : "/home/test" },
-    clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(fn) },
+    env: { get: async (name) => name === "TMPDIR" ? options.tmpdir ?? "/tmp" : "/home/test" },
+    clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => timers.set(ms, fn), after: (_ms, fn) => setImmediate(() => { if (!options.unloaded?.()) fn(); }) },
     store: { get: async (key) => { if (options.storeRead) await options.storeRead(key); return stored.get(key); }, set: async (key, value) => {
       if (options.storeWrite) await options.storeWrite(key, value);
       if (key === `codex:tasks:${sessionId}` && failWrites-- > 0) throw new Error("Lock file is already being held");
@@ -109,7 +111,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         await read(path);
         return { mtimeMs: mtime };
       },
-      write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path); files.set(path, JSON.parse(text)); },
+      write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path, text); files.set(path, JSON.parse(text)); },
       read: async (path) => {
         const text = await read(path);
         // The hooks host rejects reads over 4 MiB; stat still succeeds.
@@ -133,7 +135,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === "bash") return { exitCode: 0, stdout: "/companion.mjs", stderr: "" };
       if (args[0] === "pgrep" && options.pgrep) return options.pgrep(args)
-      if (args[0] === "pgrep") return { exitCode: options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
+      if (args[0] === "pgrep") return { exitCode: args[2].includes("the codex plugin stops this when they end")
+        ? stored.get(`codex:tasks:${sessionId}:hold`)?.taskId ? 0 : 1 : options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
       if (args.includes("ack") || args.includes("reported")) { acks.push(args); return { exitCode: 0, stdout: "{}", stderr: "" }; }
       observed.push(init.cwd);
       if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(args), stderr: '' };
@@ -1210,7 +1213,7 @@ test("a channel goal hold stops after the last job ends by status or reconciliat
     const holds = calls.filter(request => request.tool === "Bash");
     assert.equal(holds.length, 1);
     assert.equal(holds[0].run_in_background, true);
-    assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*while :; do sleep 3600; done; : session$/);
+    assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*do sleep 1; done; : session$/);
     await pane.tick();
     assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "one hold for both live jobs");
     pane.list([{ ...first, status: "completed" }, second]);
@@ -1252,6 +1255,71 @@ test("a stale running index does not hold /goal, and a goal turn ended with no j
   await pane.tick();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
+});
+
+test("reload with a missing hold record adopts the shell and releases it without its pending Bash reply", async (t) => {
+  const tmpdir = makeTempDir("codex-goal'hold-");
+  const sessionId = `goal-hold-${process.pid}`;
+  const key = `codex:tasks:${sessionId}`;
+  const now = Date.now();
+  const calls = [];
+  const shells = [];
+  const stored = new Map([[`${key}:goal`, true]]);
+  let unloaded = false;
+  const launch = (command) => {
+    const child = spawn("/bin/sh", ["-c", command], { detached: true, stdio: "ignore" });
+    const exited = once(child, "exit");
+    shells.push(child);
+    return { child, exited };
+  };
+  t.after(() => {
+    for (const child of shells) if (child.exitCode === null) {
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    }
+  });
+  const options = { ppid: String(process.pid), tmpdir, push: true, now,
+    preset: [[`${tmpdir}/codex-channel/${process.pid}.confirmed.json`, { sessionId, until: now + 60000 }]],
+    pgrep: async args => {
+      const found = spawnSync("pgrep", args.slice(1), { encoding: "utf8" });
+      return { exitCode: found.status, stdout: found.stdout, stderr: found.stderr };
+    },
+    fileWrite: async (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); },
+    toolCall: async request => {
+      calls.push(request);
+      if (request.tool === "Bash") {
+        launch(request.command);
+        // Unload loses this reply, so neither pane ever receives the taskId.
+        return new Promise(() => {});
+      }
+      return { result: {} };
+    },
+  };
+  await paneHarness(stored, undefined, sessionId, { ...options, unloaded: () => unloaded,
+    toolCall: async request => {
+      const reply = options.toolCall(request);
+      // The engine unload cancels the old environment's queued store flush.
+      unloaded = true;
+      return reply;
+    },
+  });
+  await waitFor(() => shells.length === 1 && spawnSync("pgrep", ["-P", String(process.pid), "-f", `: ${sessionId}`]).status === 0,
+    "the test hold shell", 5000);
+  const restored = await paneHarness(stored, undefined, sessionId, options);
+  await restored.tick();
+  assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "the claim survives unload before Bash replies");
+  const reloaded = await paneHarness(stored, undefined, sessionId, { ...options,
+    storeRead: async key => { if (key.endsWith(":hold")) throw new Error("hold record unavailable"); },
+  });
+  await reloaded.tick();
+  assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "a missing record still probes before arming");
+  // A second launch already sent before unload must also leave just one waiter.
+  const duplicate = launch(calls[0].command);
+  assert.deepEqual(await within(duplicate.exited, 5000, "duplicate hold exit"), [0, null]);
+  assert.equal(shells[0].exitCode, null);
+  reloaded.list([{ ...reloaded.listing[0], status: "completed" }]);
+  await reloaded.tick();
+  assert.deepEqual(await within(once(shells[0], "exit"), 5000, "untracked hold exit"), [0, null]);
+  assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the marker stops the shell without a taskId");
 });
 
 test("reload finds the existing session goal hold and stops it without starting a second shell", async () => {
