@@ -84,7 +84,7 @@ test("one-shot permission policy never selects a lasting grant", async () => {
 });
 
 test("live views distinguish DSH, Qoder and generic ACP commands", () => {
-  for (const [command, label] of [["/bin/dsh", "DSH"], ["/bin/qoder", "Qoder"], ["/bin/agent", "ACP"]]) {
+  for (const [command, label] of [["/bin/dsh", "DSH"], ["/bin/dsh-acp", "DSH"], ["/bin/qoder", "Qoder"], ["/bin/agent", "ACP"]]) {
     assert.equal(createLiveView({ id: "label", executor: "acp", request: { executorCommand: command } }).executor.label, label);
   }
 });

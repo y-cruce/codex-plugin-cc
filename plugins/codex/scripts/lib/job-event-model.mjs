@@ -215,7 +215,7 @@ export function jobConfig(job) {
 export function createLiveView(job, options = {}) {
   const executor = job.executor ?? "codex";
   const command = String(job.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
-  const acpLabel = /^dsh(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
+  const acpLabel = /^dsh(?:-[\w-]+)?(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
     : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder" : "ACP";
   const view = {
     schemaVersion: 1,
