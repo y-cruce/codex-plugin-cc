@@ -5,12 +5,13 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import os from "node:os";
+import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
@@ -127,13 +128,51 @@ test("a backgrounded ACP session startup failure reaches the director channel wi
 });
 
 test("runAcpTurn publishes questions and permissions with the persisted owner on a confirmed channel", async (t) => {
+  const ports = [];
+  let channel;
+  let dir;
+  // Run before isolateTestEnvironment restores process.env: a late ACP event
+  // must still use this test's state directory while its child is shutting down.
+  t.after(async () => {
+    try {
+      for (const port of ports) {
+        try {
+          await within(port.close(), 2000, "ACP port cleanup");
+        } finally {
+          if (port.proc?.exitCode === null && port.proc.signalCode === null) port.proc.kill("SIGKILL");
+          port.proc?.stdin.destroy();
+          port.proc?.stdout.destroy();
+          port.proc?.stderr.destroy();
+          port.queue.close();
+          try {
+            await within(port.exitPromise, 1000, "ACP child exit");
+          } finally {
+            await within(port.runtime?.close(), 1000, "ACP runtime cleanup");
+          }
+        }
+      }
+    } finally {
+      try {
+        if (channel) await within(channel.close(), 1000, "director channel cleanup");
+      } finally {
+        if (dir) fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
   isolateTestEnvironment(t);
+  // Capture ownership before initialize can wait on the fake agent, even if it
+  // never publishes a control endpoint. Exercise the real initialize method.
+  const initialize = AcpExecutorJobPort.prototype.initialize;
+  t.mock.method(AcpExecutorJobPort.prototype, "initialize", function () {
+    ports.push(this);
+    return initialize.call(this);
+  });
   process.env.CODEX_COMPANION_SESSION_ID = "wrong-environment-owner";
   const cwd = fs.realpathSync(makeTempDir());
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-run-"));
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "cxd-run-"));
   const messages = [];
   let endpoint;
-  const channel = new DirectorChannel({ dir, send: async message => {
+  channel = new DirectorChannel({ dir, send: async message => {
     const event = eventFromRef(message.params.meta.delivery);
     assert.equal(event.sessionId, "persisted-owner");
     assert.equal(fs.existsSync(eventPaths(event).item), true);
@@ -149,32 +188,27 @@ test("runAcpTurn publishes questions and permissions with the persisted owner on
   } });
   await channel.start("persisted-owner");
   await channel.handle({ action: "confirm", sessionId: "persisted-owner", instance: channel.instance, nonce: channel.nonce });
-  t.after(async () => { await channel.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   for (const prompt of ["question", "permission"]) {
     const id = `acp-production-${prompt}`;
     const job = { id, executor: "acp", workspaceRoot: cwd, sessionId: "persisted-owner", status: "running", pid: process.pid,
       createdAt: new Date().toISOString(), startedAt: new Date().toISOString() };
     writeJobFile(cwd, id, job);
     upsertJob(cwd, job);
-    let finished = false;
+    let sessionReady;
+    const ready = new Promise(resolve => { sessionReady = resolve; });
     const running = runAcpTurn(cwd, { jobId: id, prompt, command: process.execPath, args: [AGENT], modeId: "default",
-      onProgress: progress => { if (progress.controlEndpoint) endpoint = progress.controlEndpoint; } });
-    running.catch(() => {});
-    t.after(async () => {
-      if (finished || !endpoint) return;
-      const client = await ObservationClient.connect(cwd, { endpoint }).catch(() => null);
-      if (client) try {
-        const live = await client.request("executor/status");
-        await client.request("executor/cancel-job", { turnId: live.turnId });
-      } finally { client.close(); }
-      const result = await running.catch(() => null);
-      await result?.afterCompletion?.();
-    });
+      onProgress: progress => {
+        if (progress.controlEndpoint) endpoint = progress.controlEndpoint;
+        if (progress.executorSessionId) sessionReady();
+      } });
+    // Process/session startup has its own budget; the delivery deadline starts
+    // only once the agent is ready to receive the prompt.
+    await within(Promise.race([ready, running]), BROKER_READY_MS, `production ACP ${prompt} startup`);
     const result = await within(running, 20000, `production ACP ${prompt} delivery`);
     assert.equal(result.status, 0);
     assert.equal(readJobFile(resolveJobFile(cwd, id)).directorPush, true);
-    await result.afterCompletion();
-    finished = true;
+    await within(result.afterCompletion(), 2000, `production ACP ${prompt} completion`);
+    ports.pop();
   }
   assert.equal(messages.filter(message => message.meta.event === "question_opened").length, 2);
   assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 2);
