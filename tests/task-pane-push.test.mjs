@@ -84,7 +84,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   let threadRead = options.threadRead;
   let mtime = options.mtime ?? now;
   const read = async (path) => {
-    if (!files.has(path)) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+    if (!files.has(path)) throw Object.assign(new Error(`ENOENT: ${path}`), options.plainFsErrors ? {} : { code: "ENOENT" });
     return JSON.stringify(files.get(path));
   };
   const element = (type) => (props) => ({ type, ...props });
@@ -713,6 +713,25 @@ test("live rows reconcile with disk even after dropping out or exhausting the qu
         }
       } else if (ending === "missing" || !(query instanceof Error)) assert.doesNotMatch(rendered, /Alpha task/);
       else assert.match(rendered, new RegExp(["view", "inactive"].includes(ending) ? "completed" : ending), `${query}: ${ending}`);
+    }
+  }
+});
+
+test("plain host errors remove pruned rows while unreadable files keep cached rows", async () => {
+  for (const missing of ["job", "view", "unreadable"]) {
+    // The hooks worker transports only the error message, without Node's code.
+    const pane = await paneHarness(new Map(), undefined, "session", { plainFsErrors: true });
+    assert.match(await pane.render(), /Alpha task/);
+    const file = missing === "view" ? pane.viewPath : pane.jobPath;
+    if (missing === "unreadable") pane.files.set(file, { fixturePadding: "x".repeat(4 * 1024 * 1024) });
+    else pane.files.delete(file);
+    // The companion can still list a pruned job from retained round receipts.
+    // Keep that listing unchanged across successive polls.
+    for (let poll = 0; poll < 2; poll++) {
+      await pane.tick();
+      const rendered = await pane.render();
+      if (missing === "unreadable") assert.match(rendered, /Alpha task/, missing);
+      else assert.doesNotMatch(rendered, /Alpha task/, missing);
     }
   }
 });

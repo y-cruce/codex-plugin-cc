@@ -612,6 +612,7 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
   let changed = false
   const generation = state.generation
   for (const [id, path] of state.paths) {
+    let jobFile: string | null = null
     try {
       const stat = await $.fs.stat(path)
       if (generation !== state.generation) return
@@ -624,16 +625,17 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
         read = true
       } catch (error) {
         // A large/temporarily unreadable view can still be ended by its job.
-        if (!cached || (error as { code?: string }).code === 'ENOENT') throw error
+        if (!cached || !(await $.fs.exists(path))) throw error
       }
       if (generation !== state.generation) return
       if (!view || view.schemaVersion !== 1 || (view.recordId ?? view.jobId) !== id) continue
       const file = jobFileOf(path, view)
+      jobFile = file
       if (file) {
-        const job = await $.fs.read(file).then(text => JSON.parse(text) as { status: string; completedAt?: string }).catch(error => {
+        const job = await $.fs.read(file).then(text => JSON.parse(text) as { status: string; completedAt?: string }).catch(async error => {
           // Job results can exceed the host's 4 MiB read cap. Keep a readable
           // live view even then; deletion still removes the row below.
-          if ((error as { code?: string }).code === 'ENOENT') throw error
+          if (!(await $.fs.exists(file))) throw error
           return null
         })
         if (generation !== state.generation) return
@@ -651,10 +653,12 @@ async function refreshViews($: EngineInterface, state: State, reconcile = false)
       if (read) state.mtimes.set(id, stat.mtimeMs)
       state.views.set(id, { ...view, foreign })
       changed = true
-    } catch (error) {
+    } catch {
+      // The hooks worker transports error messages without Node's error.code.
+      // Confirm deletion through fs.exists; unreadable files still keep the row.
+      const exists = await $.fs.exists(path) && (!jobFile || await $.fs.exists(jobFile))
       if (generation !== state.generation) return
-      // A missing job or view was pruned. A read failure is not deletion.
-      if ((error as { code?: string }).code !== 'ENOENT') continue
+      if (exists) continue
       if (!state.views.has(id) && !state.paths.has(id)) continue
       state.views.delete(id)
       state.paths.delete(id)
