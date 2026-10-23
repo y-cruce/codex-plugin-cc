@@ -625,6 +625,9 @@ test("the view names the model and the effort a task runs on, and stays quiet wi
   const settled = createLiveView({ id: "job-acp", executor: "acp", executorEffort: "max",
     request: { executorModel: "dfmodel", executorEffort: "xhigh" } });
   assert.deepEqual({ model: settled.model, effort: settled.effort }, { model: "dfmodel", effort: "max" });
+  const unexposed = createLiveView({ id: "job-acp", executor: "acp", executorSessionId: "session-1",
+    request: { executorEffort: "xhigh" } });
+  assert.equal(unexposed.effort, null);
 
   // A record that names neither says nothing rather than "unknown", and an
   // event cannot invent one: the pane draws what the record knows and leaves

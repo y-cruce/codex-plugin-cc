@@ -203,11 +203,13 @@ const trimmed = (value) => (typeof value === "string" && value.trim() ? value.tr
 // effort, and which rung took effect is settled with the agent when the session
 // is set up: the record then holds it as `executorEffort`, possibly one below
 // what was asked for. The effective value wins; the request stands in until the
-// session reports.
+// session reports. A session that came up without one runs on the agent's own
+// default, which the record cannot name.
 export function jobConfig(job) {
   const request = job?.request ?? {};
   if ((job?.executor ?? "codex") === "acp") {
-    return { model: trimmed(request.executorModel), effort: trimmed(job.executorEffort) ?? trimmed(request.executorEffort) };
+    return { model: trimmed(request.executorModel),
+      effort: trimmed(job.executorEffort) ?? (job.executorSessionId ? null : trimmed(request.executorEffort)) };
   }
   return { model: trimmed(request.model), effort: trimmed(request.effort) };
 }
