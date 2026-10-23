@@ -44,6 +44,15 @@ if ! git merge-base --is-ancestor origin/main HEAD; then
   exit 1
 fi
 
+# The commit below takes every change, and an untracked file is usually a
+# task's scratch output; 1.4.84 published one to the public repository.
+UNTRACKED=$(git ls-files --others --exclude-standard -- ':!.claude' ':!docs')
+if [ -n "$UNTRACKED" ]; then
+  echo "untracked files would be released; commit, ignore or remove them first:" >&2
+  echo "$UNTRACKED" | head -20 >&2
+  exit 1
+fi
+
 # The build is the only place the hooks are type-checked.
 echo "── build"
 $RUN npm run --silent build
