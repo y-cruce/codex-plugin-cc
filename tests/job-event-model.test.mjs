@@ -91,12 +91,12 @@ test("writing that resumes opens its own row and leaves the rows already drawn a
   const startedTool = { toolCallId: "tool-1", name: "Read", kind: "other", status: "in_progress", title: "/repo/package.json", content: [], locations: [] };
   accept("tool.started", { toolCallId: "tool-1" }, { tool: startedTool });
   accept("tool.completed", { toolCallId: "tool-1" }, { tool: { ...startedTool, status: "completed" } });
-  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed"]);
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.completed"]);
 
   // The text written before the tool ran stays above it, and what the agent
   // writes afterwards arrives as a row of its own carrying only the new part.
   accept("message.delta", { messageId: "message-1" }, { role: "assistant", block: { type: "text", text: " done" } });
-  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed", "message.delta"]);
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.completed", "message.delta"]);
   assert.equal(view.tail[0].text, "assistant: working...");
   assert.equal(view.tail.at(-1).text, "assistant:  done");
   assert.equal(view.tail.at(-1).positionSeq, "5");
@@ -106,8 +106,8 @@ test("writing that resumes opens its own row and leaves the rows already drawn a
   accept("message.completed", { messageId: "message-1" }, { message: {
     messageId: "message-1", role: "assistant", content: [{ type: "text", text: "working... done" }], text: "working... done"
   } });
-  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.started", "tool.completed", "message.completed"]);
-  assert.deepEqual(view.tail.map((row) => row.seq), ["2", "3", "4", "6"]);
+  assert.deepEqual(view.tail.map((row) => row.type), ["message.delta", "tool.completed", "message.completed"]);
+  assert.deepEqual(view.tail.map((row) => row.seq), ["2", "4", "6"]);
   assert.equal(view.tail.at(-1).text, "assistant:  done");
   assert.equal(view.lastMessage.text, "working... done");
   assert.ok(view.tail.every((row, index) => index === 0 || BigInt(row.seq) > BigInt(view.tail[index - 1].seq)));

@@ -134,7 +134,10 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
       if (tail && !String(p.stdin ?? "")) return null;
       text = `stdin ${p.processId ?? ""}: ${p.stdin ?? ""}`;
       break;
-    case "message.completed": text = verbose ? `assistant: ${p.message.text ?? ""}` : preview(`assistant: ${p.message.text ?? ""}`, 300); break;
+    case "message.completed":
+      if (!verbose && p.message.role === "user") return null;
+      text = verbose ? `${p.message.role ?? "assistant"}: ${p.message.text ?? ""}` : preview(`assistant: ${p.message.text ?? ""}`, 300);
+      break;
     case "reasoning.completed": {
       const body = p.message.text ?? "";
       if (!verbose && !String(body).trim()) return null;
@@ -312,6 +315,7 @@ function updateTail(view, event, text, key = null, body = null) {
     row.status = event.payload.status;
   }
   if (event.type === "command.completed") {
+    row.status = event.payload.status;
     row.exitCode = typeof event.payload.exitCode === "number" ? event.payload.exitCode : null;
     row.durationMs = typeof event.payload.durationMs === "number" ? event.payload.durationMs : null;
   }
@@ -447,7 +451,16 @@ export function applyJobEvent(view, event, options = {}) {
       }
       tailKey = key;
       break;
+    case "tool.started": case "tool.updated": case "tool.completed":
+      tailKey = key;
+      break;
+    case "tool.progress":
+      // Older ACP segments repeat the shell title as progress. The command
+      // lifecycle already owns its row; MCP tool progress remains visible.
+      if (state?.command != null) text = null;
+      break;
     case "message.delta": {
+      if (p.role === "user") { text = null; break; }
       const delta = blockText(p.block);
       state.text = (state.text ?? "") + delta;
       if (!child) view.lastMessage = { kind: "assistant", text: state.text, at: event.occurredAt };
@@ -473,6 +486,7 @@ export function applyJobEvent(view, event, options = {}) {
       tailKey = key;
       break;
     case "message.completed": case "reasoning.completed": {
+      if (p.message.role === "user") { text = null; break; }
       const body = p.message.text ?? p.message.content.map(blockText).join("");
       if (!child) view.lastMessage = { kind: event.type === "message.completed" ? "assistant" : "reasoning", text: body, at: event.occurredAt };
       if (state && event.type === "message.completed") {
@@ -510,7 +524,7 @@ export function applyJobEvent(view, event, options = {}) {
       // at the foot of the pane where the reader can always see it, so the
       // view carries it and the trace does not. Appended as a row, every
       // redraw put another copy of the whole checklist in the trace.
-      view.plan = { entries: p.entries ?? [], markdown: p.markdown ?? null };
+      view.plan = { entries: p.entries ?? [], markdown: p.markdown ?? null, uri: p.uri ?? null };
       text = null;
       break;
     case "usage.updated": {

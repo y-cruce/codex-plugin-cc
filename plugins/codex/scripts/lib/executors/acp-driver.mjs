@@ -159,7 +159,7 @@ class AcpControlServer {
           result = { answered: true, requestId: p.requestId };
           break;
         case "executor/steer": throw Object.assign(new Error("This executor does not support mid-turn steering."), { code: "UNSUPPORTED_CAPABILITY" });
-        case "executor/queue-turn": result = this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
+        case "executor/queue-turn": result = await this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/interrupt-turn":
           result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000,
             replacementPrompt: p.replacementPrompt ?? null });
@@ -449,7 +449,7 @@ export class AcpExecutorJobPort {
     return { turnId, done: active.done };
   }
 
-  queuePrompt(request) {
+  async queuePrompt(request) {
     if (!this.activeTurn || this.activeTurn.turnId !== request.turnId) {
       throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
     }
@@ -465,6 +465,7 @@ export class AcpExecutorJobPort {
     const entry = { id: crypto.randomUUID(), jobId: round.job.id, input, status: "accepted", queued: true,
       recordId: this.recordId, round };
     this.queuedPrompts.push(entry);
+    await this.adapter.controlMessage(input, "queued", request.turnId);
     return { queued: true, messageId: entry.id, queuedJobId: entry.jobId };
   }
 
@@ -588,10 +589,12 @@ export class AcpExecutorJobPort {
     }
     let timer;
     try {
-      return await Promise.race([active.done, new Promise((_, reject) => {
+      const terminal = await Promise.race([active.done, new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error("Timed out waiting for ACP cancellation."), { code: "CANCEL_TIMEOUT" })), request.timeoutMs);
         timer.unref?.();
       })]);
+      if (!cancelling && request.replacementPrompt) await this.adapter.controlMessage(request.replacementPrompt, "interrupt", request.turnId);
+      return terminal;
     } finally { clearTimeout(timer); }
   }
 

@@ -188,6 +188,7 @@ export class AcpEventAdapter {
 
   event(type, payload, identity = {}, raw = null, method = "session/update") {
     const receivedAt = this.receiveTime().toISOString();
+    const agent = type === "control.message.updated" ? null : this.subagent;
     return createCanonicalEvent({
       job: this.job,
       executor: "acp",
@@ -197,9 +198,9 @@ export class AcpEventAdapter {
       // parent is waiting while the call it made runs, so everything between
       // that call's start and its end is the sub-agent's, and the pane folds
       // it into the agent's own line as it does for a Codex sub-agent.
-      ...(this.subagent ? { agent: this.subagent } : {}),
+      ...(agent ? { agent } : {}),
       identity: { sessionId: this.sessionId, turnId: this.turnId,
-        ...(this.subagent ? { agentId: this.subagent.id } : {}), ...identity },
+        ...(agent ? { agentId: agent.id } : {}), ...identity },
       occurredAt: receivedAt,
       receivedAt,
       timeBasis: "received",
@@ -210,6 +211,11 @@ export class AcpEventAdapter {
 
   emit(type, payload, identity = {}, raw = null, method = "session/update") {
     return this.record(this.event(type, payload, identity, raw, method));
+  }
+
+  controlMessage(prompt, mode, turnId) {
+    return this.emit("control.message.updated", { message: prompt.map((block) => block.text).join("\n"), mode, accepted: true },
+      { turnId }, null, mode === "interrupt" ? "executor/interrupt-turn" : "executor/queue-turn");
   }
 
   async flushMessage(role) {
@@ -298,7 +304,6 @@ export class AcpEventAdapter {
       if (created) await this.emit("command.started", { command: commandText(tool), commandKnown: typeof tool.rawInput?.command === "string",
         cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);
       if (terminal) await this.emit("command.completed", commandPayload(tool), identity, notification);
-      else if (!created) await this.emit("tool.progress", { message: tool.title, content: toolContent(tool) }, identity, notification);
       return;
     }
     // Whether this tool changes files is settled when it is created and kept

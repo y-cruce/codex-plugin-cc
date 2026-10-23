@@ -30,7 +30,7 @@ export type LiveView = {
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
-  plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null } | null
+  plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null; uri?: string | null } | null
   prompt?: string | null
   activeRoundId?: string | null
   latestRoundId?: string | null
@@ -81,9 +81,9 @@ export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'active
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
 // Nonzero exits keep a visible command row.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
-  || (event.type === 'command.completed' && (event.exitCode == null || event.exitCode === 0)))
+  || (event.type === 'command.completed' && event.status !== 'failed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
-const isToolRow = (event: TailRow) => event.type === 'tool.started' || event.type === 'tool.completed'
+const isToolRow = (event: TailRow) => event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed'
 const failedTool = (event: TailRow) => event.status === 'failed' || /^\S+ failed:/.test(event.text)
 const workKind = (event: TailRow) => {
   if (isQuietCommand(event)) return 'command'
@@ -178,7 +178,12 @@ function planLines(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, data: LiveVie
   const { Box, Text } = ui
   const entries = data.plan?.entries ?? []
   const done = entries.filter(step => step.status === 'completed').length
-  if (!entries.length || done === entries.length || isOver(data)) return []
+  if (isOver(data)) return []
+  if (!entries.length) {
+    const text = data.plan?.markdown || data.plan?.uri
+    return text ? [Text({ children: ' ' }), Text({ dimColor: true, wrap: 'wrap', children: `Plan\n${clean(text)}` })] : []
+  }
+  if (done === entries.length) return []
   const mark: Record<string, string> = { completed: '☑', in_progress: '▸' }
   return [Text({ children: ' ' }), Box({ flexDirection: 'column', width: columns, children: [
     Text({ dimColor: true, wrap: 'truncate-end', children: clip(`Plan · ${done}/${entries.length}${data.plan?.markdown ? `: ${data.plan.markdown}` : ''}`, columns) }),
@@ -379,14 +384,16 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   }
   const commandRow = (event: TailRow, indent = '') => {
     const completed = event.type === 'command.completed'
-    const color = completed ? event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
+    const failed = event.status === 'failed'
+    const color = completed ? failed ? 'red' : event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
     const suffix = completed && event.durationMs != null ? ` · ${duration(event.durationMs)}` : ''
     lines.push(Text({ wrap: 'truncate-middle', children: [
       Text({ color, children: `${indent}${completed ? '● ' : ''}` }),
       Text({ dimColor: true, children: '$ ' }),
       Text({ children: commandText(event.text) }),
       ...(completed && event.exitCode != null && event.exitCode !== 0
-        ? [Text({ color: 'red', children: ` · exit ${event.exitCode}` })] : []),
+        ? [Text({ color: 'red', children: ` · exit ${event.exitCode}` })]
+        : failed ? [Text({ color: 'red', children: ' · failed' })] : []),
       Text({ dimColor: true, children: suffix }),
     ] }))
   }
