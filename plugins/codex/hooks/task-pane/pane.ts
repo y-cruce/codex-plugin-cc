@@ -3,6 +3,8 @@ import { cellWidth, clip } from '../live-tool-row/format.ts'
 import { isOver, liveTree } from '../live-tool-row/view.ts'
 import type { Fold, LiveView } from '../live-tool-row/view.ts'
 
+export type PaneView = LiveView & { queuedCount?: number }
+
 const DOT: Record<string, string> = {
   queued: 'gray',
   running: 'cyan',
@@ -48,7 +50,7 @@ function taskLabel(position: number, data: LiveView, executor: string, room: num
 
 export function paneBody(
   ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Code' | 'Markdown' | 'Button'>,
-  threads: LiveView[],
+  threads: PaneView[],
   columns: number,
   rows: number,
   now: number,
@@ -75,7 +77,9 @@ export function paneBody(
     const recordId = data.recordId ?? data.jobId
     const isFocused = recordId === (focused.recordId ?? focused.jobId)
     const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
-    const state = `${data.status === 'waiting-for-answer' ? 'waiting' : data.status}${data.foreign ? ' · other' : ''}`
+    const status = data.status === 'waiting-for-answer' ? 'waiting' : data.status
+    const queued = data.queuedCount ? `${data.queuedCount} queued` : ''
+    const state = [status === 'queued' && queued ? queued : status, status !== 'queued' ? queued : '', data.foreign ? 'other' : ''].filter(Boolean).join(' · ')
     const label = taskLabel(index + 1, data, executor, Math.max(8, width - cellWidth(state) - 7))
     return Box({ flexDirection: 'row', children: [
       Text({ color: DOT[data.status] ?? 'gray', children: isFocused ? '▸ ' : '  ' }),

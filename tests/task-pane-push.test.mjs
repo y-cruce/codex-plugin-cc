@@ -205,6 +205,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     },
     goal: async (args, text) => { await hooks.get("command.run:")(engine, { command: "goal", args }, async () => ({ text })); await settle(writes); },
     turn: async (reason = "answer") => hooks.get("turn.complete:")(engine, { reason }, async () => ({ text: "" })),
+    focus: async (element) => hooks.get("ui.focus:")(engine, { requestId: "codex_tasks", element }, async (event) => event),
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
@@ -803,6 +804,62 @@ test("large ACP results and history cannot hold a completed row behind replay ba
     assert.ok(pane.refusedReads.length > 0, "exercise the host's actual byte limit");
     assert.match(await pane.render(), /completed/);
     assert.doesNotMatch(await pane.render(), /running/);
+  }
+});
+
+test("queued follow-up rounds share the running task row through handoff and pane controls", async () => {
+  for (const count of [1, 2]) {
+    const base = "/home/test/.claude/plugins/data/codex/state/main";
+    const queued = Array.from({ length: count }, (_, i) => ({ id: `follow-up-${i}`, recordId: "record-a",
+      executor: "acp", executorSessionId: "acp-session", sessionId: "session", workspaceRoot: "/work",
+      status: "queued", label: "Alpha task", createdAt: new Date().toISOString() }));
+    const pane = await paneHarness(new Map(), undefined, "session", {
+      preset: queued.map(job => [`${base}/jobs/${job.id}.json`, job]),
+      fsList: (directory, files) => directory.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
+        : directory.endsWith("/state") ? [{ kind: "dir", name: "main" }]
+        : directory.endsWith("/jobs") ? [...files.keys()].filter(file => file.startsWith(`${directory}/`))
+          .map(file => ({ kind: "file", name: file.split("/").at(-1), mtimeMs: Date.now(), isLink: false })) : [],
+    });
+    pane.live.executor = { kind: "acp", label: "Qoder" };
+    pane.live.rounds = [{ jobId: "job-a", label: "Alpha task" }];
+    pane.touch();
+    await pane.tick();
+    const row = async (status, pending) => {
+      const rendered = await pane.render();
+      const tabs = JSON.parse(rendered).children[1].children;
+      assert.deepEqual(tabs.map(tab => tab.children[1].key), ["codex_tab_record-a"]);
+      const state = status === "queued" ? `${pending} queued` : `${status}${pending ? ` · ${pending} queued` : ""}`;
+      assert.match(JSON.stringify(tabs), new RegExp(` · ${state}"`));
+      assert.match(rendered, /Qoder/);
+      if (!pending) assert.doesNotMatch(rendered, /queued/);
+    };
+    await row("running", count);
+    assert.equal((await pane.command("1")).text, "Codex tasks · Alpha task");
+    assert.equal((await pane.command("Alpha")).text, "Codex tasks · Alpha task");
+    assert.equal((await pane.focus("codex_tab_record-a")).element, "codex_tab_record-a");
+    assert.deepEqual((await pane.autocomplete("/codex:tasks Alpha")).suggestions.map(item => item.text), ["record-a"]);
+    for (const [i, job] of queued.entries()) {
+      const previous = pane.live.activeRoundId;
+      Object.assign(pane.files.get(`${base}/jobs/${previous}.json`), { status: "completed", completedAt: new Date().toISOString() });
+      Object.assign(pane.live, { status: "completed", activeRoundId: null, endedAt: new Date().toISOString() });
+      pane.listing[0].status = "queued";
+      pane.touch();
+      await pane.tick();
+      await row("queued", count - i);
+      job.status = "running";
+      pane.files.set(`${base}/job-index/${job.id}.json`, { schemaVersion: 1, jobId: job.id, roundId: job.id, recordId: "record-a" });
+      Object.assign(pane.live, { status: "running", activeRoundId: job.id, latestRoundId: job.id, endedAt: null });
+      pane.live.rounds.push({ jobId: job.id });
+      Object.assign(pane.listing[0], { jobId: job.id, status: "running" });
+      pane.touch();
+      await pane.tick();
+      await row("running", count - i - 1);
+      assert.deepEqual((await pane.autocomplete("/codex:message Alpha")).suggestions.map(item => item.text), [job.id]);
+    }
+    assert.match((await pane.command("forget 1")).text, /forgot Alpha task/);
+    await pane.tick();
+    assert.doesNotMatch(await pane.render(), /codex_tab_/);
+    assert.deepEqual(pane.stored.get("codex:tasks:session:forgotten"), ["record-a"]);
   }
 });
 

@@ -7,10 +7,11 @@ import { clip, elapsed } from '../live-tool-row/format.ts'
 import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
+import type { PaneView } from './pane.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null; endedAt?: string | null
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean; live?: boolean }
-type Job = { id: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
+type Job = { id: string; recordId?: string; sessionId?: string; workspaceRoot?: string; status: LiveView['status']; label?: string; title?: string
   startedAt?: string; createdAt?: string; completedAt?: string; request?: { prompt?: string } }
 // `floor` is the committed seq when this ledger rebuilt the job's cursor from
 // the start: an ending at or below it was already history then.
@@ -582,10 +583,12 @@ async function scanRoots($: EngineInterface, state: State) {
           .then(text => JSON.parse(text) as { schemaVersion: number; jobId: string; roundId: string; recordId: string }).catch(() => null)
         if (stale()) return
         const bound = index?.schemaVersion === 1 && index.jobId === job.id && index.roundId === job.id && typeof index.recordId === 'string'
-        const id = bound ? index.recordId : job.id
+        // Queued follow-ups already name their thread before a job-index binds.
+        const recordId = bound ? index.recordId : job.status === 'queued' ? job.recordId : null
+        const id = recordId ?? job.id
         const known = [...state.views].find(([, view]) => view.jobId === job.id || view.latestRoundId === job.id || view.activeRoundId === job.id)
-        const viewPath = `${directory}/${bound ? 'thread-records' : 'job-history'}/${id}/live-view.json`
-        if (bound || await $.fs.exists(viewPath)) {
+        const viewPath = `${directory}/${recordId ? 'thread-records' : 'job-history'}/${id}/live-view.json`
+        if (recordId || await $.fs.exists(viewPath)) {
           if (stale()) return
           if (id !== job.id) {
             state.views.delete(job.id)
@@ -1299,9 +1302,23 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
 
 // Every thread visible to this session, newest round first, dropping what ended
 // long ago.
-function visibleThreads(state: State): LiveView[] {
+function visibleThreads(state: State): PaneView[] {
+  const queued = new Map<string, Job[]>()
+  for (const [file, { job }] of state.jobFiles) {
+    if (job.status !== 'queued' || !job.recordId) continue
+    const path = `${file.slice(0, file.lastIndexOf('/jobs/'))}/thread-records/${job.recordId}/live-view.json`
+    queued.set(path, [...(queued.get(path) ?? []), job])
+  }
   return [...state.views.values()]
     .filter(view => !state.forgotten.has(view.recordId ?? view.jobId))
+    .map((view): PaneView => {
+      const path = state.paths.get(view.recordId ?? view.jobId) ?? ''
+      // A view can advance before the next job-file scan. Started rounds are
+      // no longer queued, even if their cached job still says they are.
+      const started = new Set([view.jobId, view.activeRoundId, view.latestRoundId, ...(view.rounds ?? []).map(round => round.jobId)])
+      const queuedCount = (queued.get(path) ?? []).filter(job => !started.has(job.id)).length
+      return queuedCount ? { ...view, queuedCount, ...(isOver(view) ? { status: 'queued', endedAt: null } : {}) } : view
+    })
     .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
     .sort((a, b) => {
       const latest = (view: LiveView) => view.rounds?.find(round => round.jobId === view.latestRoundId)?.startedAt ?? view.startedAt
@@ -1489,7 +1506,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (e.props.hasSurvey || state.shown || !threads.length) return next(e)
     const { Box, Button } = $.ui.resolve(e)
     const running = threads.filter(view => ['running', 'waiting-for-answer'].includes(view.status)).length
-    const queued = threads.filter(view => view.status === 'queued').length
+    const queued = threads.reduce((count, view) => count + (view.queuedCount || Number(view.status === 'queued')), 0)
     const activity = [running ? `${running} running` : '', queued ? `${queued} queued` : ''].filter(Boolean).join(' · ')
     return Box({ children: [Button({
       key: 'codex_tasks_open', plain: true,
