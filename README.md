@@ -130,6 +130,10 @@ Until the probe returns (up to fifteen seconds), the pane holds its fallback. Wi
 探针等待期间（最多 15 秒）面板暂缓 fallback。未确认 channel 或心跳过期时使用 Monitor；两条路径共用逐事件投递记录，切换时不会重新报告已有记录的事件。已接受或已结束的事件移出 outbox，保留 receipt 和 tombstone。producer 只直接推送一次，恢复由消费者负责。inactive session 在最后活动 30 天后清理，有活跃 consumer lease 的会话始终保留；清理在 channel 启动时及每小时执行，与当前会话的 30 秒恢复重扫分开。channel 只在交互模式下生效，`-p`、SDK 和未带参数启动的会话继续使用 Monitor。
 
 
+To reach a session's channel without a Codex job, for example from another session working in the same checkouts, run `node plugins/codex/scripts/notify-session.mjs <claude-session-id> <message-file> [--from <name>] [--wait-ms <ms>]`. It publishes a `director.notified` event into that session's outbox, labelled `message from <name>, not a Codex job`, and waits up to `--wait-ms` (default 15000) for the receipt. It prints `NOTIFIED` once the session accepted the note, or `QUEUED` with the outbox path when its channel is not running; the channel replays queued notes when it comes up. An installed copy finds its data directory from its own path; elsewhere set `CLAUDE_PLUGIN_DATA`.
+
+不经过 Codex 任务给某个会话的 channel 发消息（例如另一个会话在同一批仓库里工作时），运行 `node plugins/codex/scripts/notify-session.mjs <claude-session-id> <消息文件> [--from <名称>] [--wait-ms <毫秒>]`。脚本往该会话的 outbox 发布一条 `director.notified` 事件，标签为 `message from <名称>, not a Codex job`，最多等 `--wait-ms`（默认 15000）拿投递记录。会话接受后输出 `NOTIFIED`；channel 未运行时输出 `QUEUED` 和 outbox 路径，channel 启动后补投。安装后的副本按自身路径找到数据目录，其他位置运行时设置 `CLAUDE_PLUGIN_DATA`。
+
 ### Parallel worktrees
 
 The director prepares a separate worktree for each writer and passes it as the task's `CWD`. With code-director installed:
