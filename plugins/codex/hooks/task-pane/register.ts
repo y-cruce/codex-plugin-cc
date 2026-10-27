@@ -8,6 +8,8 @@ import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 import type { PaneView } from './pane.ts'
+import { shouldDropRelayEnd, startRemoteRelay } from '../remote-relay/register.ts'
+import type { RemoteRelay } from '../remote-relay/register.ts'
 
 type Thread = { id: string; recordId: string; jobId: string; label: string | null; status: string; startedAt: string | null; endedAt?: string | null
   activeRoundId: string | null; latestRoundId: string; sessionIds: string[]; viewPath: string; historyAvailable?: boolean; directorPush?: boolean; live?: boolean }
@@ -1326,7 +1328,7 @@ function visibleThreads(state: State): PaneView[] {
     })
 }
 
-export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel) {
+export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel, relay?: RemoteRelay) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
@@ -1344,6 +1346,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (director) await bindDirector($, director)
     const result = await next(e)
     await startDirectorTools($, tools)
+    if (e.isInteractive && relay) startRemoteRelay($, relay)
     if (e.isInteractive) $.clock.after(0, async () => {
       if (state.script && state.leaving) await bindSession($, state, await $.session.id())
       else {
@@ -1400,6 +1403,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
       if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
       if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
+      if (relay && shouldDropRelayEnd(e.text, relay.owned)) return { drop: 'Codex remote relay watch is re-armed by its mod' }
       if (!shouldDropMonitorExpiry(e.text, state.ownedMonitors)) return next(e)
       return { drop: 'Codex tasks monitor expiry needs no director action' }
     })()

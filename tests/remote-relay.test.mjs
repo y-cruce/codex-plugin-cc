@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { DirectorPublisher, cleanupDirectorEvent, durableJson, eventPaths, pendingEvents, wasDelivered,
   deliveryRoot } from "../plugins/codex/scripts/lib/director-delivery.mjs";
-import { bridgeOnce } from "../plugins/codex/scripts/remote-relay.mjs";
+import { bridgeOnce, watchOnce } from "../plugins/codex/scripts/remote-relay.mjs";
+import { relayCommand, shouldDropRelayEnd } from "../plugins/codex/hooks/remote-relay/register.ts";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/remote-relay.mjs", import.meta.url));
@@ -60,4 +61,36 @@ test("remote-relay serve refuses a session it was not started for", async (t) =>
   await startServe(t, makeTempDir(), port);
   const response = await fetch(`http://127.0.0.1:${port}/events?session=other&wait=0`);
   assert.equal(response.status, 403);
+});
+
+test("remote-relay watch prints each event once and settles it at the source", async (t) => {
+  isolateTestEnvironment(t);
+  const source = process.env.CLAUDE_PLUGIN_DATA;
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const repoState = path.join(source, "state", "repo-1");
+  const job = { id: "task-2", sessionId: SESSION, workspaceRoot: "/repo", label: "fix bugs" };
+  const eventId = new DirectorPublisher().publish(job, "director.notified", { notificationId: "n1", message: "line one\nline two" }, repoState);
+  await startServe(t, source, port);
+
+  const lines = [];
+  const printed = new Set();
+  await watchOnce({ sessionId: SESSION, url: `http://127.0.0.1:${port}`, printed, write: (line) => lines.push(line), wait: 0 });
+  await watchOnce({ sessionId: SESSION, url: `http://127.0.0.1:${port}`, printed, write: (line) => lines.push(line), wait: 0 });
+
+  assert.deepEqual(lines, ["job=task-2 [fix bugs] · director.notified: line one line two"]);
+  assert.ok(wasDelivered({ eventId, sessionId: SESSION, stateDir: repoState }));
+  assert.equal(pendingEvents(deliveryRoot(), SESSION).length, 0);
+});
+
+test("remote-relay mod drops only its own watch endings", () => {
+  const owned = new Set(["m1"]);
+  const note = (id, status, summary, event = "") =>
+    `<task-notification><task-id>${id}</task-id><status>${status}</status><summary>${summary}</summary>${event}</task-notification>`;
+  assert.equal(shouldDropRelayEnd(note("m1", "completed", 'Monitor "x" stream ended'), owned), true);
+  assert.equal(shouldDropRelayEnd(note("m1", "completed", "x", "<event>[Monitor expired after 30m]</event>"), owned), true);
+  assert.equal(shouldDropRelayEnd(note("m1", "completed", 'Monitor "x" stream ended', "<event>job=t · job.completed: done</event>"), owned), false);
+  assert.equal(shouldDropRelayEnd(note("m1", "failed", 'Monitor "x" stream ended'), owned), false);
+  assert.equal(shouldDropRelayEnd(note("m2", "completed", 'Monitor "x" stream ended'), owned), false);
+  assert.match(relayCommand("/p/codex/1.0.0", "s-1", "http://127.0.0.1:13005"),
+    /^node '\/p\/codex\/1\.0\.0\/scripts\/remote-relay\.mjs' watch --session 's-1' --url 'http:\/\/127\.0\.0\.1:13005' --for-ms 1740000$/);
 });

@@ -3,6 +3,7 @@ import { register as registerLiveToolRow } from './live-tool-row/register.ts'
 import { directorChannel, registerDirectorChannel } from './director-channel/register.ts'
 import { registerTaskPane } from './task-pane/register.ts'
 import { directorTools, registerDirectorTools } from './director-tools/register.ts'
+import { remoteRelay } from './remote-relay/register.ts'
 
 export function register(on: On, options: PluginOptions = {}) {
   const director = directorChannel()
@@ -14,6 +15,6 @@ export function register(on: On, options: PluginOptions = {}) {
   // A job started through the director's dispatch tool reaches the pane at its
   // next poll, as one started from Bash does.
   const tools = directorTools()
-  registerTaskPane(on, followed, typeof options.paneBackground === 'string' ? options.paneBackground : undefined, true, tools, director)
+  registerTaskPane(on, followed, typeof options.paneBackground === 'string' ? options.paneBackground : undefined, true, tools, director, remoteRelay())
   registerDirectorTools(on, tools)
 }

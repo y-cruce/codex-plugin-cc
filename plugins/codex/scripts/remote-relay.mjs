@@ -5,12 +5,15 @@
 //
 //   serve  (machine running Codex)  node remote-relay.mjs serve --session <id> [--port 13005]
 //   bridge (machine running Claude) node remote-relay.mjs bridge --session <id> [--url http://127.0.0.1:13005]
+//   watch  (machine running Claude) node remote-relay.mjs watch --session <id> [--url ...] [--for-ms <ms>]
 //
 // Jobs dispatched for the remote session publish into this machine's outbox for that session,
 // where no consumer reads them. `serve` hands those pending events out by long poll; `bridge`
 // copies each into the remote session's own outbox, with stateDir rewritten to the remote data
 // directory, so that session's director channel delivers it and its prompt hook writes the
 // receipt. Once the remote receipt exists the bridge acks, and `serve` writes the local receipt.
+// `watch` is for a session whose channel is unavailable: it prints one line per event, the line
+// a Monitor delivers, then acks. The plugin's remote-relay mod arms it as a Monitor.
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -21,7 +24,8 @@ import { pluginDataDir } from "./lib/plugin-data.mjs";
 
 const USAGE = [
   "usage: remote-relay.mjs serve --session <claude-session-id> [--session <id>...] [--port 13005]",
-  "       remote-relay.mjs bridge --session <claude-session-id> [--url http://127.0.0.1:13005]"
+  "       remote-relay.mjs bridge --session <claude-session-id> [--url http://127.0.0.1:13005]",
+  "       remote-relay.mjs watch --session <claude-session-id> [--url http://127.0.0.1:13005] [--for-ms <ms>]"
 ].join("\n");
 const POLL_MS = 25000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,17 +33,19 @@ const log = (message) => console.log(`${new Date().toISOString()} ${message}`);
 
 function parse(argv) {
   const [mode, ...rest] = argv;
-  const options = { mode, sessions: [], port: 13005, url: "http://127.0.0.1:13005" };
+  const options = { mode, sessions: [], port: 13005, url: "http://127.0.0.1:13005", forMs: Infinity };
   for (let i = 0; i < rest.length; i += 2) {
     const [name, value] = [rest[i], rest[i + 1]];
     if (value === undefined) throw new Error(USAGE);
     if (name === "--session") options.sessions.push(value);
     else if (name === "--port") options.port = Number(value);
     else if (name === "--url") options.url = value.replace(/\/+$/, "");
+    else if (name === "--for-ms") options.forMs = Number(value);
     else throw new Error(USAGE);
   }
-  if (!["serve", "bridge"].includes(mode) || !options.sessions.length
-    || (mode === "bridge" && options.sessions.length !== 1) || !Number.isInteger(options.port)) throw new Error(USAGE);
+  if (!["serve", "bridge", "watch"].includes(mode) || !options.sessions.length
+    || (mode !== "serve" && options.sessions.length !== 1) || !Number.isInteger(options.port)
+    || !(options.forMs > 0)) throw new Error(USAGE);
   return options;
 }
 
@@ -139,9 +145,39 @@ async function bridge({ sessions: [sessionId], url }) {
   }
 }
 
+// Prints each new event's text once, then acks it; an ack that fails is retried next round.
+export async function watchOnce({ sessionId, url, printed, write = (line) => process.stdout.write(`${line}\n`), wait = POLL_MS }) {
+  const { events } = await call(`${url}/events?session=${encodeURIComponent(sessionId)}&wait=${wait}`);
+  for (const event of events) {
+    if (printed.has(event.eventId)) continue;
+    write(String(event.text ?? "").replace(/\s*\n\s*/g, " "));
+    printed.add(event.eventId);
+  }
+  if (events.length) {
+    await call(`${url}/ack?session=${encodeURIComponent(sessionId)}`, { method: "POST", body: JSON.stringify({ eventIds: events.map((event) => event.eventId) }) });
+  }
+}
+
+async function watch({ sessions: [sessionId], url, forMs }) {
+  const printed = new Set();
+  const deadline = Date.now() + forMs;
+  let failing = false;
+  while (Date.now() < deadline) {
+    try {
+      await watchOnce({ sessionId, url, printed, wait: Math.min(POLL_MS, Math.max(1000, deadline - Date.now())) });
+      failing = false;
+    } catch (error) {
+      if (!failing) console.error(`relay unavailable: ${error.message}`);
+      failing = true;
+      await sleep(5000);
+    }
+  }
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   let options;
   try { options = parse(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exit(2); }
   if (options.mode === "serve") serve(options);
+  else if (options.mode === "watch") await watch(options);
   else await bridge(options);
 }
