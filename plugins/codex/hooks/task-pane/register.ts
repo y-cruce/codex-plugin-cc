@@ -1403,7 +1403,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       const taskId = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]
       if (taskId && state.retiredMonitors.has(taskId)) return { drop: 'Codex monitor belongs to the previous session' }
       if (shouldDropMonitorEnd(e.text, state.ownedMonitors)) return { drop: 'Codex tasks monitor idle exit is re-armed by the pane' }
-      if (relay && shouldDropRelayEnd(e.text, relay.owned)) return { drop: 'Codex remote relay watch is re-armed by its mod' }
+      if (relay && shouldDropRelayEnd(e.text, relay.owned, relay.retired)) return { drop: 'Codex remote relay watch is re-armed by its mod' }
       if (!shouldDropMonitorExpiry(e.text, state.ownedMonitors)) return next(e)
       return { drop: 'Codex tasks monitor expiry needs no director action' }
     })()

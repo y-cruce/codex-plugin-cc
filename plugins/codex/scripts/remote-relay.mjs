@@ -3,7 +3,8 @@
 // remote pod that drives this machine's Codex through a forwarded port. Opt-in and standalone:
 // nothing loads it, so local sessions keep their own channel and Monitor routes unchanged.
 //
-//   serve  (machine running Codex)  node remote-relay.mjs serve --session <id> [--port 13005]
+//   serve  (machine running Codex)  node remote-relay.mjs serve --session <id|*> [--port 13005]
+//          `*` serves any session: a remote session's id changes on /clear, and each watch asks only for its own.
 //   bridge (machine running Claude) node remote-relay.mjs bridge --session <id> [--url http://127.0.0.1:13005]
 //   watch  (machine running Claude) node remote-relay.mjs watch --session <id> [--url ...] [--for-ms <ms>]
 //
@@ -23,7 +24,7 @@ import { cleanupDirectorEvent, deliveryRoot, durableJson, eventPaths, isDirector
 import { pluginDataDir } from "./lib/plugin-data.mjs";
 
 const USAGE = [
-  "usage: remote-relay.mjs serve --session <claude-session-id> [--session <id>...] [--port 13005]",
+  "usage: remote-relay.mjs serve --session <claude-session-id|*> [--session <id>...] [--port 13005]",
   "       remote-relay.mjs bridge --session <claude-session-id> [--url http://127.0.0.1:13005]",
   "       remote-relay.mjs watch --session <claude-session-id> [--url http://127.0.0.1:13005] [--for-ms <ms>]"
 ].join("\n");
@@ -69,7 +70,7 @@ export function serve({ sessions, port }) {
     try {
       const url = new URL(request.url, "http://relay");
       const sessionId = url.searchParams.get("session");
-      if (!allowed.has(sessionId)) return reply(403, { error: "session not served" });
+      if (!sessionId || !(allowed.has("*") || allowed.has(sessionId))) return reply(403, { error: "session not served" });
       if (request.method === "GET" && url.pathname === "/events") {
         const deadline = Date.now() + Math.min(Number(url.searchParams.get("wait") ?? POLL_MS), POLL_MS);
         let events = pending(sessionId);

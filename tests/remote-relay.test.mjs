@@ -14,8 +14,8 @@ import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/remote-relay.mjs", import.meta.url));
 const SESSION = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-async function startServe(t, dataDir, port) {
-  const child = spawn(process.execPath, [SCRIPT, "serve", "--session", SESSION, "--port", String(port)],
+async function startServe(t, dataDir, port, session = SESSION) {
+  const child = spawn(process.execPath, [SCRIPT, "serve", "--session", session, "--port", String(port)],
     { env: { ...process.env, CLAUDE_PLUGIN_DATA: dataDir }, stdio: ["ignore", "pipe", "inherit"] });
   t.after(() => child.kill());
   await new Promise((resolve) => child.stdout.once("data", resolve));
@@ -93,4 +93,20 @@ test("remote-relay mod drops only its own watch endings", () => {
   assert.equal(shouldDropRelayEnd(note("m2", "completed", 'Monitor "x" stream ended'), owned), false);
   assert.match(relayCommand("/p/codex/1.0.0", "s-1", "http://127.0.0.1:13005"),
     /^node '\/p\/codex\/1\.0\.0\/scripts\/remote-relay\.mjs' watch --session 's-1' --url 'http:\/\/127\.0\.0\.1:13005' --for-ms 1740000$/);
+});
+
+test("remote-relay serve with * serves any named session", async (t) => {
+  isolateTestEnvironment(t);
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  await startServe(t, makeTempDir(), port, "*");
+  assert.equal((await fetch(`http://127.0.0.1:${port}/events?session=other&wait=0`)).status, 200);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/events?wait=0`)).status, 403);
+});
+
+test("remote-relay mod drops endings of watches retired by a session change", () => {
+  const note = (id, status) => `<task-notification><task-id>${id}</task-id><status>${status}</status><summary>Monitor "x" stream ended</summary></task-notification>`;
+  const owned = new Map([["live", "s-2"]]);
+  const retired = new Set(["old"]);
+  assert.equal(shouldDropRelayEnd(note("old", "killed"), owned, retired), true);
+  assert.equal(shouldDropRelayEnd(note("live", "killed"), owned, retired), false);
 });
