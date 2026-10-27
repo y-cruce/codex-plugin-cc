@@ -3,23 +3,12 @@
 // The note goes through the same outbox and receipts as job events: a live channel delivers it
 // at once; otherwise it waits in the outbox until that session's channel replays it.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { DirectorPublisher, eventPaths, wasDelivered } from "./lib/director-delivery.mjs";
+import { pluginDataDir } from "./lib/plugin-data.mjs";
 
 const USAGE = "usage: notify-session.mjs <claude-session-id> <message-file> [--from <name>] [--wait-ms <ms>]";
-
-// An installed copy lives at ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/scripts;
-// its data directory is ~/.claude/plugins/data/<plugin>-<marketplace>.
-function pluginDataDir() {
-  if (process.env.CLAUDE_PLUGIN_DATA) return process.env.CLAUDE_PLUGIN_DATA;
-  const scripts = path.dirname(fileURLToPath(import.meta.url));
-  const [version, plugin, marketplace, cache] = [1, 2, 3, 4].map((n) => path.resolve(scripts, ...Array(n).fill("..")));
-  if (path.basename(cache) !== "cache" || !version) return null;
-  return path.join(path.dirname(cache), "data", `${path.basename(plugin)}-${path.basename(marketplace)}`);
-}
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -41,7 +30,7 @@ if (!message) {
   console.error("NOTIFY_FAILED empty message");
   process.exit(2);
 }
-const dataDir = pluginDataDir();
+const dataDir = pluginDataDir(import.meta.url);
 if (!dataDir) {
   console.error("NOTIFY_FAILED set CLAUDE_PLUGIN_DATA to this plugin's data directory");
   process.exit(2);
