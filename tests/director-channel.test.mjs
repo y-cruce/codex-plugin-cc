@@ -459,9 +459,9 @@ test("binding the session `claude -r` resumes probes again after the startup rou
   t.after(() => channel.close());
   channel.initialized = true;
   channel.startProbing();
-  await waitFor(() => probes.length === 30 && !fs.existsSync(channel.files.probing), "the startup round to run out");
+  await waitFor(() => probes.length === 6 && !fs.existsSync(channel.files.probing), "the startup round to run out");
   await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
-  await waitFor(() => probes.length > 30, "a probe for the resumed session");
+  await waitFor(() => probes.length > 6, "a probe for the resumed session");
 });
 
 test("the MCP stdio server probes, restarts over a stale lease and replays accepted items before ACK", async (t) => {

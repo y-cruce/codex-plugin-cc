@@ -130,25 +130,27 @@ export class DirectorChannel {
     else if (this.initialized) this.startProbing();
   }
 
-  // Probes until a prompt.submit confirms one, 30 at most. A bind to a new
-  // session starts over: `claude -r` binds the session it resumes only after
-  // its picker, by when the first round may have run out unseen.
+  // Probes until a prompt.submit confirms one, 6 at most, each wait twice the
+  // last (about a minute in all). The host loses a probe sent before it
+  // registers the channel, but queues every later one while a picker or dialog
+  // is open, then shows each as a dropped prompt. A bind to a new session
+  // starts over: `claude -r` binds the session it resumes only after its
+  // picker, by when the first round may have run out unseen.
   startProbing() {
-    clearInterval(this.probing);
+    clearTimeout(this.probing);
     durableJson(this.files.probing, { at: Date.now(), until: Date.now() + HOLD_MS, nonce: this.nonce });
     let probes = 0;
     const probe = () => {
-      if (this.confirmed || ++probes > 30) {
-        clearInterval(this.probing);
+      if (this.confirmed || ++probes > 6) {
         fs.rmSync(this.files.probing, { force: true });
         return;
       }
       this.send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: {
         content: `${PROBE} ${this.nonce}: checking that this channel reaches the session. No action needed.`, meta: { event: "probe" },
       } }).catch(() => {});
+      this.probing = setTimeout(probe, this.probeMs * 2 ** (probes - 1));
     };
     probe();
-    this.probing = setInterval(probe, this.probeMs);
   }
 
   saveRoute() {
@@ -234,7 +236,7 @@ export class DirectorChannel {
     clearInterval(this.heartbeat);
     clearInterval(this.safety);
     clearInterval(this.retention);
-    clearInterval(this.probing);
+    clearTimeout(this.probing);
     this.watcher?.close();
     clearTimeout(this.retry);
     for (const socket of this.sockets) socket.destroy();
