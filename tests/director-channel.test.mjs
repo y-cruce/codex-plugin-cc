@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { DirectorChannel, channelMessage, paths } from "../plugins/codex/scripts/director-channel.mjs";
-import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending, durableJson, touchDirectorSession, sweepDirectorSessions, sessionDirectory, INACTIVE_SESSION_MS } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { channelRequest, DirectorPublisher, deliveryRoot, directorEvent, deliveryTag, eventPaths, pendingEvents, readJson, wasDelivered, acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, isDirectorEventPending, durableJson, touchDirectorSession, sweepDirectorSessions, sessionDirectory, INACTIVE_SESSION_MS } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { LiveTurnControl } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 import { streamJobEvents } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { admitDirector, directorIngress } from "../plugins/codex/hooks/director-channel/register.ts";
@@ -55,6 +55,59 @@ test("channel messages keep job, event, stable id and owning session", () => {
   assert.deepEqual(channelMessage({ jobId: "task", type: "job.completed", text: "done", eventId: "id", sessionId: "session" }),
     { content: "done", meta: { event: "job_completed", job: "task", id: "id", session: "session" } });
   assert.equal(channelMessage({ text: " " }), null);
+});
+
+test("ingress routes director agents separately, accepts successful sends and falls back on refusal", async (t) => {
+  const h = fixture(t);
+  for (const [route, delivered] of [["channel", true], ["channel", false], ["monitor", true]]) {
+    const jobs = ["a", "b"].map(id => ({ ...h.job, id: `${route}-${delivered}-${id}`, directorAgentId: `agent-${id}` }));
+    if (route === "monitor") jobs.push({ ...h.job, id: "main-job" });
+    const events = jobs.map((job, index) => directorEvent(job, index ? "director.notified" : "question.opened", index
+      ? { id: job.id, message: `note for ${job.id}` }
+      : { requestId: "request-1", questions: [{ id: "source", question: "Which source?", options: [{ label: "Local", description: "Use disk" }] },
+        { id: "mode", question: "Which mode?", options: [{ label: "Read", description: "Only read" }] }] }, h.stateDir));
+    for (const event of events) durableJson(eventPaths(event).item, event);
+    const sent = [];
+    const engine = { plugin: { root: "/plugin" }, session: { id: async () => h.job.sessionId,
+      send: async input => { sent.push(input); return delivered ? { isDelivered: true } : { isDelivered: false, reason: "agent was stopped" }; } },
+      process: { run: async args => ({ exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" }) } };
+    const input = route === "channel"
+      ? { origin: { kind: "channel", server: "plugin:codex:director" }, text: events.map(event => {
+        const meta = channelMessage(event).meta;
+        return `<channel ${Object.entries(meta).map(([k, v]) => `${k}="${v}"`).join(" ")}>${event.text}</channel>`;
+      }).join("\n") }
+      : { origin: { kind: "task-notification" }, text: `<event>${events.map(event => `${event.text} ${deliveryTag(event)}`).join("\n")}</event>` };
+    // Channel frames carry one event; a Monitor can batch several callers.
+    let main = "";
+    const submit = async e => {
+      if (!delivered) for (const event of events.filter(event => e.text.includes(event.jobId))) {
+        assert.equal(wasDelivered(event), false, "a refused agent send has no receipt before main accepts it");
+      }
+      main += e.text;
+      return {};
+    };
+    if (route === "channel") {
+      for (const event of events) {
+        const meta = channelMessage(event).meta;
+        await through({})(engine, { ...input, text: `<channel ${Object.entries(meta).map(([k, v]) => `${k}="${v}"`).join(" ")}>${event.text}</channel>` }, submit);
+      }
+    } else await through({})(engine, input, submit);
+    assert.deepEqual(sent.map(item => item.to), [{ agentId: "agent-a" }, { agentId: "agent-b" }]);
+    for (const key of [events[0].jobId, "/repo", events[0].eventId, "request-1", "source", "mode", "Which source?", "Local", "Use disk", "Which mode?", "Read", "Only read"]) {
+      assert.ok(sent[0].text.includes(key), key);
+    }
+    for (const event of events.slice(0, 2)) {
+      assert.equal(wasDelivered(event), true);
+      assert.equal(readJson(eventPaths(event).receipt).route, delivered ? `agent:${event.directorAgentId}` : "channel");
+      if (delivered) assert.ok(!main.includes(event.jobId), "agent event removed from main");
+      else {
+        assert.ok(main.includes(event.jobId));
+        assert.ok(main.includes(event.directorAgentId));
+        assert.match(main, /agent was stopped/);
+      }
+    }
+    if (route === "monitor") assert.match(main, /main-job/);
+  }
 });
 
 test("unconfirmed items survive broker/channel restart and replay stable ids across send/ACK failures", async (t) => {

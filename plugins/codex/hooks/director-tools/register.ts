@@ -161,7 +161,7 @@ async function discard($: EngineInterface, path: string) {
   await $.process.run(['rm', '-f', path], { timeoutMs: 5000 }).catch(() => {})
 }
 
-async function run($: EngineInterface, context: Context, argv: string[], cwd: string, timeoutMs: number, stdin?: string): Promise<Answer> {
+async function run($: EngineInterface, context: Context, argv: string[], cwd: string, timeoutMs: number, stdin?: string, directorAgentId?: string): Promise<Answer> {
   if (!cwd.startsWith('/')) return { deny: 'cwd must be an absolute path' }
   if (!(await $.fs.exists(cwd))) return { deny: `cwd does not exist: ${cwd}` }
   let ran
@@ -173,6 +173,7 @@ async function run($: EngineInterface, context: Context, argv: string[], cwd: st
       // in the plugin cache.
       env: {
         CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
+        CODEX_COMPANION_DIRECTOR_AGENT_ID: directorAgentId ?? '',
         ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
       },
     })
@@ -196,7 +197,7 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'dispatch': {
       let body: string
       try { body = dispatchInput(input) } catch (error) { return { deny: (error as Error).message } }
-      return run($, context, ['bash', context.worker, 'dispatch'], cwd, 120_000, body)
+      return run($, context, ['bash', context.worker, 'dispatch'], cwd, 120_000, body, text(input.agentId))
     }
     case 'message': {
       const flags = DELIVERY[text(input.delivery)]

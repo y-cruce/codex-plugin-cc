@@ -55,7 +55,8 @@ export function directorEvent(job, type, payload = {}, stateDir = undefined) {
   else detail = job.errorMessage ?? job.result?.error?.message
     ?? job.result?.terminal?.finalMessages?.findLast((message) => message.role === "assistant")?.text
     ?? job.result?.rawOutput ?? "";
-  return { eventId, sessionId: job.sessionId, stateDir, jobId: job.id, roundId: job.roundId ?? job.id, label: job.label ?? null, reportFile: job.reportFile ?? null, type,
+  return { eventId, sessionId: job.sessionId, cwd: job.request?.cwd ?? job.workspaceRoot,
+    ...(job.directorAgentId ? { directorAgentId: job.directorAgentId } : {}), stateDir, jobId: job.id, roundId: job.roundId ?? job.id, label: job.label ?? null, reportFile: job.reportFile ?? null, type,
     payload: terminal ? { status: job.status, errorMessage: job.errorMessage ?? job.result?.error?.message ?? null, ...payload } : payload,
     threadId: payload.threadId ?? job.executorSessionId ?? job.threadId ?? null, turnId: payload.turnId ?? job.turnId ?? null,
     text: `job=${job.id}${job.label ? ` [${job.label}]` : ""} · ${type}${detail ? `: ${detail}` : ""}` };

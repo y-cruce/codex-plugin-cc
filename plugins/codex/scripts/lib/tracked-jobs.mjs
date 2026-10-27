@@ -74,7 +74,8 @@ export function createJobRecord(base, options = {}) {
   return {
     ...base,
     createdAt: nowIso(),
-    ...(sessionId ? { sessionId } : {})
+    ...(sessionId ? { sessionId } : {}),
+    ...(env.CODEX_COMPANION_DIRECTOR_AGENT_ID ? { directorAgentId: env.CODEX_COMPANION_DIRECTOR_AGENT_ID } : {})
   };
 }
 

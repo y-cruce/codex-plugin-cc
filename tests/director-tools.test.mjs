@@ -11,6 +11,8 @@ import { threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.m
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 import { directorTools, dispatchInput, pluginDataDir, registerDirectorTools, startDirectorTools } from "../plugins/codex/hooks/director-tools/register.ts";
 
+import { createJobRecord } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+
 const WORKER = "/home/test/.claude/skills/code-director/scripts/dispatch.sh";
 const COMPANION = "/plugin/scripts/codex-companion.mjs";
 
@@ -69,18 +71,24 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   assert.deepEqual(await missing.call("dispatch", {}), { deny: "the code-director skill is not installed, so there is no dispatch.sh to run" });
 });
 
-test("dispatch runs dispatch.sh with the brief on stdin and the plugin's own companion", async () => {
-  const h = harness();
-  await startDirectorTools(h.$, h.tools);
-  const answer = await h.call("dispatch", { mode: "investigate", name: "locate x", cwd: "/repo", brief: "Find it." });
-  assert.deepEqual(answer, { result: "STATUS: started\nJOB: task-a-b" });
-  assert.equal(h.runs.length, 1);
-  const [{ argv, init }] = h.runs;
-  assert.deepEqual(argv, ["bash", WORKER, "dispatch"]);
-  assert.equal(init.cwd, "/repo");
-  assert.equal(init.stdin, "MODE: investigate\nNAME: locate x\nCWD: /repo\n\nFind it.\n");
-  assert.deepEqual(init.env, { CODEX_COMPANION: COMPANION, CODEX_COMPANION_SESSION_ID: "session-1" });
-  assert.equal(h.tools.pending, true, "the pane is told to rescan");
+test("dispatch passes its caller only in the process environment and records the director agent", async () => {
+  for (const agentId of [undefined, "agent-1"]) {
+    const h = harness();
+    await startDirectorTools(h.$, h.tools);
+    const answer = await h.call("dispatch", { mode: "investigate", name: "locate x", cwd: "/repo", brief: "Find it.", agentId });
+    assert.deepEqual(answer, { result: "STATUS: started\nJOB: task-a-b" });
+    assert.equal(h.runs.length, 1);
+    const [{ argv, init }] = h.runs;
+    assert.deepEqual(argv, ["bash", WORKER, "dispatch"]);
+    assert.equal(init.cwd, "/repo");
+    assert.equal(init.stdin, "MODE: investigate\nNAME: locate x\nCWD: /repo\n\nFind it.\n");
+    assert.deepEqual(init.env, { CODEX_COMPANION: COMPANION, CODEX_COMPANION_SESSION_ID: "session-1",
+      CODEX_COMPANION_DIRECTOR_AGENT_ID: agentId ?? "" });
+    const job = createJobRecord({ id: "job", workspaceRoot: "/repo" }, { env: init.env });
+    assert.equal(job.sessionId, "session-1");
+    assert.equal(job.directorAgentId, agentId);
+    assert.equal(h.tools.pending, true, "the pane is told to rescan");
+  }
 });
 
 test("a failed dispatch reaches the model as an error and does not ask the pane to rescan", async () => {
@@ -163,6 +171,7 @@ test("an installed plugin's companion runs with the plugin's data folder, where 
 
 test("tasks lists this session across stores, filters names and repositories, and collapses queued rounds", async (t) => {
   isolateTestEnvironment(t);
+  t.mock.method(Date, "now", () => Date.parse("2026-10-23T12:00:00Z"));
   const home = fs.realpathSync(makeTempDir());
   const tmpDir = path.join(home, "tmp");
   const configDir = path.join(home, ".claude");

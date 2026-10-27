@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
-import { admitDirector, bindDirector, directorIngress } from '../director-channel/register.ts'
-import type { DirectorChannel } from '../director-channel/register.ts'
+import { admitDirector, bindDirector, directorIngress, forwardDirectorEvents } from '../director-channel/register.ts'
+import type { DirectorChannel, DirectorEvent } from '../director-channel/register.ts'
 import { directorTools, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
@@ -1021,7 +1021,8 @@ async function pollOnce($: EngineInterface, state: State) {
         if (status && receipt.terminal !== status) {
           if (!direct && !first && !foreign && !lines.some(line => line.jobId === job.id && line.text.includes(`job.${status}`))) {
             const directory = /^(.*)\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(state.paths.get(thread.id) ?? '')?.[1]
-            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, fallback: thread.directorPush !== true, delivery: directory ? { job: { id: job.id, sessionId: state.sessionId }, type: `job.${status}`, stateDir: directory } : null })
+            const stored = directory ? await $.fs.read(`${directory}/jobs/${job.id}.json`).then(JSON.parse).catch(() => null) : null
+            lines.push({ jobId: job.id, cwd, text: `${job.label ?? job.id} · job.${status}: ${clip(view?.lastMessage?.text ?? '', 300)}`, type: `job.${status}`, fallback: thread.directorPush !== true, delivery: directory ? { job: stored ?? { id: job.id, sessionId: state.sessionId }, type: `job.${status}`, stateDir: directory } : null })
           }
           receipt.terminal = status
         }
@@ -1099,14 +1100,21 @@ async function pollOnce($: EngineInterface, state: State) {
       let settled = false
       if (described.length) {
         const { items } = await directorIngress($, 'reserve', { items: described.map(line => line.delivery), route: 'pane' }) as
-          { items: { event: unknown; reserved: boolean; pending: boolean }[] }
+          { items: { event: DirectorEvent; reserved: boolean; pending: boolean }[] }
         const reserved = new Set(described.filter((_, i) => items[i]?.reserved))
         settled = items.every(item => !item.pending)
         if (reserved.size) {
           // Own submits bypass this plugin's prompt hooks; the returned drop is
           // the host's ingress decision for this submit.
-          sent = await submit(batch.filter(line => !line.delivery || reserved.has(line)))
-          const events = items.filter(item => item.reserved).map(item => item.event)
+          const events = await forwardDirectorEvents($, items.filter(item => item.reserved).map(item => item.event))
+          const remaining = new Map(events.map(event => [event.eventId, event]))
+          const selected = batch.flatMap(line => {
+            if (!line.delivery) return [line]
+            if (!reserved.has(line)) return []
+            const event = remaining.get(items[described.indexOf(line)]!.event.eventId)
+            return event ? [{ ...line, text: event.directorAgentId ? event.text : line.text }] : []
+          })
+          sent = !selected.length || await submit(selected)
           await directorIngress($, sent ? 'accept' : 'release', { events, route: 'pane' })
         }
       } else sent = await submit(batch)

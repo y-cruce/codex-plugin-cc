@@ -48,6 +48,29 @@ export async function bindDirector($: EngineInterface, director: DirectorChannel
   catch (error) { $.ui.log(String(error), { to: 'debug' }) }
 }
 
+export type DirectorEvent = { eventId: string; jobId: string; cwd?: string; text: string; directorAgentId?: string }
+
+// The channel process has no engine API. Its ingress and the pane share this
+// delivery step; acceptance means queued at the agent, just as on the main loop.
+export async function forwardDirectorEvents($: EngineInterface, events: DirectorEvent[]): Promise<DirectorEvent[]> {
+  const remaining: DirectorEvent[] = []
+  for (const event of events) {
+    if (!event.directorAgentId) { remaining.push(event); continue }
+    const text = `Codex event job=${event.jobId} cwd=${event.cwd ?? 'unknown'} eventId=${event.eventId}\n${event.text}`
+    let failure: string | undefined
+    try {
+      const sent = await $.session.send({ to: { agentId: event.directorAgentId }, text })
+      if (!sent.isDelivered) failure = sent.reason
+    } catch (error) { failure = error instanceof Error ? error.message : String(error) }
+    if (failure === undefined) {
+      await directorIngress($, 'accept', { events: [event], route: `agent:${event.directorAgentId}` })
+      continue
+    }
+    remaining.push({ ...event, text: `${text}\nDelivery to original director agent ${event.directorAgentId} failed: ${failure}` })
+  }
+  return remaining
+}
+
 export async function admitDirector($: EngineInterface, director: DirectorChannel, e: Submit): Promise<Admission> {
   const channel = e.origin.kind === 'channel' && e.origin.server === SERVER
   if (!channel && e.origin.kind !== 'task-notification') return { event: e }
@@ -64,21 +87,32 @@ export async function admitDirector($: EngineInterface, director: DirectorChanne
   const reference = /\bdelivery="([A-Za-z0-9_-]+)"/.exec(attributes)?.[1]
   const refs = channel ? reference ? [reference] : [] : deliveryRefs(e.text)
   if (!refs.length) return { event: e }
-  const { known, pending } = await directorIngress($, 'check', { refs, sessionId }) as { known: number; pending: { ref: string; event: unknown }[] }
+  const { known, pending } = await directorIngress($, 'check', { refs, sessionId }) as { known: number; pending: { ref: string; event: DirectorEvent }[] }
   if (!known) return { drop: 'Codex event is unavailable or belongs to another session' }
   if (!pending.length) return { drop: 'Codex event already accepted or question closed' }
-  const kept = new Set(pending.map(item => item.ref))
+  const events = await forwardDirectorEvents($, pending.map(item => item.event))
+  if (!events.length) return { drop: 'Codex event sent to its director agent' }
+  const forwarded = events.length !== pending.length
+  const failures = events.filter(event => event.directorAgentId)
+  const ids = new Set(events.map(event => event.eventId))
+  const kept = new Set(pending.filter(item => ids.has(item.event.eventId)).map(item => item.ref))
   const filter = (body: string) => body.split('\n').filter(line => {
     const items = deliveryRefs(line)
     return !items.length || items.some(ref => kept.has(ref))
   }).join('\n')
-  const text = channel ? e.text.replace(/ delivery="[^"]*"/, '') : e.text.includes('<event>')
+  let text = channel ? e.text.replace(/ delivery="[^"]*"/, '') : e.text.includes('<event>')
     ? e.text.replace(/<event>([\s\S]*?)<\/event>/g, (_match, body) => `<event>${filter(body)}</event>`)
     : filter(e.text)
+  if (!channel && (forwarded || failures.length)) {
+    const body = events.map(event => event.text).join('\n')
+    text = e.text.includes('<event>') ? e.text.replace(/<event>[\s\S]*?<\/event>/g, () => `<event>${body}</event>`) : body
+  } else if (channel && failures.length) {
+    text = text.replace(/(<channel\b[^>]*>)[\s\S]*?(<\/channel>)/, (_match, open, close) => `${open}\n${events[0]!.text}\n${close}`)
+  }
   // The pane's retired-Monitor filter runs after this. A dropped frame must
   // leave every item pending so channel replay or /resume can recover it.
   return { event: { ...e, text: stripDeliveryTags(text) },
-    accept: { events: pending.map(item => item.event), route: channel ? 'channel' : 'monitor' } }
+    accept: { events, route: channel ? 'channel' : 'monitor' } }
 }
 
 export function registerDirectorChannel(on: On, director: DirectorChannel) {
