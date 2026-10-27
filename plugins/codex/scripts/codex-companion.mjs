@@ -46,8 +46,6 @@ import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
   checkJobLiveness,
-  DEFAULT_STALL_MS,
-  lastJobProgressAt,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -98,7 +96,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--days <n>] [--limit <n>]",
       "  node scripts/codex-companion.mjs gc [--dry-run] [--json]",
-      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
+      "  node scripts/codex-companion.mjs events [--cwd <repo>] [--session <id>] [--poll-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]",
       "  node scripts/codex-companion.mjs observe list --cwd <repo> --json",
       "  node scripts/codex-companion.mjs observe threads --cwd <repo> [--finished-after <epoch-ms>] --json",
       "  node scripts/codex-companion.mjs observe replay <job-id> [--after <cursor>] [--limit <n>] --jsonl",
@@ -348,7 +346,6 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
   const deadline = Date.now() + timeoutMs;
-  const stallMs = options.stallMs ?? DEFAULT_STALL_MS;
   const brokerFailures = new Map();
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
@@ -360,14 +357,6 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
     if (snapshot.job.live?.notifications?.length) {
       await acknowledgeNotifications(snapshot.workspaceRoot, snapshot.job, snapshot.job.live.notifications.map((notification) => notification.id));
       return { ...snapshot, hasNotifications: true, waitTimedOut: false, timeoutMs };
-    }
-    const lastStall = Date.parse(snapshot.job.lastStalledAt ?? "") || 0;
-    if (snapshot.job.status === "running" && Date.now() - Math.max(lastJobProgressAt(snapshot.job), lastStall) >= stallMs) {
-      snapshot.job.lastStalledAt = nowIso();
-      const stored = readStoredJob(snapshot.workspaceRoot, snapshot.job.id);
-      writeJobFile(snapshot.workspaceRoot, snapshot.job.id, { ...(stored ?? snapshot.job), lastStalledAt: snapshot.job.lastStalledAt });
-      upsertJob(snapshot.workspaceRoot, { id: snapshot.job.id, lastStalledAt: snapshot.job.lastStalledAt });
-      return { ...snapshot, stalled: true, waitTimedOut: false, timeoutMs, stallMs };
     }
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
     snapshot = buildSingleJobSnapshot(cwd, reference);
@@ -1115,7 +1104,7 @@ async function handleTaskWorker(argv) {
 
 async function handleEvents(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "poll-ms", "stall-ms", "question-remind-ms", "exit-idle-ms", "session"],
+    valueOptions: ["cwd", "poll-ms", "question-remind-ms", "exit-idle-ms", "session"],
     rejectUnknownOptions: true,
     optionContext: "events"
   });
@@ -1135,7 +1124,7 @@ async function handleEvents(argv) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    await streamJobEvents(resolveCommandCwd(options), { pollMs, stallMs: parseStallMs(options), questionRemindMs,
+    await streamJobEvents(resolveCommandCwd(options), { pollMs, questionRemindMs,
       exitIdleMs, signal: controller.signal, session: options.session });
   } finally {
     process.off("SIGINT", stop);
@@ -1143,15 +1132,11 @@ async function handleEvents(argv) {
   }
 }
 
-function parseStallMs(options) {
-  const stallMs = Number(options["stall-ms"] ?? DEFAULT_STALL_MS);
-  if (!Number.isSafeInteger(stallMs) || stallMs <= 0) throw new Error("--stall-ms must be a positive integer.");
-  return stallMs;
-}
-
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "timeout-ms", "poll-interval-ms", "stall-ms"],
+    valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
+    rejectUnknownOptions: true,
+    optionContext: "status",
     booleanOptions: ["json", "all", "wait", "brief"]
   });
 
@@ -1161,8 +1146,7 @@ async function handleStatus(argv) {
     const snapshot = options.wait
       ? await waitForSingleJobSnapshot(cwd, reference, {
           timeoutMs: options["timeout-ms"],
-          pollIntervalMs: options["poll-interval-ms"],
-          stallMs: parseStallMs(options)
+          pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleJobSnapshot(cwd, reference);
     const context = await readRoundContext(snapshot.workspaceRoot, snapshot.job.id);
@@ -1176,11 +1160,8 @@ async function handleStatus(argv) {
       snapshot.job.live = { unavailable: inactiveRoundMessage(snapshot.job.id, context.activeRoundId) };
     }
     if (isActiveJobStatus(snapshot.job.status) && snapshot.job.live?.questions?.length) snapshot.job.phase = "waiting-for-answer";
-    const stalledLine = snapshot.stalled
-      ? `STALLED job=${snapshot.job.id} thread=${snapshot.job.threadId ?? "unknown"} ${snapshot.job.progressAgeMinutes}m without progress\n`
-      : "";
     const rendered = options.brief ? renderBriefJobStatus(snapshot.job) : renderJobStatusReport(snapshot.job);
-    outputCommandResult(snapshot, `${stalledLine}${rendered}`, options.json && !options.brief);
+    outputCommandResult(snapshot, rendered, options.json && !options.brief);
     return;
   }
 

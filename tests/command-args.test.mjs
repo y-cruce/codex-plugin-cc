@@ -19,14 +19,18 @@ function setup() {
 
 test("events rejects unknown options with its supported options and accepts legal options", () => {
   const h = setup();
-  const rejected = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--stall-msec", "1", "--exit-idle-ms", "1"], h);
+  const rejected = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--stall-ms", "1", "--exit-idle-ms", "1"], h);
   assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /Unknown option --stall-msec/);
-  for (const option of ["--cwd", "--poll-ms", "--stall-ms", "--question-remind-ms", "--exit-idle-ms", "--session"]) {
+  assert.match(rejected.stderr, /Unknown option --stall-ms/);
+  for (const option of ["--cwd", "--poll-ms", "--question-remind-ms", "--exit-idle-ms", "--session"]) {
     assert.match(rejected.stderr, new RegExp(option));
   }
 
-  const accepted = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--poll-ms", "1", "--stall-ms", "1",
+  const status = run(process.execPath, [SCRIPT, "status", "--cwd", h.cwd, "--stall-ms", "1"], h);
+  assert.notEqual(status.status, 0);
+  assert.match(status.stderr, /Unknown option --stall-ms/);
+
+  const accepted = run(process.execPath, [SCRIPT, "events", "--cwd", h.cwd, "--poll-ms", "1",
     "--question-remind-ms", "1", "--exit-idle-ms", "1", "--session", "session-a"], h);
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.match(accepted.stdout, /^IDLE_EXIT /m);
@@ -34,7 +38,7 @@ test("events rejects unknown options with its supported options and accepts lega
 
 test("follow rejects unknown and unused options while preserving its job-id positional", async () => {
   const h = setup();
-  for (const args of [["--stall-msec", "1"], ["--json"], ["--jsonl"], ["--limit", "1"]]) {
+  for (const args of [["--stall-ms", "1"], ["--json"], ["--jsonl"], ["--limit", "1"]]) {
     await assert.rejects(handleObserve(["follow", "missing-job", "--cwd", h.cwd, ...args]), (error) => {
       assert.match(error.message, new RegExp(`Unknown option ${args[0]}`));
       for (const option of ["--cwd", "--after", "--until", "--max-seconds", "--verbose", "--quiet"]) {

@@ -1,6 +1,6 @@
 ---
 description: Show active and recent Codex threads for this repository, including their current job handles
-argument-hint: '[job-id] [--wait] [--timeout-ms <ms>] [--stall-ms <ms>] [--all]'
+argument-hint: '[job-id] [--wait] [--timeout-ms <ms>] [--all]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
@@ -20,7 +20,7 @@ If the user did pass a job ID:
 
 `--wait` also returns early when Codex sends a notification; this is not task completion, so wait for the same job again. Returned notifications are acknowledged and will not trigger the next wait; plain status leaves them pending.
 
-For a Claude Code Monitor, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" events --cwd <repo> [--poll-ms <ms>] [--stall-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]` (poll default: 2000 ms). It watches this workspace's current-session jobs until SIGINT, SIGTERM, or the idle timeout, printing transitions and periodic reminders:
+For a Claude Code Monitor, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" events --cwd <repo> [--poll-ms <ms>] [--question-remind-ms <ms>] [--exit-idle-ms <ms>]` (poll default: 2000 ms). It watches this workspace's current-session jobs until SIGINT, SIGTERM, or the idle timeout, printing transitions and periodic reminders:
 
 ```text
 DONE job=<job-id> thread=<thread-id>
@@ -28,7 +28,6 @@ FAILED job=<job-id> thread=<thread-id> <first error line, or unknown>
 QUESTION job=<job-id> request=<request-id> <first question, one line, at most 200 characters>
 QUESTION_PENDING job=<job-id> request=<request-id> <n>m unanswered, expires in <m>m: <first question, one line, at most 200 characters>
 NOTIFIED job=<job-id> thread=<thread-id> <message with newlines replaced by spaces>
-STALLED job=<job-id> thread=<thread-id> <minutes>m without progress
 ```
 
 `QUESTION_PENDING` repeats every 120000 ms (2 minutes, configurable with `--question-remind-ms`) after the first `QUESTION` while the question remains pending and its job is active; elapsed and remaining minutes are rounded down with a minimum of zero, and `, expires in <m>m` is omitted when no expiry is available.
@@ -39,7 +38,6 @@ Jobs already finished when monitoring starts are omitted. Printed notifications 
 
 `--exit-idle-ms` defaults to 3600000 (1 hour). With no active job for that long, `events` prints `IDLE_EXIT no active job for <minutes>m; re-arm the monitor before the next dispatch` and exits 0, so a monitor nobody stopped does not poll forever; any event resets the interval.
 
-`--stall-ms` defaults to 900000 (15 minutes) for both `events` and `status --wait`. With no new progress log entry for this interval, `events` emits `STALLED` at most once per interval, and `status --wait --json` returns early with `stalled: true`; neither marks the job failed. Running job status shows owner liveness and minutes since last progress.
 
 Task status and stored results show the sandbox mode and effective network access. `task --sandbox <read-only|workspace-write|danger-full-access>` overrides `--write`; `danger-full-access` permits writes and network access. `--network` enables network access for `workspace-write`. Defaults remain read-only, or workspace-write without network when `--write` is given.
 

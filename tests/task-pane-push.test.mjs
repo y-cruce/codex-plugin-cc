@@ -1688,7 +1688,7 @@ test("only expiry notices for monitors owned by the task pane are dropped", () =
     [notice("monitor-2", expiry), false],
     [notice("", expiry), false],
     [notice("monitor-1", "[Monitor stopped]"), false],
-    ...["DONE", "FAILED", "QUESTION", "NOTIFIED", "STALLED", "QUESTION_PENDING"].map(type =>
+    ...["DONE", "FAILED", "QUESTION", "NOTIFIED", "QUESTION_PENDING"].map(type =>
       [notice("monitor-1", `${type} job=job-1`), false]),
     [notice("monitor-1", `${expiry}\nDONE job=job-1`), false],
   ];

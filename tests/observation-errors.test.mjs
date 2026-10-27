@@ -130,37 +130,6 @@ test("offline until-done follow skips a resolved historical question", async (t)
   assert.match(result.stdout, /^DONE job=/m);
 });
 
-test("resumed follow of an hour-old active job waits for progress and reaches DONE", async (t) => {
-  const output = await followWithClock(t, async ({ tick, emit, started }) => {
-    // The first stall check runs before the next live event arrives.
-    await tick(1000);
-    await emit("message.delta");
-    for (let i = 0; i < 16; i++) {
-      await tick(60000);
-      await emit("message.delta");
-    }
-    // Replayed timestamps cannot move the silence baseline backwards.
-    await emit("message.delta", started - 60 * 60000);
-    await tick(1000);
-  });
-  assert.doesNotMatch(output, /^STALLED /m);
-  assert.match(output, /^CURSOR: /m);
-  assert.match(output, /^DONE job=task-errors .*thread=thread-errors$/m);
-});
-
-test("follow reports real silence after fifteen minutes measured from this follow", async (t) => {
-  let beforeThreshold;
-  const output = await followWithClock(t, async ({ tick, output }) => {
-    await tick(15 * 60000 - 1000);
-    beforeThreshold = output();
-    await tick(1000);
-  });
-  assert.doesNotMatch(beforeThreshold, /^STALLED /m);
-  assert.match(output, /^STALLED job=task-errors .*thread=thread-errors 15m without progress$/m);
-  assert.equal((output.match(/^STALLED /gm) ?? []).length, 1);
-  assert.doesNotMatch(output, /^DONE /m);
-});
-
 test("replay expired cursor reports nonzero structured error and a usable retained boundary", async (t) => {
   const h = await expiredFixture(t);
   const result = await h.cli("observe", "replay", h.job.id, "--after", h.old, "--jsonl");

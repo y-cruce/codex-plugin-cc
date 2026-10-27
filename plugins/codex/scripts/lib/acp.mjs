@@ -87,11 +87,8 @@ function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (onProgress) onProgress({ message, phase, ...extra });
 }
 
-// A job's last sign of life is its log file's mtime: `status` reports it as
-// `lastProgressAt`, and the pane's monitor calls a job stalled fifteen minutes
-// after it. A Codex turn writes a line per item; an ACP turn wrote three lines
-// at startup and nothing after, so a working ACP task was reported stalled and
-// `status` showed it frozen at "starting" with no progress for its whole run.
+// Status uses the log file's mtime as lastProgressAt. Keep ACP item progress
+// visible alongside its current phase, as a Codex turn does.
 const PHASES = [["command.", "running"], ["fileChange.", "editing"], ["tool.", "investigating"],
   ["agent.", "investigating"], ["plan.", "investigating"], ["turn.completed", "finalizing"]];
 

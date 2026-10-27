@@ -163,7 +163,6 @@ export async function follow(location, job, options, dependencies = {}) {
   catch (error) { client?.close(); throw error; }
   let cursor = options.after ?? cursorFor(cursorManifest(initial, job.id), BigInt(initial.earliestSeq) - 1n);
   let finished = false;
-  let lastProgress = followStartedAt;
   let lastThread = job.executorSessionId ?? job.threadId;
   let resolveDone;
   let rejectDone;
@@ -187,7 +186,6 @@ export async function follow(location, job, options, dependencies = {}) {
       const canonical = upgradeLegacyJobEvent({ ...event, jobId: event.jobId ?? job.id });
       cursor = cursorFor(cursorManifest(page, job.id), canonical.seq);
       lastThread = canonical.identity.sessionId ?? lastThread;
-      lastProgress = Math.max(lastProgress, Date.parse(canonical.receivedAt) || 0);
       const text = renderJobEvent(canonical, { verbose: Boolean(options.verbose) });
       if (text != null && !options.quiet) await output(`${clock(canonical.occurredAt)} ${text}\n`);
       const exit = await eventExit(canonical, job, until, location, page);
@@ -221,7 +219,6 @@ export async function follow(location, job, options, dependencies = {}) {
     return chain;
   };
   let timeout;
-  let stalled;
   let heartbeat;
   const interrupted = () => { finished = true; client?.close(); resolveDone(); };
   // Ctrl-C is not "throw away what you read": whoever stops a follow wants to
@@ -238,9 +235,6 @@ export async function follow(location, job, options, dependencies = {}) {
       if (!finished) await output(`… ${clock(new Date().toISOString())} still running\n`);
     }), 60000);
     if (maxSeconds != null && !terminal(job.status)) timeout = setTimeout(() => enqueue(() => finish(`TIMEOUT ${prefix(job)} thread=${lastThread ?? "unknown"} ${maxSeconds}s elapsed, continue with --after`)), Math.max(0, maxSeconds * 1000 - (Date.now() - followStartedAt)));
-    stalled = setInterval(() => {
-      if (Date.now() - lastProgress >= 15 * 60 * 1000) enqueue(() => finish(`STALLED ${prefix(job)} thread=${lastThread ?? "unknown"} ${Math.floor((Date.now() - lastProgress) / 60000)}m without progress`));
-    }, 1000);
     if (client) {
       let recoveryQueued = false;
       const queueRecovery = () => {
@@ -271,7 +265,6 @@ export async function follow(location, job, options, dependencies = {}) {
   } finally {
     finished = true;
     clearTimeout(timeout);
-    clearInterval(stalled);
     clearInterval(heartbeat);
     process.off("SIGTERM", interrupted);
     process.off("SIGINT", stopped);

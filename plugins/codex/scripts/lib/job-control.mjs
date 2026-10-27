@@ -8,7 +8,6 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
-export const DEFAULT_STALL_MS = 15 * 60 * 1000;
 
 export function ownerProcessAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;

@@ -134,34 +134,6 @@ test("events emits one notification and one completion, acknowledges the note, a
   assert.deepEqual(result.stdout.trimEnd().split("\n"), [notified, completed]);
 });
 
-test("events and status --wait report a quiet live task as stalled without failing it", async (t) => {
-  const h = await setup(t);
-  const { job, done } = await startJob(t, h, "hold notify:Owner ready");
-  const notified = h.cli("status", job.id, "--wait", "--timeout-ms", "5000");
-  assert.equal(notified.status, 0, notified.stderr);
-  assert.equal(JSON.parse(notified.stdout).hasNotifications, true);
-  const old = new Date(Date.now() - 20 * 60 * 1000);
-  fs.utimesSync(job.logFile, old, old);
-  const events = startEvents(t, h);
-  await waitFor(() => events.lines().some((line) => line === `STALLED job=${job.id} thread=${job.threadId} 20m without progress`));
-  const waiting = h.cli("status", job.id, "--wait", "--timeout-ms", "5000");
-  assert.equal(waiting.status, 0, waiting.stderr);
-  const snapshot = JSON.parse(waiting.stdout);
-  assert.equal(snapshot.stalled, true);
-  assert.equal(snapshot.waitTimedOut, false);
-  assert.equal(snapshot.job.status, "running");
-  const again = h.cli("status", job.id, "--wait", "--timeout-ms", "150");
-  assert.equal(again.status, 0, again.stderr);
-  assert.equal(JSON.parse(again.stdout).stalled, undefined);
-  assert.equal(JSON.parse(again.stdout).waitTimedOut, true);
-  events.child.kill("SIGTERM");
-  const result = await events.done;
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(events.lines().filter((line) => line.startsWith("STALLED ")).length, 1);
-  assert.equal(h.cli("message", job.id, "finish").status, 0);
-  assert.equal((await done).code, 0);
-});
-
 test("task sandbox and network options are persisted and preserved through interrupt redirects", async (t) => {
   const h = await setup(t);
   for (const { options, sandbox, policy } of [

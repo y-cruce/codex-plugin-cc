@@ -378,7 +378,7 @@ node plugins/codex/scripts/codex-companion.mjs observe replay JOB --cwd /path/to
 node plugins/codex/scripts/codex-companion.mjs observe view-path JOB --cwd /path/to/repo
 ```
 
-`follow` prints compact item events; `--verbose` includes deltas. It emits `CURSOR:` before DONE, FAILED, QUESTION, NOTIFIED, STALLED, or TIMEOUT. `--until done` keeps following through notifications. Closing the process closes its subscription; it does not interrupt the Codex task. Completed histories remain readable after the broker exits. Old brokers return `OBSERVATION_UNSUPPORTED` and are never replaced to enable observation.
+`follow` prints compact item events; `--verbose` includes deltas. It emits `CURSOR:` before DONE, FAILED, QUESTION, NOTIFIED, or TIMEOUT. `--until done` keeps following through notifications. Closing the process closes its subscription; it does not interrupt the Codex task. Completed histories remain readable after the broker exits. Old brokers return `OBSERVATION_UNSUPPORTED` and are never replaced to enable observation.
 
 `QUESTION job=<id> request=<id> ...` is emitted only while that request remains pending. If the same request is encountered again while still pending, `follow` and `events` emit `QUESTION_PENDING job=<id> request=<id> still unanswered: ...` (periodic `events` reminders retain their elapsed-time format). Answered requests are skipped. `NOTIFIED job=<id> thread=<id> pending_request=<id> <note>` includes the request pending when the notification was created; the field is omitted when there was none. Explicit `--after` cursors continue to select their exact history position.
 

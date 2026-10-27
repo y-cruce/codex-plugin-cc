@@ -3,7 +3,7 @@ import { setTimeout } from "node:timers/promises";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { buildStatusSnapshot, checkJobLiveness, DEFAULT_STALL_MS, lastJobProgressAt, readStoredJob } from "./job-control.mjs";
+import { buildStatusSnapshot, checkJobLiveness, readStoredJob } from "./job-control.mjs";
 import { acknowledgeNotifications, liveStatus } from "./live-commands.mjs";
 import { readRoundContext } from "./history-resolver.mjs";
 import { resolveStateDir } from "./state.mjs";
@@ -58,7 +58,7 @@ function outboxLine(event) {
   return `FAILED ${prefix} thread=${event.threadId ?? "unknown"} ${oneLine(p.errorMessage || "unknown")}`;
 }
 
-export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_STALL_MS, questionRemindMs = DEFAULT_QUESTION_REMIND_MS,
+export async function streamJobEvents(cwd, { pollMs = 2000, questionRemindMs = DEFAULT_QUESTION_REMIND_MS,
   exitIdleMs = 3600000, signal, session, threadRecords = THREAD_RECORDS_ENABLED } = {}, dependencies = {}) {
   const snapshot = dependencies.snapshot ?? buildStatusSnapshot;
   const status = dependencies.status ?? liveStatus;
@@ -74,7 +74,6 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
     return deliverDirectorEvents([event], "monitor", async () => writeLine(taggedLine(await output(), event)));
   };
   const now = dependencies.now ?? Date.now;
-  const progressAt = dependencies.progressAt ?? lastJobProgressAt;
   const claim = dependencies.claimQuestion ?? ((cwd, jobId, requestId) => claimQuestion(resolveStateDir(cwd), jobId, requestId));
   const roundContext = dependencies.roundContext ?? ((cwd, jobId) => readRoundContext(cwd, jobId));
   // Monitor processes expire; a session's baseline and terminal receipts must not.
@@ -95,7 +94,6 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
   const notifications = new Set();
   const acknowledgedNotes = new Set();
   const brokerFailures = new Map();
-  const stalls = new Map();
   let lastActiveAt = now();
   while (!signal?.aborted) {
     const report = snapshot(cwd, { all: true, threadRecords: false });
@@ -141,16 +139,6 @@ export async function streamJobEvents(cwd, { pollMs = 2000, stallMs = DEFAULT_ST
       if (job.status === "failed" && (job.errorMessage === "owner process exited" || job.errorMessage === "broker unreachable")) live = null;
       running = job.status === "queued" || job.status === "running";
       const pendingQuestions = live?.questions ?? [];
-      if (job.status === "running" && pendingQuestions.length === 0) {
-        const progress = progressAt(job);
-        const previous = stalls.get(job.id);
-        const lastReported = previous?.progress === progress ? previous.reportedAt : progress;
-        if (now() - lastReported >= stallMs) {
-          await writeLine(`STALLED ${jobPrefix} thread=${job.threadId ?? "unknown"} ${Math.max(0, Math.floor((now() - progress) / 60000))}m without progress`);
-          lastActiveAt = now();
-          stalls.set(job.id, { progress, reportedAt: now() });
-        }
-      }
       if (running && live?.unavailable) continue;
       for (const question of pendingQuestions) {
         const key = `${job.id}:${question.requestId}`;

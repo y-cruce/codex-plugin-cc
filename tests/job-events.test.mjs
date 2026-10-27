@@ -244,7 +244,7 @@ for (const terminal of ["completed", "failed"]) {
           notifications: [{ id: "note-1", message: "Ready", pendingRequestId: "request-1" }] };
       },
       acknowledge: async () => {}
-    }, { stallMs: 120000 });
+    });
     assert.deepEqual(lines, [
       "QUESTION job=job-1 [answer validation] request=request-1 Choose?",
       "NOTIFIED job=job-1 [answer validation] thread=thread-1 pending_request=request-1 Ready",
@@ -253,15 +253,6 @@ for (const terminal of ["completed", "failed"]) {
     ]);
   });
 }
-
-test("events does not report a stall while the job is waiting for an answer", async () => {
-  const lines = await monitor([{ running: [job] }, { running: [job] }], {
-    now: () => 20 * 60000,
-    progressAt: () => 0,
-    status: async () => ({ questions: [{ requestId: "request-1", questions: [{ question: "Choose?" }] }] })
-  });
-  assert.deepEqual(lines, ["QUESTION job=job-1 request=request-1 Choose?"]);
-});
 
 test("a question line names the ids an answer must be keyed by", async () => {
   const lines = await monitor([{ running: [job] }], {
@@ -461,45 +452,6 @@ test("broker liveness fails on the third consecutive miss and resets after succe
   assert.equal(check({ unavailable: "offline" }).errorMessage, "broker unreachable");
   assert.equal(ownerProcessAlive(process.pid), true);
   assert.equal(ownerProcessAlive(null), null);
-});
-
-test("events reports a stall once per interval and new progress resets the interval", async () => {
-  let clock = 20 * 60000;
-  let progress = 0;
-  let poll = 0;
-  const lines = await monitor(Array.from({ length: 5 }, () => ({ running: [job] })), {
-    now: () => clock,
-    progressAt: () => progress,
-    status: async () => {
-      poll += 1;
-      if (poll === 2) clock += 60000;
-      if (poll === 3) clock += 15 * 60000;
-      if (poll === 4) progress = clock;
-      if (poll === 5) clock += 60000;
-      return {};
-    }
-  });
-  assert.deepEqual(lines, [
-    "STALLED job=job-1 thread=thread-1 20m without progress",
-    "STALLED job=job-1 thread=thread-1 36m without progress"
-  ]);
-});
-
-test("events uses recent log progress when monitoring an hour-old job", async () => {
-  const started = Date.now();
-  let clock = started;
-  const logFile = path.join(makeTempDir(), "job.log");
-  fs.writeFileSync(logFile, "still working\n");
-  const current = { ...job, startedAt: new Date(started - 60 * 60000).toISOString(), logFile };
-  const lines = await monitor(Array.from({ length: 3 }, () => ({ running: [current] })), {
-    now: () => clock,
-    status: async () => {
-      fs.utimesSync(logFile, new Date(clock), new Date(clock));
-      clock += 60000;
-      return {};
-    }
-  });
-  assert.deepEqual(lines, []);
 });
 
 test("live broker deadline closes a socket even when initialize never replies", async (t) => {

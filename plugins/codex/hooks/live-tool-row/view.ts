@@ -144,9 +144,9 @@ function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, kind:
 
 export function terminalTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, terminal: Terminal, label: string, columns: number, agents: string[] = []) {
   const { Box, Text } = ui
-  const status = { DONE: 'completed', FAILED: 'failed', QUESTION: 'question', NOTIFIED: 'notified', TIMEOUT: 'paused', STALLED: 'stalled' }[terminal.kind]
+  const status = { DONE: 'completed', FAILED: 'failed', QUESTION: 'question', NOTIFIED: 'notified', TIMEOUT: 'paused' }[terminal.kind]
   const color = terminal.kind === 'QUESTION' ? 'magenta' : terminal.kind === 'NOTIFIED' ? 'cyan' : undefined
-  const dimColor = terminal.kind === 'TIMEOUT' || terminal.kind === 'STALLED'
+  const dimColor = terminal.kind === 'TIMEOUT'
   return Box({ flexDirection: 'column', children: [
     Text({ color, dimColor, wrap: 'truncate-end', children: clip(`● Codex · ${label} · ${status}`, columns) }),
     ...agents.map(text => Box({ paddingLeft: 2, children: Text({ dimColor: true, wrap: 'truncate-end', children: clip(text, Math.max(1, columns - 2)) }) })),

@@ -331,7 +331,7 @@ describe('live ToolUse row', () => {
 
 describe('live row polish', () => {
   test('parses the last terminal line from string or Bash stdout and strips only metadata', () => {
-    for (const kind of ['DONE', 'FAILED', 'QUESTION', 'NOTIFIED', 'TIMEOUT', 'STALLED']) {
+    for (const kind of ['DONE', 'FAILED', 'QUESTION', 'NOTIFIED', 'TIMEOUT']) {
       const text = 'Which color? [green] request=keep this text';
       const output = terminalOutput(kind, text, 'named job');
       const expected = { kind, text, label: 'named job' };
@@ -344,7 +344,7 @@ describe('live row polish', () => {
     assert.deepEqual(terminalOf('QUESTION job=task-abc123-xyz789 request=1 ids=color,size Which color?'), { kind: 'QUESTION', text: 'Which color?', label: undefined });
     for (const output of [null, {}, { stdout: 123 }, 'CURSOR: x', 'NOTIFIED job=', 'QUESTION_PENDING job=task-abc123-xyz789 request=1 wait', 'text DONE job=x']) assert.equal(terminalOf(output), undefined);
   });
-  for (const [kind, status, color, dim] of [['QUESTION', 'question', 'magenta', false], ['NOTIFIED', 'notified', 'cyan', false], ['TIMEOUT', 'paused', undefined, true], ['STALLED', 'stalled', undefined, true]]) {
+  for (const [kind, status, color, dim] of [['QUESTION', 'question', 'magenta', false], ['NOTIFIED', 'notified', 'cyan', false], ['TIMEOUT', 'paused', undefined, true]]) {
     test(`renders ${kind} from its own stdout without lookup, file reads or timers`, async ($, on) => {
       const { state, clock } = world($, on);
       state.missing = true;
@@ -680,7 +680,7 @@ describe('live row polish', () => {
     data.subAgents = [{ threadId: "child", path: "baseline", status: "started", endedAt: null, lastActivity: "$ pwd" }];
     state.text = JSON.stringify(data);
     await $.ui.render(row()); await clock.settle();
-    for (const kind of ["TIMEOUT", "QUESTION", "NOTIFIED", "STALLED"]) {
+    for (const kind of ["TIMEOUT", "QUESTION", "NOTIFIED"]) {
       const event = row(undefined, { tool_use_id: kind, isRunning: false, output: terminalOutput(kind, "parent note") });
       const card = textOf(await $.ui.render(event));
       assert.equal(card.match(/⇢ baseline/g)?.length, 1);
