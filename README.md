@@ -89,6 +89,14 @@ Use the job ID from `/codex:status` to control an already running task:
 
 `message` uses native `turn/steer`: inputs stay ordered and are consumed before a later model request, not necessarily before tools already issued by the model. The acknowledgement means accepted, not executed. `--interrupt` cancels the current turn and starts a new turn in the same job and thread with the new input and the original write permission. Existing changes remain; its report includes observed file changes and the workspace's Git status, including pre-existing edits.
 
+The director's `mcp__codex__message` tool also defaults to native steering when
+`delivery` is omitted. Use `delivery: "queue"` for ACP executors or an explicitly
+requested next turn; use `delivery: "interrupt"` when the current turn must stop.
+
+主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认使用 Codex 原生引导（`turn/steer`），
+在当前轮的后续模型请求中接收补充消息。ACP 执行器或明确要求下一轮执行时使用 `delivery: "queue"`；
+需要停止当前轮时使用 `delivery: "interrupt"`。
+
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 
 Tasks require the shared broker; live commands never start a second runtime or silently create another thread. The broker enables `default_mode_request_user_input` for its Codex process without editing global configuration. Existing sessions must restart to load an updated broker. `task --thread <id> --write` applies workspace-write on `turn/start`; omitting `--write` explicitly restores read-only. Native `thread/queue/*` (follow-up turns after completion) is separate and is not exposed by these mid-turn controls.

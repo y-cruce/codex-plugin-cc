@@ -104,7 +104,8 @@ test("a failed dispatch reaches the model as an error and does not ask the pane 
 test("message writes the correction to a file and passes the delivery as dispatch.sh's flag", async () => {
   const h = harness({ stdout: "MESSAGED job=task-a-b queued=task-c-d\n" });
   await startDirectorTools(h.$, h.tools);
-  for (const [delivery, flags] of [["queue", ["--queue"]], ["steer", []], ["interrupt", ["--interrupt"]]]) {
+  assert.equal(h.registered.find(spec => spec.name === "message").inputSchema.required.includes("delivery"), false);
+  for (const [delivery, flags] of [[undefined, []], ["queue", ["--queue"]], ["steer", []], ["interrupt", ["--interrupt"]]]) {
     h.runs.length = 0;
     await h.call("message", { job: "task-a-b", cwd: "/repo", text: "Stop editing tests.", delivery });
     const [{ argv }] = h.runs;

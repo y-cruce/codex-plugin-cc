@@ -53,17 +53,18 @@ const TOOLS = [
   },
   {
     name: 'message',
-    description: 'Send a correction to a running job: dispatch.sh message. `delivery` is queue (the next turn, '
-      + 'once this one ends; reach for it first), steer (read at Codex\'s next model request; Codex only) or '
-      + 'interrupt (cancel the turn and run this now). Returns MESSAGED or MESSAGE_FAILED.',
+    description: 'Send a correction to a running job: dispatch.sh message. Defaults to native Codex steer '
+      + '(read at its next model request in the active turn). Set delivery to queue only for an explicitly '
+      + 'requested next turn or an ACP executor (qoder/dsh), or interrupt to cancel the turn and run this now. '
+      + 'Returns MESSAGED or MESSAGE_FAILED.',
     inputSchema: {
       type: 'object',
       properties: {
         job: JOB, cwd: CWD,
         text: { type: 'string', description: 'The correction, as Codex will read it.' },
-        delivery: { type: 'string', enum: ['queue', 'steer', 'interrupt'] },
+        delivery: { type: 'string', enum: ['steer', 'queue', 'interrupt'], default: 'steer' },
       },
-      required: ['job', 'cwd', 'text', 'delivery'],
+      required: ['job', 'cwd', 'text'],
     },
   },
   {
@@ -200,7 +201,7 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
       return run($, context, ['bash', context.worker, 'dispatch'], cwd, 120_000, body, text(input.agentId))
     }
     case 'message': {
-      const flags = DELIVERY[text(input.delivery)]
+      const flags = DELIVERY[input.delivery === undefined ? 'steer' : text(input.delivery)]
       if (!flags) return { deny: 'delivery must be queue, steer or interrupt' }
       if (!text(input.text).trim()) return { deny: 'text is empty' }
       const file = await scratch($, context, '.md', text(input.text))
