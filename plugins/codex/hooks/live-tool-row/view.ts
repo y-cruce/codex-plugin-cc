@@ -32,6 +32,7 @@ export type LiveView = {
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null; uri?: string | null } | null
   prompt?: string | null
+  queuedPrompts?: { seq?: string; jobId?: string; text: string }[]
   activeRoundId?: string | null
   latestRoundId?: string | null
   rounds?: {
@@ -343,7 +344,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   // round's last event so it lands before the next round's brief.
   const marks: LiveView['tail'] = []
   rounds.forEach((round, index) => {
-    if (index) marks.push({ seq: round.firstSeq, at: round.startedAt ?? '', type: 'prompt', text: round.prompt! })
+    if (index) marks.push({ seq: round.firstSeq, at: round.startedAt ?? '', type: 'control.message.updated', text: `director → message: ${round.prompt!}` })
     if (!round.endedAt) return
     const counted = round.usage.inputTokens > 0 || round.usage.outputTokens > 0 || round.usage.cachedInputTokens > 0
     const spent = Date.parse(round.endedAt) - Date.parse(round.startedAt ?? round.endedAt)
@@ -457,10 +458,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       lines.push(communicationTree(ui, kind, event.text.replace(/^director → (message|interrupt): /, ''), columns))
       return
     }
-    if (fullTrace && type === 'prompt') {
-      prompt(event.text)
-      return
-    }
     if (type === 'round.ended') {
       add(event.text, { dimColor: true })
       return
@@ -543,6 +540,15 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   } else if (thinking) {
     entry = true
     add(`● Thinking · ${elapsed(thinking, now)}…`, { dimColor: true })
+  }
+  if (data.queuedPrompts?.length) {
+    entry = true
+    separate(true)
+    for (const prompt of data.queuedPrompts) {
+      const text = `◆ ↓ Director message · queued: ${clean(prompt.text).replace(/\s+/gu, ' ').trim()}`
+      const preview = clip(text, columns)
+      lines.push(Text({ color: 'cyan', wrap: 'truncate-end', children: preview === text ? preview : `${clip(text, columns - 1)}…` }))
+    }
   }
   return tree()
 }

@@ -388,6 +388,7 @@ export function applyJobEvent(view, event, options = {}) {
     }
     case "job.started":
       view.status = "running";
+      if (view.queuedPrompts) view.queuedPrompts = view.queuedPrompts.filter(prompt => prompt.jobId !== event.jobId);
       if (round) {
         view.jobId = event.jobId;
         view.label = p.label ?? view.label;
@@ -420,9 +421,25 @@ export function applyJobEvent(view, event, options = {}) {
       } else if (!child) {
         view.status = "running";
         view.pendingQuestion = null;
+        if (view._startingPrompt) {
+          const prompt = view._startingPrompt;
+          view.queuedPrompts = view.queuedPrompts.filter(item => item.seq !== prompt.seq);
+          updateTail(view, { ...event, type: "control.message.updated" }, `director → message: ${prompt.text}`);
+          delete view._startingPrompt;
+        }
       }
       break;
-    case "turn.completed": view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== identity.turnId); break;
+    case "turn.completed":
+      view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== identity.turnId);
+      if (!child && p.queuedMessage != null) view._startingPrompt = view.queuedPrompts?.find(prompt => !prompt.jobId && prompt.text === p.queuedMessage);
+      break;
+    case "control.message.updated":
+      if (p.queued && p.accepted) {
+        view.queuedPrompts ??= [];
+        view.queuedPrompts.push({ seq: String(event.seq), text: p.message, ...(p.queuedJobId ? { jobId: p.queuedJobId } : {}) });
+        text = null;
+      }
+      break;
     case "command.started":
       Object.assign(state, { command: unwrapCommand(p.command), cwd: p.cwd, turnId: identity.turnId });
       view.activeCommands.push({ itemId: identity.toolCallId, command: state.command, cwd: p.cwd, startedAt: event.occurredAt, _key: key,

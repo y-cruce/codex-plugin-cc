@@ -465,7 +465,7 @@ export class AcpExecutorJobPort {
     const entry = { id: crypto.randomUUID(), jobId: round.job.id, input, status: "accepted", queued: true,
       recordId: this.recordId, round };
     this.queuedPrompts.push(entry);
-    await this.adapter.controlMessage(input, "queued", request.turnId);
+    await this.adapter.controlMessage(input, "queued", request.turnId, entry.jobId);
     return { queued: true, messageId: entry.id, queuedJobId: entry.jobId };
   }
 

@@ -213,8 +213,9 @@ export class AcpEventAdapter {
     return this.record(this.event(type, payload, identity, raw, method));
   }
 
-  controlMessage(prompt, mode, turnId) {
-    return this.emit("control.message.updated", { message: prompt.map((block) => block.text).join("\n"), mode, accepted: true },
+  controlMessage(prompt, mode, turnId, queuedJobId) {
+    return this.emit("control.message.updated", { message: prompt.map((block) => block.text).join("\n"), mode, accepted: true,
+      ...(mode === "queued" ? { queued: true } : {}), ...(queuedJobId ? { queuedJobId } : {}) },
       { turnId }, null, mode === "interrupt" ? "executor/interrupt-turn" : "executor/queue-turn");
   }
 

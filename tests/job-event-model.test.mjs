@@ -22,6 +22,30 @@ test("a reserved turn remains queued until it starts", () => {
   assert.equal(createLiveView({ id: "job-queued", status: "queued" }).status, "queued");
 });
 
+test("queued director messages wait outside the trace and open their own turns in FIFO order", () => {
+  const { view, accept } = harness();
+  for (const message of ["First instruction\nKeep the full body.", "Second instruction"]) {
+    accept("companion/control-message", { message, queued: true, status: "accepted" });
+  }
+  accept("item/completed", { item: { type: "agentMessage", id: "previous", text: "Previous answer" } });
+  assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer"]);
+  assert.deepEqual(view.queuedPrompts.map(item => item.text), ["First instruction\nKeep the full body.", "Second instruction"]);
+  // An interrupt starts a replacement turn before the queued instructions.
+  accept("turn/completed", { turn: { id: "turn-1", status: "interrupted" } });
+  accept("turn/started", { turn: { id: "replacement" } });
+  assert.equal(view.queuedPrompts.length, 2);
+  accept("turn/completed", { turn: { id: "replacement", status: "completed" }, queuedInput: [{ type: "text", text: view.queuedPrompts[0].text }] });
+  const restored = JSON.parse(JSON.stringify(view));
+  const start = accept("turn/started", { turn: { id: "turn-2" } });
+  applyJobEvent(restored, start);
+  assert.deepEqual(restored.queuedPrompts, view.queuedPrompts);
+  assert.deepEqual(view.queuedPrompts.map(item => item.text), ["Second instruction"]);
+  assert.equal(view.tail.at(-1).text, "director → message: First instruction\nKeep the full body.");
+  assert.equal(view.tail.at(-1).seq, start.seq);
+  accept("item/completed", { item: { type: "agentMessage", id: "next", text: "Next answer" } });
+  assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer", "director → message: First instruction\nKeep the full body.", "assistant: Next answer"]);
+});
+
 test("normalization preserves full source and event identity without modifying it", () => {
   const message = { method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id: "item", type: "commandExecution", command: "x".repeat(500) } }, emittedAtMs: 1000 };
   const event = normalizeJobEvent(message, { id: "job", streamId: "stream" });

@@ -98,6 +98,27 @@ test("task thread starts declare notify_director and initialize enables experime
   assert.equal(h.requests().find((item) => item.method === "thread/resume").params.dynamicTools, undefined);
 });
 
+test("queued Codex messages stay at the foot until their turn starts, then enter the persisted trace", async (t) => {
+  const h = await setup(t);
+  const { job, done } = await startJob(t, h, "hold");
+  const queued = h.cli("message", job.id, "--queue", "queued-next");
+  assert.equal(queued.status, 0, queued.stderr);
+  const listing = h.cli("observe", "threads");
+  assert.equal(listing.status, 0, listing.stderr);
+  const viewPath = JSON.parse(listing.stdout).threads.find(thread => thread.jobId === job.id).viewPath;
+  const view = () => JSON.parse(fs.readFileSync(viewPath, "utf8"));
+  assert.deepEqual(view().queuedPrompts.map(prompt => prompt.text), ["queued-next"]);
+  assert.equal(view().tail.some(row => row.text.includes("queued-next")), false);
+  assert.equal(h.cli("message", job.id, "finish").status, 0);
+  const result = await done;
+  assert.equal(result.code, 0, result.stderr);
+  const finished = view();
+  assert.deepEqual(finished.queuedPrompts, []);
+  const messages = finished.tail.filter(row => row.type === "control.message.updated" || row.type === "message.completed");
+  assert.deepEqual(messages.map(row => row.text), ["director → message: finish", "assistant: hold|finish",
+    "director → message: queued-next", "assistant: queued-next"]);
+});
+
 function startEvents(t, h) {
   const child = spawn(process.execPath, [SCRIPT, "events", "--cwd", h.repo, "--poll-ms", "20"], {
     cwd: h.repo, env: h.env

@@ -158,8 +158,8 @@ export async function main(runtimeOptions = {}) {
   }
 
   function routeNotification(message) {
-    const recorded = codexEvents.accept(structuredClone(message));
     controls.observe(message);
+    const recorded = codexEvents.accept(structuredClone(message));
     deliverNotification(message);
     return recorded;
   }
@@ -314,7 +314,7 @@ export async function main(runtimeOptions = {}) {
             if (control.method === "turn/steer" || control.method === "broker/redirect" || control.method === "broker/queue") {
               await codexEvents.accept({ method: "companion/control-message", params: { threadId: p.threadId,
                 turnId: p.expectedTurnId ?? p.turnId, message: p.input.map((item) => item.text).join("\n"),
-                interrupt: control.method === "broker/redirect", status: "accepted" } });
+                interrupt: control.method === "broker/redirect", queued: control.method === "broker/queue", status: "accepted" } });
             } else if (control.method === "broker/answer") {
               await codexEvents.accept({ method: "companion/answer-delivered", params: { ...p } });
             }

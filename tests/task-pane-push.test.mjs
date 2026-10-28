@@ -812,7 +812,8 @@ test("queued follow-up rounds share the running task row through handoff and pan
     const base = "/home/test/.claude/plugins/data/codex/state/main";
     const queued = Array.from({ length: count }, (_, i) => ({ id: `follow-up-${i}`, recordId: "record-a",
       executor: "acp", executorSessionId: "acp-session", sessionId: "session", workspaceRoot: "/work",
-      status: "queued", label: "Alpha task", createdAt: new Date().toISOString() }));
+      status: "queued", label: "Alpha task", createdAt: new Date(Date.now() + i).toISOString(),
+      request: { prompt: `Internal context\n---- Brief ----\nFollow-up instruction ${i}` } }));
     const pane = await paneHarness(new Map(), undefined, "session", {
       preset: queued.map(job => [`${base}/jobs/${job.id}.json`, job]),
       fsList: (directory, files) => directory.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
@@ -831,6 +832,10 @@ test("queued follow-up rounds share the running task row through handoff and pan
       const state = status === "queued" ? `${pending} queued` : `${status}${pending ? ` · ${pending} queued` : ""}`;
       assert.match(JSON.stringify(tabs), new RegExp(` · ${state}"`));
       assert.match(rendered, /Qoder/);
+      for (const [i, job] of queued.entries()) {
+        assert.equal((rendered.match(new RegExp(`Follow-up instruction ${i}`, "g")) ?? []).length, 1);
+      }
+      assert.doesNotMatch(rendered, /Internal context/);
       if (!pending) assert.doesNotMatch(rendered, /queued/);
     };
     await row("running", count);
@@ -849,7 +854,7 @@ test("queued follow-up rounds share the running task row through handoff and pan
       job.status = "running";
       pane.files.set(`${base}/job-index/${job.id}.json`, { schemaVersion: 1, jobId: job.id, roundId: job.id, recordId: "record-a" });
       Object.assign(pane.live, { status: "running", activeRoundId: job.id, latestRoundId: job.id, endedAt: null });
-      pane.live.rounds.push({ jobId: job.id });
+      pane.live.rounds.push({ jobId: job.id, prompt: `Follow-up instruction ${i}`, firstSeq: String(i + 1), lastSeq: String(i + 1) });
       Object.assign(pane.listing[0], { jobId: job.id, status: "running" });
       pane.touch();
       await pane.tick();

@@ -245,6 +245,11 @@ The pane and inline traces use the same block layout for `◆ ↓ Director reply
 Headings align on the left and bodies indent two columns. All four use cyan for both
 headings and bodies, including completed notification cards. Messages retain
 their complete text and wrap in traces.
+Queued director messages stay at the bottom, one row per message, with
+`◆ ↓ Director message · queued`. Line breaks collapse to spaces and long messages
+are truncated with an ellipsis; queued rows have no blank lines between them.
+When execution starts, each message appears between the preceding answer and its
+own turn's output with the complete body. Queued follow-up jobs show their briefs in the same waiting area.
 Completed, failed and cancelled tasks stay in the pane for three minutes after ending.
 Completed Markdown tables use bordered columns with wrapping cells, or labelled
 rows when the viewport is too narrow. Cell formatting and links use native Markdown.
@@ -256,6 +261,9 @@ compaction completes or the turn or task ends.
 `◆ ↓ Director interrupt` 和 `◇ ↑ Executor notification`。英文标题左对齐，正文统一缩进两列；
 四类的标题与正文统一使用青色，已结束的通知卡片也使用同一样式。
 消息保留完整正文，在轨迹中换行显示。
+主 agent 的排队消息显示在底部，标为 `◆ ↓ Director message · queued`，每条只占一行。
+换行合并为空格，超长内容以省略号截断，排队条目之间不留空行。
+开始执行后，消息在上一轮回复与本轮输出之间显示完整正文；后续任务的排队正文也显示在底部等待区。
 已完成、失败和取消的任务在结束后保留三分钟，再从面板隐藏。
 完整 Markdown 表格显示为带边框且单元格换行的分列布局；窗口过窄时按列名逐条展示。
 单元格内的格式和链接继续使用宿主 Markdown 渲染。

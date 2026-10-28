@@ -12,6 +12,35 @@ import { createLiveView, applyJobEvent } from "../plugins/codex/scripts/lib/job-
 
 tier('user');
 describe('live ToolUse row', () => {
+  test('keeps each queued director message on one compact row below the active trace', ($, on) => {
+    world($, on);
+    const data = fixture(); data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.thinkingSince = data.startedAt;
+    data.tail = [{ seq: '1', at: data.startedAt, type: 'message.completed', text: 'assistant: Current answer' }];
+    const first = `Queued first\n${'完整正文'.repeat(350)}`;
+    data.queuedPrompts = [{ seq: '2', text: first }, { seq: '3', text: 'Queued second' }];
+    for (const maxTail of [undefined, 200]) {
+      const tree = liveTree($.ui.resolve(row()), data, 80, Date.parse(data.startedAt), 48, undefined, maxTail);
+      const text = textOf(tree);
+      const rows = rowsOf(tree);
+      const queued = rows.filter(node => textOf(node).startsWith('◆ ↓ Director message · queued'));
+      assert.equal(queued.length, 2);
+      assert.deepEqual(rows.slice(-2), queued, 'queue entries have no blank rows between them');
+      for (const node of queued) {
+        assert.equal(node.type, 'Text');
+        assert.equal(node.props.wrap, 'truncate-end');
+        assert.doesNotMatch(textOf(node), /[\r\n]/);
+        assert.ok(cellWidth(textOf(node)) <= 78);
+      }
+      assert.ok(textOf(queued[0]).endsWith('…'));
+      assert.ok(textOf(queued[1]).endsWith('Queued second'));
+      assert.equal(data.queuedPrompts[0].text, first, 'the complete message remains available when execution starts');
+      assert.ok(text.indexOf('Current answer') < text.indexOf('Thinking'));
+      assert.ok(text.indexOf('Thinking') < text.indexOf('Queued first'));
+      assert.ok(text.indexOf('Queued first') < text.indexOf('Queued second'));
+      assert.equal((text.match(/◆ ↓ Director message · queued/g) ?? []).length, 2);
+    }
+  });
   test('shows context compaction once in the trace and in the prompt hint until it ends', ($, on) => {
     world($, on);
     const data = fixture();

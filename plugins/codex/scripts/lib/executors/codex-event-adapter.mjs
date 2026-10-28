@@ -168,7 +168,8 @@ function payloadFor(type, message, receivedAt) {
     }
     case "turn.started": return { ordinal: 0, prompt: [] };
     case "turn.completed": return { status: p.turn?.status === "interrupted" ? "interrupted" : p.turn?.status === "failed" ? "failed" : "completed",
-      reason: terminalReason(p.turn?.status, p.turn?.error), finalMessages: [], usage: null };
+      reason: terminalReason(p.turn?.status, p.turn?.error), finalMessages: [], usage: null,
+      ...(p.queuedInput ? { queuedMessage: p.queuedInput.map((item) => item.text).join("\n") } : {}) };
     case "message.started": return { role: item.type === "userMessage" ? "user" : "assistant" };
     case "message.delta": return { role: "assistant", block: { type: "text", text: p.delta ?? "" } };
     case "message.completed": return { message: canonicalMessage(item, item.type === "userMessage" ? "user" : "assistant") };
@@ -208,7 +209,8 @@ function payloadFor(type, message, receivedAt) {
     case "question.resolved": return { requestId: String(p.requestId), action: "accept", values: p.answers ?? null };
     case "question.closed": return { requestId: String(p.requestId), reason: "answered" };
     case "director.notified": return { notificationId: String(p.id ?? p.notificationId ?? ""), message: p.message ?? "", pendingRequestId: p.pendingRequestId == null ? null : String(p.pendingRequestId) };
-    case "control.message.updated": return { message: p.message ?? "", mode: p.interrupt ? "interrupt" : "queued", accepted: p.status !== "rejected" };
+    case "control.message.updated": return { message: p.message ?? "", mode: p.interrupt ? "interrupt" : "queued", accepted: p.status !== "rejected",
+      ...(p.queued ? { queued: true } : {}), ...(p.queuedJobId ? { queuedJobId: p.queuedJobId } : {}) };
     case "agent.activity": return { agentId: String(item.agentThreadId), parentAgentId: p.threadId == null ? null : String(p.threadId),
       path: String(item.agentPath ?? item.agentThreadId).split("/").filter(Boolean).at(-1), status: item.kind ?? "interacted" };
     case "source.error": return { code: p.error?.code ?? null, message: p.error?.message ?? p.message ?? "Unknown error", data: p.error ?? null };

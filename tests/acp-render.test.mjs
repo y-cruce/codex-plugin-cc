@@ -45,12 +45,14 @@ test("ACP accepted queue and interrupt messages use the Codex director rows, inc
     assert.ok(control, mode);
     const codex = normalizeCodexEvent({ method: "companion/control-message", params: {
       message: prompt[0].text, interrupt: mode === "interrupt", status: "accepted",
+      ...(mode === "queued" ? { queued: true, queuedJobId: "next" } : {}),
     } }, h.job);
     assert.deepEqual(control.payload, codex.payload);
     assert.equal(control.identity.turnId, "turn");
     assert.equal(control.agent, undefined, "director messages belong to the parent");
     assert.match(h.draw(), mode === "queued" ? /◆ ↓ Director message/ : /◆ ↓ Director interrupt/);
-    assert.ok(h.draw().includes(prompt[0].text));
+    assert.ok(h.draw().includes(mode === "queued" ? prompt[0].text.replace(/\s+/gu, " ") : prompt[0].text));
+    if (mode === "queued") assert.equal(h.view.queuedPrompts[0].text, prompt[0].text);
 
     const count = h.events.length;
     if (mode === "queued") await assert.rejects(port.queuePrompt({ turnId: "stale", prompt }));

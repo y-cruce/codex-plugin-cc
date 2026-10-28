@@ -107,7 +107,7 @@ export interface CanonicalEventPayloadMap {
   "job.failed": JobTerminalPayload;
   "job.cancelled": JobTerminalPayload;
   "turn.started": { ordinal: number; prompt: CanonicalContentBlock[] };
-  "turn.completed": { status: "completed" | "failed" | "cancelled" | "interrupted"; reason: CanonicalTerminalReason; finalMessages: CanonicalMessage[]; usage: CanonicalUsage | null };
+  "turn.completed": { status: "completed" | "failed" | "cancelled" | "interrupted"; reason: CanonicalTerminalReason; finalMessages: CanonicalMessage[]; usage: CanonicalUsage | null; queuedMessage?: string };
   "message.started": { role: "assistant" | "user" };
   "message.delta": { role: "assistant" | "user"; block: CanonicalContentBlock };
   "message.completed": { message: CanonicalMessage };
@@ -140,7 +140,7 @@ export interface CanonicalEventPayloadMap {
   "permission.requested": { requestId: string; tool: CanonicalToolSnapshot; options: Array<{ optionId: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | "unknown" }> };
   "permission.resolved": { requestId: string; outcome: "selected" | "cancelled"; optionId: string | null };
   "director.notified": { notificationId: string; message: string; pendingRequestId: string | null };
-  "control.message.updated": { message: string; mode: "queued" | "interrupt"; accepted: boolean };
+  "control.message.updated": { message: string; mode: "queued" | "interrupt"; accepted: boolean; queued?: boolean; queuedJobId?: string };
   "agent.activity": { agentId: string; parentAgentId: string | null; path: string; status: "started" | "interacted" | "completed" | "interrupted" | "failed" };
   "source.warning": SourceNoticePayload;
   "source.error": SourceNoticePayload;

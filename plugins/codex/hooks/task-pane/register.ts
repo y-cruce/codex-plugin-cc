@@ -1326,8 +1326,16 @@ function visibleThreads(state: State): PaneView[] {
       // A view can advance before the next job-file scan. Started rounds are
       // no longer queued, even if their cached job still says they are.
       const started = new Set([view.jobId, view.activeRoundId, view.latestRoundId, ...(view.rounds ?? []).map(round => round.jobId)])
-      const queuedCount = (queued.get(path) ?? []).filter(job => !started.has(job.id)).length
-      return queuedCount ? { ...view, queuedCount, ...(isOver(view) ? { status: 'queued', endedAt: null } : {}) } : view
+      const pending = (queued.get(path) ?? []).filter(job => !started.has(job.id))
+        .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''))
+      const queuedPrompts = [...(view.queuedPrompts ?? [])]
+      for (const job of pending) {
+        if (queuedPrompts.some(prompt => prompt.jobId === job.id)) continue
+        const text = job.request?.prompt?.split('---- Brief ----').at(-1)?.trim()
+        if (text) queuedPrompts.push({ jobId: job.id, text })
+      }
+      return { ...view, queuedPrompts, queuedCount: pending.length + queuedPrompts.filter(prompt => !prompt.jobId).length,
+        ...(pending.length && isOver(view) ? { status: 'queued', endedAt: null } : {}) }
     })
     .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
     .sort((a, b) => {
