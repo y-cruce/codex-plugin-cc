@@ -91,8 +91,11 @@ export class LiveTurnControl {
       }
       if (state.error) p.controlError = state.error;
       if (!state.redirectInput) {
-        const queued = state.queuedMessages.shift();
-        if (queued) p.queuedInput = queued.input;
+        const queued = state.queuedMessages.splice(0);
+        if (queued.length) {
+          p.queuedInput = queued.flatMap(entry => entry.input);
+          p.queuedMessages = queued.map(entry => entry.input.map(item => item.text).join("\n"));
+        }
       }
       delete state.redirectInput;
       state.undeliveredMessages = state.pendingMessages;

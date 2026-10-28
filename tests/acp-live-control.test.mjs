@@ -287,26 +287,33 @@ test("ACP queued turns and permission control", async (t) => {
   for (const entry of cases) await t.test(entry.name, (subtest) => entry.run(subtest));
 });
 
-test("Codex queue waits for natural completion and preserves FIFO", async () => {
+test("Codex queue sends the entire backlog to one turn in arrival order", async () => {
   const requests = [];
   const control = new LiveTurnControl({ cwd: process.cwd(), request: async (...args) => { requests.push(args); } }, () => {});
   control.starting({ threadId: "thread-1", cwd: process.cwd() });
   control.observe({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
-  for (const text of ["queued-first", "queued-second"]) {
+  const inputs = [[{ type: "text", text: "queued-first" }, { type: "text", text: "first-detail" }],
+    [{ type: "text", text: "queued-second" }], [{ type: "text", text: "queued-second" }]];
+  for (const input of inputs) {
     const result = await control.request("broker/queue", {
-      threadId: "thread-1", expectedTurnId: "turn-1", input: [{ type: "text", text }]
+      threadId: "thread-1", expectedTurnId: "turn-1", input
     });
     assert.equal(result.queued, true);
   }
   assert.deepEqual(control.snapshot("thread-1").pendingMessages.map((entry) => entry.input[0].text),
-    ["queued-first", "queued-second"]);
+    ["queued-first", "queued-second", "queued-second"]);
 
   const first = { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } };
   control.observe(first);
-  assert.equal(first.params.queuedInput[0].text, "queued-first");
+  assert.deepEqual(first.params.queuedInput, inputs.flat());
+  assert.deepEqual(first.params.queuedMessages, ["queued-first\nfirst-detail", "queued-second", "queued-second"]);
+  assert.deepEqual(control.snapshot("thread-1").pendingMessages, []);
   control.observe({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-2" } } });
+  await control.request("broker/queue", {
+    threadId: "thread-1", expectedTurnId: "turn-2", input: [{ type: "text", text: "next-batch" }]
+  });
   const second = { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-2", status: "completed" } } };
   control.observe(second);
-  assert.equal(second.params.queuedInput[0].text, "queued-second");
+  assert.deepEqual(second.params.queuedInput, [{ type: "text", text: "next-batch" }]);
   assert.deepEqual(requests, []);
 });

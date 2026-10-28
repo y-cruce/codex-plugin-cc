@@ -123,7 +123,7 @@ export type AppServerMethod = keyof AppServerMethodMap;
 export type AppServerRequestParams<M extends AppServerMethod> = AppServerMethodMap[M]["params"];
 export type AppServerResponse<M extends AppServerMethod> = AppServerMethodMap[M]["result"];
 export type AppServerNotification = Exclude<ServerNotification, { method: "turn/completed" }> |
-  { method: "turn/completed"; params: TurnCompletedNotification & { redirectInput?: UserInput[]; queuedInput?: UserInput[]; controlError?: string; interruptedWorkspaceStatus?: string } } |
+  { method: "turn/completed"; params: TurnCompletedNotification & { redirectInput?: UserInput[]; queuedInput?: UserInput[]; queuedMessages?: string[]; controlError?: string; interruptedWorkspaceStatus?: string } } |
   { method: "companion/question"; params: { threadId: string; turnId: string; requestId: string | number } } |
   { method: "companion/notification"; params: DirectorNotification & { threadId: string } };
 export type AppServerNotificationHandler = (message: AppServerNotification) => void;

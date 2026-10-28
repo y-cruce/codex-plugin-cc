@@ -107,7 +107,7 @@ export interface CanonicalEventPayloadMap {
   "job.failed": JobTerminalPayload;
   "job.cancelled": JobTerminalPayload;
   "turn.started": { ordinal: number; prompt: CanonicalContentBlock[] };
-  "turn.completed": { status: "completed" | "failed" | "cancelled" | "interrupted"; reason: CanonicalTerminalReason; finalMessages: CanonicalMessage[]; usage: CanonicalUsage | null; queuedMessage?: string };
+  "turn.completed": { status: "completed" | "failed" | "cancelled" | "interrupted"; reason: CanonicalTerminalReason; finalMessages: CanonicalMessage[]; usage: CanonicalUsage | null; queuedMessages?: string[]; queuedMessage?: string };
   "message.started": { role: "assistant" | "user" };
   "message.delta": { role: "assistant" | "user"; block: CanonicalContentBlock };
   "message.completed": { message: CanonicalMessage };

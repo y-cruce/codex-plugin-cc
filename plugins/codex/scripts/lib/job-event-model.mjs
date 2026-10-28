@@ -423,16 +423,26 @@ export function applyJobEvent(view, event, options = {}) {
         view.pendingQuestion = null;
         if (view._startingPrompt) {
           const prompt = view._startingPrompt;
-          view.queuedPrompts = view.queuedPrompts.filter(item => item.seq !== prompt.seq);
+          const selected = new Set(prompt.seqs ?? [prompt.seq]);
+          view.queuedPrompts = view.queuedPrompts.filter(item => !selected.has(item.seq));
           updateTail(view, { ...event, type: "control.message.updated" }, `director → message: ${prompt.text}`);
           delete view._startingPrompt;
         }
       }
       break;
-    case "turn.completed":
+    case "turn.completed": {
       view.activeCommands = view.activeCommands.filter((command) => view._items[command._key]?.turnId !== identity.turnId);
-      if (!child && p.queuedMessage != null) view._startingPrompt = view.queuedPrompts?.find(prompt => !prompt.jobId && prompt.text === p.queuedMessage);
+      const messages = p.queuedMessages ?? (p.queuedMessage == null ? null : [p.queuedMessage]);
+      if (!child && messages) {
+        const pending = [...(view.queuedPrompts ?? [])];
+        const selected = messages.flatMap(message => {
+          const index = pending.findIndex(prompt => !prompt.jobId && prompt.text === message);
+          return index < 0 ? [] : pending.splice(index, 1);
+        });
+        view._startingPrompt = selected.length ? { seqs: selected.map(prompt => prompt.seq), text: selected.map(prompt => prompt.text).join("\n\n") } : null;
+      }
       break;
+    }
     case "control.message.updated":
       if (p.queued && p.accepted) {
         view.queuedPrompts ??= [];

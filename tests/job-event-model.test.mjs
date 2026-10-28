@@ -22,28 +22,31 @@ test("a reserved turn remains queued until it starts", () => {
   assert.equal(createLiveView({ id: "job-queued", status: "queued" }).status, "queued");
 });
 
-test("queued director messages wait outside the trace and open their own turns in FIFO order", () => {
+test("queued director messages enter the next turn together and clear the waiting area after restoration", () => {
   const { view, accept } = harness();
-  for (const message of ["First instruction\nKeep the full body.", "Second instruction"]) {
+  const messages = ["First instruction\nKeep the full body.", "Second instruction", "Second instruction"];
+  for (const message of messages) {
     accept("companion/control-message", { message, queued: true, status: "accepted" });
   }
   accept("item/completed", { item: { type: "agentMessage", id: "previous", text: "Previous answer" } });
   assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer"]);
-  assert.deepEqual(view.queuedPrompts.map(item => item.text), ["First instruction\nKeep the full body.", "Second instruction"]);
+  assert.deepEqual(view.queuedPrompts.map(item => item.text), messages);
   // An interrupt starts a replacement turn before the queued instructions.
   accept("turn/completed", { turn: { id: "turn-1", status: "interrupted" } });
   accept("turn/started", { turn: { id: "replacement" } });
-  assert.equal(view.queuedPrompts.length, 2);
-  accept("turn/completed", { turn: { id: "replacement", status: "completed" }, queuedInput: [{ type: "text", text: view.queuedPrompts[0].text }] });
+  assert.equal(view.queuedPrompts.length, 3);
+  accept("turn/completed", { turn: { id: "replacement", status: "completed" },
+    queuedInput: messages.map(text => ({ type: "text", text })), queuedMessages: messages });
   const restored = JSON.parse(JSON.stringify(view));
   const start = accept("turn/started", { turn: { id: "turn-2" } });
   applyJobEvent(restored, start);
   assert.deepEqual(restored.queuedPrompts, view.queuedPrompts);
-  assert.deepEqual(view.queuedPrompts.map(item => item.text), ["Second instruction"]);
-  assert.equal(view.tail.at(-1).text, "director → message: First instruction\nKeep the full body.");
+  assert.deepEqual(view.queuedPrompts, []);
+  const batch = `director → message: ${messages.join("\n\n")}`;
+  assert.equal(view.tail.at(-1).text, batch);
   assert.equal(view.tail.at(-1).seq, start.seq);
   accept("item/completed", { item: { type: "agentMessage", id: "next", text: "Next answer" } });
-  assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer", "director → message: First instruction\nKeep the full body.", "assistant: Next answer"]);
+  assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer", batch, "assistant: Next answer"]);
 });
 
 test("normalization preserves full source and event identity without modifying it", () => {

@@ -169,7 +169,7 @@ function payloadFor(type, message, receivedAt) {
     case "turn.started": return { ordinal: 0, prompt: [] };
     case "turn.completed": return { status: p.turn?.status === "interrupted" ? "interrupted" : p.turn?.status === "failed" ? "failed" : "completed",
       reason: terminalReason(p.turn?.status, p.turn?.error), finalMessages: [], usage: null,
-      ...(p.queuedInput ? { queuedMessage: p.queuedInput.map((item) => item.text).join("\n") } : {}) };
+      ...(p.queuedInput ? { queuedMessages: p.queuedMessages ?? [p.queuedInput.map((item) => item.text).join("\n")] } : {}) };
     case "message.started": return { role: item.type === "userMessage" ? "user" : "assistant" };
     case "message.delta": return { role: "assistant", block: { type: "text", text: p.delta ?? "" } };
     case "message.completed": return { message: canonicalMessage(item, item.type === "userMessage" ? "user" : "assistant") };
