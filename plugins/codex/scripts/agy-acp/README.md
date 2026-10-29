@@ -14,10 +14,28 @@ node plugins/codex/scripts/agy-acp/acp-proxy.mjs
 export CODEX_DIRECTOR_ANTIGRAVITY_COMMAND="$PWD/plugins/codex/scripts/agy-acp/acp-proxy.mjs"
 ```
 
-The default remains `gemini-4-argon-high`, with the same process-local proxy
-removal as the current launcher. OAuth, account, quota, settings and the official
-binaries are used in place. No global installation or launcher modification is
-performed by these commands.
+The default remains `gemini-4-argon-high`. The proxy passes the launcher's proxy
+environment to the official ACP server and its helper. OAuth, account, quota,
+settings and the official binaries are used in place. No global installation or
+launcher modification is performed by these commands.
+
+For this machine's mihomo mixed port, set these in the ACP launcher before its
+`exec` line. Set both casings so an inherited value cannot select a different
+proxy; bypass only loopback traffic used by the local ACP harness and OAuth
+callback:
+
+```sh
+export HTTP_PROXY="http://127.0.0.1:7890" HTTPS_PROXY="http://127.0.0.1:7890"
+export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+export ALL_PROXY="$HTTP_PROXY" all_proxy="$HTTP_PROXY"
+export NO_PROXY="localhost,127.0.0.1,::1,[::1]"
+export no_proxy="$NO_PROXY"
+```
+
+The local `~/.local/share/antigravity-acp/1.4.4/launch.sh` uses this configuration.
+The official personal-account ACP client uses Python `urllib` for CCPA requests,
+which reads these proxy variables. `sandboxProxy` configures sandboxed terminal
+commands in the CLI; it is not the ACP server's outbound proxy setting.
 
 Plugin 1.4.103 includes both proxy scripts under `scripts/agy-acp/` and their
 runtime dependency. An installed plugin's `scripts/agy-acp/acp-proxy.mjs` can

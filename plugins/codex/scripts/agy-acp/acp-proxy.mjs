@@ -48,8 +48,6 @@ export async function runAcpProxy() {
   const env = { ...process.env, AGY_ACP_DEFAULT_MODEL: "gemini-4-argon-high",
     AGY_OFFICIAL_RUNTIME_DIR: runtimeDir, ANTIGRAVITY_HARNESS_PATH: path.join(ROOT, "harness-proxy.mjs"),
     AGY_STEERING_CONTROL: endpoint };
-  // Match the installed official launcher's process-local proxy handling.
-  for (const key of Object.keys(env)) if (/^(http|https|all)_proxy$/i.test(key)) delete env[key];
   const child = spawn(path.join(runtimeDir, "agy_acp_server.par"), process.argv.slice(2), { env, stdio: ["pipe", "pipe", "pipe"] });
   child.stderr.pipe(process.stderr);
   let output = "";
