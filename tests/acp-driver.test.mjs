@@ -61,11 +61,38 @@ function recordingPort(configOptions, options = {}) {
     onProgress: (update) => progress.push(update) });
   port.connection = { setSessionConfigOption: async (params) => {
     requests.push({ method: "session/set_config_option", params });
-    return { configOptions: configOptions.map((option) => ({ ...option,
-      currentValue: option.id === params.configId ? params.value : option.currentValue })) };
+    configOptions = configOptions.map((option) => ({ ...option,
+      currentValue: option.id === params.configId ? params.value : option.currentValue }));
+    return { configOptions };
   } };
   return { port, requests, progress, response: { configOptions } };
 }
+
+test("new Antigravity sessions default to Argon high, honor overrides and preserve resumed sessions", async () => {
+  for (const row of [
+    { agent: "antigravity-acp", model: "gemini-4-argon", effort: "high" },
+    { agent: "antigravity-acp", overrides: { modelId: "gemini-3.8-flash", effortId: "low" }, model: "gemini-3.8-flash", effort: "low" },
+    { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low" },
+    { agent: "other-acp", model: "gemini-3.8-flash", effort: "low" }
+  ]) {
+    const h = recordingPort([
+      { type: "select", id: "model", currentValue: "gemini-3.8-flash",
+        options: ["gemini-4-argon", "gemini-3.8-flash"].map(value => ({ value })) },
+      { type: "select", id: "thinking_level", currentValue: "low",
+        options: ["low", "medium", "high"].map(value => ({ value })) }
+    ], row.overrides);
+    h.port.initializeResponse = { agentInfo: { name: row.agent } };
+    h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });
+    h.port.connection.resumeSession = async () => h.response;
+    h.port.sessionResult = async (sessionId, response) => ({ sessionId, configOptions: response.configOptions });
+    const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession({});
+    const configured = Boolean(row.overrides) || row.agent === "antigravity-acp" && !row.resume;
+    assert.equal(result.configOptions.find(option => option.id === "model").currentValue, row.model);
+    assert.equal(result.configOptions.find(option => option.id === "thinking_level").currentValue, row.effort);
+    assert.equal(result.effortId, configured ? row.effort : null);
+    assert.equal(h.requests.length, configured ? 2 : 0);
+  }
+});
 
 test("ACP model selection keeps the agent default unless a model is named", async () => {
   for (const row of [

@@ -496,6 +496,10 @@ The updated code-director skill assigns frontend design, implementation, debuggi
 
 更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
 
+New Antigravity sessions default to `gemini-4-argon` with `high` thinking. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
+
+Antigravity 新会话默认使用 `gemini-4-argon`、思考强度 `high`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
+
 With the updated code-director skill, dispatch with `executor: "antigravity"`. It runs Google's official `agy_acp_server.par` / `agy_acp_server` over stdio ACP, with no launch arguments. Install the binary from the [ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json), keeping `localharness_external` beside it, and complete its Google login first. The server stores settings in `~/.gemini/antigravity-acp/`. Override the executable with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; the default permission policy is `allow-once`. Continue with the returned session id and the same executor. For direct companion calls:
 
 ```bash
