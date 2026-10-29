@@ -153,7 +153,7 @@ test("state GC keeps usable or uncertain stores, deletes only idle garbage, and 
     assert.equal(parsed.complete, true);
     assert.equal(parsed.entries.length, cases.length - 4 + 1);
     assert.ok(parsed.entries.some(row => row.stateDir === outside));
-    assert.equal(fs.statSync(file).mtimeMs, old.getTime(), "pruning preserves index idle age");
+    assert.equal(Math.round(fs.statSync(file).mtimeMs), old.getTime(), "pruning preserves index idle age");
   }
   const later = path.join(root, "later");
   put(path.join(later, "jobs/job.json"), job);

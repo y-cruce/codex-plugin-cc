@@ -110,6 +110,7 @@ test("queued Codex messages are delivered together in one next turn and leave no
   assert.equal(listing.status, 0, listing.stderr);
   const viewPath = JSON.parse(listing.stdout).threads.find(thread => thread.jobId === job.id).viewPath;
   const view = () => JSON.parse(fs.readFileSync(viewPath, "utf8"));
+  await waitFor(() => view().queuedPrompts?.length === pending.length, "queued prompt projection");
   assert.deepEqual(view().queuedPrompts.map(prompt => prompt.text), pending);
   assert.equal(view().tail.some(row => row.text.includes("queued-next")), false);
   assert.equal(h.cli("message", job.id, "finish").status, 0);
