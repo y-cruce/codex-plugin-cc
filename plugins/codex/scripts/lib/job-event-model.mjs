@@ -224,7 +224,8 @@ export function executorView(job) {
   const executor = job?.executor ?? "codex";
   const command = String(job?.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
   const acpLabel = /^dsh(?:-[\w-]+)?(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
-    : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder" : "ACP";
+    : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder"
+    : /^agy_acp_server(?:\.(?:par|exe))?$/i.test(command) ? "Antigravity" : "ACP";
   return { kind: executor, label: executor === "acp" ? acpLabel : "Codex" };
 }
 

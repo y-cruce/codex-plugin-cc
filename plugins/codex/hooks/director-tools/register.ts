@@ -41,10 +41,10 @@ const TOOLS = [
         model: { type: 'string', description: 'MODEL: only when the user asks, or luna for bulk mechanical work.' },
         siblings: { type: 'string', description: 'SIBLINGS: one line naming the other running tasks.' },
         sandbox: { type: 'string', enum: ['full', 'network', 'default'], description: 'SANDBOX: only when the user asks.' },
-        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'acp'], description: 'EXECUTOR: only when the user asks.' },
+        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: agy for frontend work; otherwise only when the user asks. agy aliases antigravity.' },
         executor_command: { type: 'string', description: 'EXECUTOR_COMMAND: override the ACP executable.' },
         executor_args: { type: 'array', items: { type: 'string' }, description: 'EXECUTOR_ARGS: arguments for the ACP executable; dsh defaults to --profile acp.' },
-        executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP permission policy. dsh defaults to allow-once; ask forwards offered choices to the director.' },
+        executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP permission policy. dsh and antigravity default to allow-once; ask forwards offered choices to the director.' },
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor.' },
         executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for a non-Codex executor.' },
       },
@@ -55,7 +55,7 @@ const TOOLS = [
     name: 'message',
     description: 'Send a correction to a running job: dispatch.sh message. Defaults to native Codex steer '
       + '(read at its next model request in the active turn). Set delivery to queue only for an explicitly '
-      + 'requested next turn or an ACP executor (qoder/dsh), or interrupt to cancel the turn and run this now. '
+      + 'requested next turn or an ACP executor (qoder/dsh/antigravity), or interrupt to cancel the turn and run this now. '
       + 'Returns MESSAGED or MESSAGE_FAILED.',
     inputSchema: {
       type: 'object',

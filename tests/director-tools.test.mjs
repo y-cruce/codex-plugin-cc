@@ -63,6 +63,8 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   await startDirectorTools(installed.$, installed.tools);
   assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status", "tasks", "cancel"]);
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
+  const executors = installed.registered.find(spec => spec.name === "dispatch").inputSchema.properties.executor.enum;
+  assert.ok(["antigravity", "agy"].every(name => executors.includes(name)));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
   const missing = harness({ files: [COMPANION] });

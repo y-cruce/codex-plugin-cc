@@ -486,6 +486,28 @@ Yes. Because the plugin uses your local Codex CLI, your existing sign-in method 
 
 If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
 
+## Antigravity executor / Antigravity 执行器
+
+`antigravity` is the canonical executor name; `agy` is an equivalent alias in native dispatch fields and the skill's `EXECUTOR` header. Both launch the same ACP server and can continue the same session.
+
+执行器正式名称为 `antigravity`，`agy` 是等价别名；原生派单字段和技能的 `EXECUTOR` 头部均支持，两种名称可以续接同一会话。
+
+The updated code-director skill assigns frontend design, implementation, debugging, verification and reviews to agy by default, including small changes. Frontend reviews use an `investigate` task with a read-only review brief.
+
+更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
+
+With the updated code-director skill, dispatch with `executor: "antigravity"`. It runs Google's official `agy_acp_server.par` / `agy_acp_server` over stdio ACP, with no launch arguments. Install the binary from the [ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json), keeping `localharness_external` beside it, and complete its Google login first. The server stores settings in `~/.gemini/antigravity-acp/`. Override the executable with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; the default permission policy is `allow-once`. Continue with the returned session id and the same executor. For direct companion calls:
+
+```bash
+node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command agy_acp_server.par --executor-args '[]' --executor-permissions allow-once --json "Inspect the project"
+```
+
+更新 code-director 技能后，派单传 `executor: "antigravity"`，通过 stdio ACP 启动官方 `agy_acp_server.par` / `agy_acp_server`，无需启动参数。先从 [ACP 注册表](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json)安装服务，保留旁边的 `localharness_external` 并完成服务自身的 Google 登录；配置目录是 `~/.gemini/antigravity-acp/`。可用 `executor_command` 或 `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND` 指定程序，权限默认 `allow-once`。后续使用相同执行器和返回的 session id 继续对话。
+
+Expose the matching helper on PATH or set `ANTIGRAVITY_HARNESS_PATH` to its absolute path. The runtime creates `skills/system/run-workflow/SKILL.md` in the workspace during `session/new`, before any prompt.
+
+配套程序需要在 PATH 中，或通过 `ANTIGRAVITY_HARNESS_PATH` 指定绝对路径。运行时在 `session/new` 时会向工作区生成 `skills/system/run-workflow/SKILL.md`，此时尚未发送提示词。
+
 ## DeepSeek Harness executor / DSH 执行器
 
 With the updated code-director skill, `mcp__codex__dispatch` accepts `executor: "dsh"`. It launches the existing ACP worker with `dsh --profile acp`; override the executable with `executor_command` or `CODEX_DIRECTOR_DSH_COMMAND`, and launch arguments with the `executor_args` string array. For direct companion calls:
