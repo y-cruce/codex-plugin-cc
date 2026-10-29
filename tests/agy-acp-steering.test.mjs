@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
-import { initializeResponse, steeringSession } from "../plugins/codex/scripts/agy-acp/acp-proxy.mjs";
+import { initializeRequest, initializeResponse, steeringSession } from "../plugins/codex/scripts/agy-acp/acp-proxy.mjs";
 import { encodeVarint, replacePort, readFrame, writeFrame } from "../plugins/codex/scripts/agy-acp/harness-proxy.mjs";
 
 test("OutputConfig changes only its port and config framing handles split chunks", async () => {
@@ -36,4 +36,16 @@ test("steering is advertised only for the verified official runtime and preserve
   assert.deepEqual(initializeResponse({ result }).result._meta, { own: true, steering: { supported: true } });
   const unknown = { result: { agentInfo: { name: "antigravity-acp", version: "1.4.5" } } };
   assert.equal(initializeResponse(unknown), unknown);
+});
+
+test("the agy adapter reports zed without changing initialize capabilities or other messages", () => {
+  const request = { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+    protocolVersion: 1, clientCapabilities: { elicitation: { form: {} }, plan: {} },
+    clientInfo: { name: "codex-companion", version: "1", title: "Director" }, _meta: { own: true }
+  } };
+  assert.deepEqual(initializeRequest(request), { ...request, params: { ...request.params,
+    clientInfo: { ...request.params.clientInfo, name: "zed" } } });
+  assert.equal(request.params.clientInfo.name, "codex-companion");
+  const prompt = { method: "session/prompt", params: { sessionId: "session", prompt: [] } };
+  assert.equal(initializeRequest(prompt), prompt);
 });
