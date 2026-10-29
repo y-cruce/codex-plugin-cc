@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef } from "../plugins/codex/scripts/lib/director-delivery.mjs";
-import { openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
+import { AcpExecutorJobPort, openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
+import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
 import { loadAcpDriver } from "../plugins/codex/scripts/lib/acp.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { resolveLiveViewPath } from "../plugins/codex/scripts/lib/job-event-store.mjs";
@@ -66,6 +67,99 @@ function readRecording(file) {
 function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
+
+test("ACP steering extensions require confirmed injection and leave idle input with the client", async () => {
+  for (const [outcome, code] of [["injected", null], ["promptRequired", "TURN_NOT_ACTIVE"], [null, "INVALID_RESPONSE"]]) {
+    const events = [];
+    const port = new AcpExecutorJobPort({ job: { id: "extension-steering" } });
+    port.sessionId = "session";
+    port.capabilities.midTurnSteer = true;
+    port.steeringExtension = true;
+    port.activeTurn = { turnId: "turn", accepting: true, messages: [] };
+    port.adapter = new AcpEventAdapter(event => events.push(event), { job: port.job });
+    port.adapter.bindSession(port.sessionId);
+    const prompt = [{ type: "text", text: "Use the current plan." }];
+    port.connection = { extMethod: async (method, params) => {
+      assert.equal(method, "_session/steering");
+      assert.deepEqual(params, { sessionId: "session", prompt, _meta: { steering: { idleBehavior: "promptRequired" } } });
+      return outcome ? { outcome } : null;
+    } };
+    const result = port.steerPrompt({ sessionId: "session", turnId: "turn", prompt });
+    if (code) {
+      await assert.rejects(result, error => error.code === code);
+      assert.equal(events.length, 0);
+      assert.equal(port.activeTurn.messages.length, 0);
+    } else {
+      const ack = await result;
+      assert.equal(ack.accepted, true);
+      assert.equal(ack.consumed, null);
+      assert.equal(events[0].payload.accepted, true);
+      assert.equal(port.activeTurn.messages.length, 1);
+    }
+  }
+});
+
+test("Qoder validates steering, fails on rejection before root completion and ignores later cleanup errors", async () => {
+  const events = [];
+  const responses = [];
+  const port = new AcpExecutorJobPort({ job: { id: "qoder-rejection" } });
+  port.sessionId = "session";
+  port.adapter = new AcpEventAdapter(event => events.push(event), { job: port.job });
+  port.adapter.bindSession(port.sessionId);
+  port.exitPromise = new Promise(() => {});
+  port.connection = { prompt: () => new Promise((resolve, reject) => responses.push({ resolve, reject })) };
+  const prompt = [{ type: "text", text: "correction" }];
+  const turn = await port.startTurn({ sessionId: port.sessionId, prompt });
+  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /does not support/i);
+  port.capabilities.midTurnSteer = true;
+  for (const request of [
+    { sessionId: "wrong", turnId: turn.turnId, prompt },
+    { sessionId: port.sessionId, turnId: "stale", prompt },
+    { sessionId: port.sessionId, turnId: turn.turnId, prompt: [] }
+  ]) await assert.rejects(port.steerPrompt(request));
+  port.questions.set("question", {});
+  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /pending question/i);
+  port.questions.clear();
+  port.permissions.set("permission", {});
+  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /pending question/i);
+  port.permissions.clear();
+  assert.equal(responses.length, 1);
+  await port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt });
+  const failed = assert.rejects(turn.done, /explicit steering rejection/);
+  responses[1].reject(new Error("explicit steering rejection"));
+  await waitFor(() => events.some(event => event.type === "source.error"));
+  responses[0].resolve({ stopReason: "end_turn" });
+  await failed;
+  assert.equal(events.filter(event => event.type === "turn.completed").length, 0);
+  assert.ok(events.some(event => event.type === "source.error" && /explicit steering rejection/.test(event.payload.message)));
+
+  const next = await port.startTurn({ sessionId: port.sessionId, prompt });
+  await port.steerPrompt({ sessionId: port.sessionId, turnId: next.turnId, prompt });
+  responses[2].resolve({ stopReason: "end_turn" });
+  assert.equal((await next.done).status, "completed");
+  const count = events.length;
+  responses[3].reject(new Error("connection closed during cleanup"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.length, count, "cleanup must not emit events after turn completion");
+
+  for (const [method, expected] of [["cancelJob", "cancelled"], ["interruptTurn", "interrupted"]]) {
+    const offset = responses.length;
+    const stopping = await port.startTurn({ sessionId: port.sessionId, prompt });
+    await port.steerPrompt({ sessionId: port.sessionId, turnId: stopping.turnId, prompt });
+    port.connection.cancel = async () => {
+      responses[offset + 1].resolve({ stopReason: "cancelled" });
+      await new Promise(resolve => setImmediate(resolve));
+      responses[offset].resolve({ stopReason: "cancelled" });
+    };
+    const beforeStop = events.length;
+    const terminal = await port[method]({ sessionId: port.sessionId, turnId: stopping.turnId, timeoutMs: 1000 });
+    assert.equal(terminal.status, expected);
+    assert.equal(await stopping.done, terminal);
+    const stopped = events.slice(beforeStop);
+    assert.equal(stopped.filter(event => event.type === "turn.completed").length, 1);
+    assert.equal(stopped.some(event => event.type === "source.error"), false, "expected cancellation is not a steering rejection");
+  }
+});
 
 test("ACP initialization failure closes the spawned agent", async (t) => {
   isolateTestEnvironment(t);

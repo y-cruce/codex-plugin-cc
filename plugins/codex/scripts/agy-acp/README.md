@@ -1,0 +1,61 @@
+# Official agy ACP steering extension
+
+This local extension runs the installed official `agy_acp_server.par` and
+`localharness_external` from `~/.local/share/antigravity-acp/1.4.4/`.
+It adds `_session/steering` to the ACP connection using the official SDK's
+`send_trigger_notification` transport: an `automatedTrigger` JSON message on
+the existing harness WebSocket.
+
+```sh
+# Run from the plugin repository root.
+npm ci --ignore-scripts
+node plugins/codex/scripts/agy-acp/acp-proxy.mjs
+# Or select it for director dispatches from this checkout:
+export CODEX_DIRECTOR_ANTIGRAVITY_COMMAND="$PWD/plugins/codex/scripts/agy-acp/acp-proxy.mjs"
+```
+
+The default remains `gemini-4-argon-high`, with the same process-local proxy
+removal as the current launcher. OAuth, account, quota, settings and the official
+binaries are used in place. No global installation or launcher modification is
+performed by these commands.
+
+Plugin 1.4.103 includes both proxy scripts under `scripts/agy-acp/` and their
+runtime dependency. An installed plugin's `scripts/agy-acp/acp-proxy.mjs` can
+also be used as the executor command. Selecting the proxy requires the existing
+official 1.4.4 runtime; the stock server alone does not advertise steering.
+
+On the development machine, `~/.local/bin/agy_acp_server.par` resolves to the
+existing 1.4.4 `launch.sh`, which starts this checkout's proxy. Keep the checkout
+in place while that launcher is installed. To restore direct official-server
+launch after this local installation:
+
+```sh
+cp "$HOME/.local/share/antigravity-acp/1.4.4/launch.sh.before-steering" \
+   "$HOME/.local/share/antigravity-acp/1.4.4/launch.sh"
+```
+
+The extension advertises top-level `_meta.steering.supported:true` for the
+verified official 1.4.4 server. `_session/steering` accepts nonempty text content
+blocks. It returns `{outcome:"injected",accepted:true}` after a same-session
+active harness WebSocket write succeeds. This confirms the injection write;
+there is no separate per-message model-consumption acknowledgment. When no ACP
+prompt is running, it returns `{outcome:"promptRequired",reason:"noRunningTurn"}`
+without sending a trigger.
+
+The helper proxy passes the length-prefixed InputConfig through unchanged and
+changes only the OutputConfig port. Its API key remains opaque in memory. It
+passes existing WebSocket frames through and inserts steering on that same
+connection. It does not send a second ACP prompt or a halt/cancel for steering.
+The proxy completes its WebSocket handshake after the original helper connects,
+so the official SDK's startup connection retry window remains effective.
+
+Validation: one isolated official Argon High prompt ran `sleep 7`; an automated
+trigger sent during execution changed the answer to its unique marker before
+the original ACP prompt returned `end_turn`. The helper exited normally.
+Offline tests cover config preservation, framing, the root-response idle
+boundary observed in that run, capability advertisement, and a helper that
+starts listening 400 milliseconds after publishing its configuration.
+
+`AGY_OFFICIAL_RUNTIME_DIR` may specify the existing runtime directory.
+`AGY_STEERING_EVIDENCE` optionally records selected transport events for a local
+test; it is off by default. The helper script must be executable.

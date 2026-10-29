@@ -68,7 +68,8 @@ export interface CodexAppServerClientOptions {
 export interface PendingMessage {
   id: string;
   input: UserInput[];
-  status: "sending" | "accepted";
+  status: "sending" | "accepted" | "sent" | "rejected";
+  error?: string;
   queued?: boolean;
 }
 
@@ -113,7 +114,7 @@ export interface AppServerMethodMap {
   "executor/ack-notifications": { params: { jobId: string; executorSessionId?: string | null; ids: string[] }; result: { remaining: number } };
   "executor/answer-question": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; action: string; values: unknown }; result: { answered: boolean; requestId: string | number } };
   "executor/answer-permission": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; outcome: string; optionId?: string | null }; result: { answered: boolean; requestId: string | number } };
-  "executor/steer": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: TurnSteerResponse & { messageId?: string } };
+  "executor/steer": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: TurnSteerResponse & { messageId?: string; sent?: boolean; accepted?: boolean | null; consumed?: null; note?: string } };
   "executor/queue-turn": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: { queued: true; messageId: string; queuedJobId?: string } };
   "executor/interrupt-turn": { params: { jobId: string; executorSessionId?: string | null; turnId: string; replacementPrompt?: Array<{ type: string; text?: string }> }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
   "executor/cancel-job": { params: { jobId: string; executorSessionId?: string | null; turnId: string }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };

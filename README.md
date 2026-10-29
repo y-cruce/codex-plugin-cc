@@ -87,15 +87,36 @@ Use the job ID from `/codex:status` to control an already running task:
 /codex:answer <job-id> --request-id <id> --answers-file /absolute/path/answers.json
 ```
 
-`message` uses native `turn/steer`: inputs stay ordered and are consumed before a later model request, not necessarily before tools already issued by the model. The acknowledgement means accepted, not executed. `--interrupt` cancels the current turn and starts a new turn in the same job and thread with the new input and the original write permission. Existing changes remain; its report includes observed file changes and the workspace's Git status, including pre-existing edits.
+For Codex, `message` uses native `turn/steer`: inputs stay ordered and are consumed before a later model request, not necessarily before tools already issued by the model. The acknowledgement means accepted, not executed. `--interrupt` cancels the current turn and starts a new turn in the same job and thread with the new input and the original write permission. Existing changes remain; its report includes observed file changes and the workspace's Git status, including pre-existing edits.
 
-The director's `mcp__codex__message` tool also defaults to native steering when
-`delivery` is omitted. Use `delivery: "queue"` for ACP executors or an explicitly
-requested next turn; use `delivery: "interrupt"` when the current turn must stop.
+The director's `mcp__codex__message` tool also defaults to steering when
+`delivery` is omitted. Qoder supports it when its initialize response advertises
+`agentCapabilities._meta.qoder.promptQueueing: true` and the plugin reports
+`midTurnSteer: true`: the plugin submits another `session/prompt` in the same
+session and keeps the original prompt response as the job and turn completion
+boundary. Qoder can consume an added message while leaving its RPC pending;
+that pending RPC does not delay completion. Its receipt is
+`sent: true, accepted: null, consumed: null`; it confirms local submission, with
+no separate acknowledgement of acceptance or model consumption. A later request
+rejection received before the original prompt completes fails the turn. Use `delivery: "queue"` for an explicitly requested
+next turn or an ACP agent without steering support; use
+`delivery: "interrupt"` when the current turn must stop.
 
-主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认使用 Codex 原生引导（`turn/steer`），
-在当前轮的后续模型请求中接收补充消息。ACP 执行器或明确要求下一轮执行时使用 `delivery: "queue"`；
-需要停止当前轮时使用 `delivery: "interrupt"`。
+主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认引导当前任务。Qoder 初始化声明
+`agentCapabilities._meta.qoder.promptQueueing: true`，且插件报告 `midTurnSteer: true` 时，
+插件向同一会话追加 `session/prompt`，以原始请求的响应作为同一个 job 和 turn 的完成边界。
+Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求不会阻止任务完成。
+回执 `sent: true, accepted: null, consumed: null` 只确认本地已提交，代理接受与模型消费没有独立确认；
+原始请求完成前收到追加请求的明确拒绝，会使当前轮失败。未提供引导能力的 ACP 执行器，或明确要求下一轮执行时，
+使用 `delivery: "queue"`；需要停止当前轮时使用 `delivery: "interrupt"`。
+
+ACP agents can also advertise top-level `_meta.steering.supported: true`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. Local DSH and Antigravity extensions can expose their runtime's mid-turn input through this route. Unmodified servers that do not advertise it keep queue/interrupt behavior.
+
+ACP 服务也可通过握手顶层 `_meta.steering.supported: true` 声明引导扩展。插件调用 `_session/steering` 并要求 `idleBehavior: "promptRequired"`，只有 `injected` 结果才记为已插入（`accepted: true`，模型消费仍未知）；`promptRequired` 表示消息未送入，需要调用方决定后续操作。DSH 和 Antigravity 的本地扩展可通过此入口连接运行时的追加输入能力，未声明能力的原始服务继续使用 queue/interrupt。
+
+Plugin 1.4.103 includes the [Antigravity proxy and setup instructions](plugins/codex/scripts/agy-acp/README.md). It uses the installed official ACP 1.4.4 runtime. DSH's adapter patch is maintained in [dsh-plugins/acp-steering](https://github.com/y-cruce/dsh-plugins/tree/main/acp-steering).
+
+插件 1.4.103 包含 [Antigravity 引导代理及接入说明](plugins/codex/scripts/agy-acp/README.md)，复用已安装的官方 ACP 1.4.4 运行时；DSH 补丁见 [dsh-plugins/acp-steering](https://github.com/y-cruce/dsh-plugins/tree/main/acp-steering)。
 
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 

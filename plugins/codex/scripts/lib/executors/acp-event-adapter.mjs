@@ -213,10 +213,11 @@ export class AcpEventAdapter {
     return this.record(this.event(type, payload, identity, raw, method));
   }
 
-  controlMessage(prompt, mode, turnId, queuedJobId) {
-    return this.emit("control.message.updated", { message: prompt.map((block) => block.text).join("\n"), mode, accepted: true,
+  controlMessage(prompt, mode, turnId, queuedJobId, accepted = mode === "steer" ? null : true) {
+    return this.emit("control.message.updated", { message: prompt.map((block) => block.text).join("\n"), mode, accepted,
+      ...(mode === "steer" ? { sent: true, consumed: null } : {}),
       ...(mode === "queued" ? { queued: true } : {}), ...(queuedJobId ? { queuedJobId } : {}) },
-      { turnId }, null, mode === "interrupt" ? "executor/interrupt-turn" : "executor/queue-turn");
+      { turnId }, null, mode === "interrupt" ? "executor/interrupt-turn" : mode === "steer" ? "executor/steer" : "executor/queue-turn");
   }
 
   async flushMessage(role) {

@@ -28,8 +28,8 @@ function harness() {
   return { job, view, events, adapter, record, update, draw };
 }
 
-test("ACP accepted queue and interrupt messages use the Codex director rows, including during a sub-agent", async () => {
-  for (const mode of ["queued", "interrupt"]) {
+test("ACP submitted steering, accepted queue and interrupt messages use director rows, including during a sub-agent", async () => {
+  for (const mode of ["queued", "interrupt", "steer"]) {
     const h = harness();
     await h.adapter.startTurn("turn", []);
     h.adapter.subagent = { id: "child", path: "Explore" };
@@ -40,26 +40,27 @@ test("ACP accepted queue and interrupt messages use the Codex director rows, inc
     port.connection = { cancel: async () => {} };
     const prompt = [{ type: "text", text: "Keep the focused tests.\nReport evidence." }];
     if (mode === "queued") await port.queuePrompt({ turnId: "turn", prompt });
-    else await port.interruptTurn({ sessionId: "session", turnId: "turn", replacementPrompt: prompt, timeoutMs: 100 });
+    else if (mode === "interrupt") await port.interruptTurn({ sessionId: "session", turnId: "turn", replacementPrompt: prompt, timeoutMs: 100 });
+    else await h.adapter.controlMessage(prompt, "steer", "turn");
     const [control] = h.events.filter((event) => event.type === "control.message.updated");
     assert.ok(control, mode);
     const codex = normalizeCodexEvent({ method: "companion/control-message", params: {
       message: prompt[0].text, interrupt: mode === "interrupt", status: "accepted",
       ...(mode === "queued" ? { queued: true, queuedJobId: "next" } : {}),
     } }, h.job);
-    assert.deepEqual(control.payload, codex.payload);
+    assert.deepEqual(control.payload, mode === "steer" ? { ...codex.payload, mode: "steer", accepted: null, sent: true, consumed: null } : codex.payload);
     assert.equal(control.identity.turnId, "turn");
     assert.equal(control.agent, undefined, "director messages belong to the parent");
-    assert.match(h.draw(), mode === "queued" ? /◆ ↓ Director message/ : /◆ ↓ Director interrupt/);
+    assert.match(h.draw(), mode === "interrupt" ? /◆ ↓ Director interrupt/ : /◆ ↓ Director message/);
     assert.ok(h.draw().includes(mode === "queued" ? prompt[0].text.replace(/\s+/gu, " ") : prompt[0].text));
     if (mode === "queued") assert.equal(h.view.queuedPrompts[0].text, prompt[0].text);
 
     const count = h.events.length;
     if (mode === "queued") await assert.rejects(port.queuePrompt({ turnId: "stale", prompt }));
-    else {
+    else if (mode === "interrupt") {
       port.connection.cancel = async () => { throw new Error("cancel failed"); };
       await assert.rejects(port.interruptTurn({ sessionId: "session", turnId: "turn", replacementPrompt: prompt }), /cancel failed/);
-    }
+    } else await assert.rejects(port.steerPrompt({ sessionId: "session", turnId: "turn", prompt }));
     assert.equal(h.events.length, count, "rejected controls draw no accepted message");
   }
 });

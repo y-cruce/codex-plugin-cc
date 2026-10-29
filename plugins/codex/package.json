@@ -6,6 +6,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
+    "ws": "8.22.0",
     "zod": "^4.6.5"
   }
 }

@@ -159,7 +159,7 @@ class AcpControlServer {
           await this.port.answerPermission({ requestId: String(p.requestId), outcome: p.outcome, optionId: p.optionId });
           result = { answered: true, requestId: p.requestId };
           break;
-        case "executor/steer": throw Object.assign(new Error("This executor does not support mid-turn steering."), { code: "UNSUPPORTED_CAPABILITY" });
+        case "executor/steer": result = await this.port.steerPrompt({ sessionId: p.executorSessionId, turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/queue-turn": result = await this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/interrupt-turn":
           result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000,
@@ -279,6 +279,9 @@ export class AcpExecutorJobPort {
     const sessionCaps = this.initializeResponse.agentCapabilities?.sessionCapabilities ?? {};
     this.capabilities.resumeSession = Boolean(sessionCaps.resume);
     this.capabilities.sessionModes = false;
+    this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true;
+    this.capabilities.midTurnSteer = this.steeringExtension || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
+      this.initializeResponse.agentCapabilities?._meta?.qoder?.promptQueueing === true);
     this.control = new AcpControlServer(this, this.runtime, this.cwd, this.job.id);
     this.controlEndpoint = await this.control.start();
   }
@@ -431,24 +434,79 @@ export class AcpExecutorJobPort {
     if (this.activeTurn) throw Object.assign(new Error("A turn is already active."), { code: "INVALID_STATE" });
     const turnId = `turn:${crypto.randomUUID()}`;
     await this.adapter.startTurn(turnId, request.prompt);
-    const active = { turnId, interrupting: false, cancelling: false };
-    const response = this.connection.prompt({ sessionId: request.sessionId, prompt: structuredClone(request.prompt) }).catch((error) => {
-      if (/connection closed|transport|stream/i.test(error?.message ?? "")) {
-        throw Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
-      }
-      throw error;
-    });
-    active.done = Promise.race([response, this.exitPromise.then(() => {
-      throw Object.assign(this.exitError ?? new Error(`ACP process exited before the prompt completed.${this.stderr ? `\n${this.stderr.trim()}` : ""}`),
-        { code: "TRANSPORT_CLOSED", retryable: true });
-    })]).then(async (value) => {
+    const active = { turnId, interrupting: false, cancelling: false, accepting: true, messages: [], error: null };
+    this.activeTurn = active;
+    active.done = this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
+      active.accepting = false;
       await this.updateTail;
+      if (active.error) throw active.error;
       return this.adapter.completeTurn(value, { interrupting: active.interrupting && !active.cancelling });
     });
-    this.activeTurn = active;
-    active.done.then(() => { if (this.activeTurn === active) this.activeTurn = null; },
-      () => { if (this.activeTurn === active) this.activeTurn = null; });
+    const settled = () => { active.accepting = false; if (this.activeTurn === active) this.activeTurn = null; };
+    active.done.then(settled, settled);
     return { turnId, done: active.done };
+  }
+
+  promptResponse(prompt, sessionId = this.sessionId) {
+    const response = Promise.resolve().then(() => this.connection.prompt({ sessionId, prompt: structuredClone(prompt) }));
+    return Promise.race([response, this.exitPromise.then(() => {
+      throw Object.assign(this.exitError ?? new Error(`ACP process exited before the prompt completed.${this.stderr ? `\n${this.stderr.trim()}` : ""}`),
+        { code: "TRANSPORT_CLOSED", retryable: true });
+    })]).catch((error) => {
+      if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
+      throw error;
+    });
+  }
+
+  async steerPrompt(request) {
+    if (!this.capabilities.midTurnSteer) throw Object.assign(new Error("This executor does not support mid-turn steering."), { code: "UNSUPPORTED_CAPABILITY" });
+    const active = this.activeTurn;
+    if (!active || active.turnId !== request.turnId || request.sessionId !== this.sessionId || !active.accepting || active.interrupting || active.cancelling) {
+      throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
+    }
+    if (this.questions.size || this.permissions.size) throw Object.assign(new Error("Answer the pending question with answer, or use message --interrupt."), { code: "INVALID_STATE" });
+    if (!Array.isArray(request.prompt) || !request.prompt.length ||
+        request.prompt.some((item) => item.type !== "text" || !item.text?.trim())) {
+      throw Object.assign(new Error("A nonempty text message is required."), { code: "INVALID_ARGUMENT" });
+    }
+    const adapter = this.adapter;
+    let accepted = null;
+    if (this.steeringExtension) {
+      const result = await this.connection.extMethod("_session/steering", {
+        sessionId: this.sessionId, prompt: structuredClone(request.prompt),
+        _meta: { steering: { idleBehavior: "promptRequired" } }
+      });
+      if (result?.outcome === "promptRequired") {
+        throw Object.assign(new Error("Turn is no longer active; the steering message was not delivered."), { code: "TURN_NOT_ACTIVE" });
+      }
+      if (result?.outcome !== "injected") {
+        throw Object.assign(new Error(`ACP steering was not confirmed: ${result?.outcome ?? "missing outcome"}.`), { code: "INVALID_RESPONSE" });
+      }
+      accepted = true;
+    }
+    const message = { id: crypto.randomUUID(), input: structuredClone(request.prompt), status: "sent" };
+    active.messages.push(message);
+    const rejected = async (error) => {
+      if (!active.accepting || this.closed) return;
+      active.error ??= error;
+      message.status = "rejected";
+      message.error = error.message;
+      await adapter.emit("source.error", { code: error.code ?? "STEERING_REJECTED", message: error.message },
+        { turnId: active.turnId, messageId: message.id }, null, "session/prompt");
+    };
+    // Qoder 1.1.78 can consume a queued prompt without settling its RPC.
+    // The root response owns completion; keep observing errors until then.
+    if (!this.steeringExtension) void this.promptResponse(message.input).then((value) => {
+      if (!active.accepting || this.closed) return;
+      if (value.stopReason === "cancelled" && (active.cancelling || active.interrupting)) return;
+      if (value.stopReason !== "end_turn") return rejected(new Error(`Qoder steering ended: ${value.stopReason}`));
+      message.status = "completed";
+    }, rejected).catch((error) => { if (active.accepting) active.error ??= error; });
+    await adapter.controlMessage(message.input, "steer", active.turnId, undefined, accepted);
+    if (message.status === "rejected") throw active.error;
+    return { turnId: active.turnId, messageId: message.id, sent: true, accepted, consumed: null,
+      note: accepted ? "The ACP agent confirmed insertion into the active turn; model consumption is not acknowledged."
+        : "Sent to Qoder's active session; acceptance and model consumption are not acknowledged separately." };
   }
 
   async queuePrompt(request) {
@@ -607,13 +665,15 @@ export class AcpExecutorJobPort {
   liveStatus() {
     const permissions = [...this.permissions.values()].map(permissionQuestion);
     return { threadId: this.sessionId, turnId: this.activeTurn?.turnId ?? null,
-      pendingMessages: this.queuedPrompts.map((entry) => structuredClone({ id: entry.id, jobId: entry.jobId,
-        input: entry.input, status: entry.status, queued: entry.queued })), undeliveredMessages: [],
+      pendingMessages: (this.activeTurn?.messages ?? []).filter(entry => entry.status === "sent").map(entry => structuredClone(entry))
+        .concat(this.queuedPrompts.map((entry) => structuredClone({ id: entry.id, jobId: entry.jobId,
+          input: entry.input, status: entry.status, queued: entry.queued }))),
+      undeliveredMessages: (this.activeTurn?.messages ?? []).filter(entry => entry.status === "rejected").map(entry => structuredClone(entry)),
       questions: [...this.questions.values()].map((entry) => ({ requestId: entry.requestId, turnId: entry.turnId,
         message: entry.payload.message, questions: entry.payload.fields.map((field) => ({ id: field.id,
           question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: null })).concat(permissions),
       permissions, notifications: [], interrupting: Boolean(this.activeTurn?.interrupting),
-      partialChanges: [], error: null, capabilities: { midTurnSteer: false } };
+      partialChanges: [], error: null, capabilities: { midTurnSteer: this.capabilities.midTurnSteer } };
   }
 
   async close() {

@@ -35,6 +35,7 @@ async function waitForRelease(file) {
 
 const modes = { currentModeId: "default", availableModes: ["default", "acceptEdits", "auto", "dontAsk", "yolo"].map((id) => ({ id, name: id, description: null })) };
 const dsh = process.env.ACP_FAKE_DSH === "1";
+const qoderQueueing = process.env.ACP_FAKE_QODER_QUEUEING === "1";
 
 function modelValues() {
   return (process.env.ACP_FAKE_MODEL_OPTIONS ?? (dsh ? "deepseek-official/flash" : "dfmodel,efficient,performance")).split(",").filter(Boolean);
@@ -67,9 +68,10 @@ class FakeAgent {
   initialize(params) {
     record({ method: "initialize", params });
     if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
-    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: dsh ? "deepseek-harness" : "qodercli", version: "test" },
+    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli", version: "test" },
       agentCapabilities: { loadSession: !dsh,
-      sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true } }, authMethods: [] };
+      sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true },
+      ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}) }, authMethods: [] };
   }
 
   newSession(params) {
@@ -157,6 +159,11 @@ class FakeAgent {
   async prompt(params) {
     const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     record({ method: "session/prompt", params });
+    if (qoderQueueing && text.startsWith("qoder-steer:")) {
+      this.sessions.get(params.sessionId).steered = text.slice(12);
+      // Installed Qoder consumes this input but leaves its prompt RPC pending.
+      return new Promise(() => {});
+    }
     if (dsh) {
       const session = this.sessions.get(params.sessionId);
       if (text.startsWith("remember:")) session.remembered = text.slice(9);
@@ -179,6 +186,8 @@ class FakeAgent {
     if (text === "transport-failure") process.exit(23);
     if (text === "hold") {
       await waitForRelease(process.env.ACP_FAKE_RELEASE_FILE);
+      const steered = this.sessions.get(params.sessionId).steered;
+      if (steered) await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: steered } });
       return { stopReason: "end_turn" };
     }
     if (text === "permission") {

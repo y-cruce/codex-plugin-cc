@@ -27,12 +27,12 @@ function recordingPrompts(file) {
     .map((entry) => entry.params.prompt.map((block) => block.text).join("\n"));
 }
 
-async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold", label = null, detached = false) {
+async function startTask(t, mode = "default", prompt = mode === "yolo" ? "permission" : "hold", label = null, detached = false, extraEnv = {}) {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
   const recording = path.join(makeTempDir(), "acp-recording.jsonl");
   const releaseFile = path.join(makeTempDir(), "acp-release");
-  const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile };
+  const env = { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_RELEASE_FILE: releaseFile, ...extraEnv };
   const child = spawn(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
     "--executor-command", process.execPath, "--executor-args", JSON.stringify([AGENT]),
     "--executor-mode", mode, ...(label ? ["--label", label] : []), "--json", prompt], { cwd, env, detached });
@@ -88,6 +88,46 @@ async function waitForExit(task, timeoutMs = 15000) {
 }
 
 const cases = [
+  {
+    name: "Qoder completes at the root boundary when the consumed steering RPC stays pending, and preserves --queue",
+    run: async (t) => {
+      const h = await startTask(t, "default", "hold", null, false, { ACP_FAKE_QODER_QUEUEING: "1" });
+      assert.equal((await liveStatus(h.cwd, h.job)).capabilities.midTurnSteer, true);
+      const sent = h.cli("message", h.job.id, "qoder-steer:updated answer");
+      assert.equal(sent.status, 0, sent.stderr);
+      const ack = JSON.parse(sent.stdout);
+      assert.equal(ack.turnId, h.job.turnId);
+      assert.equal(ack.sent, true);
+      assert.equal(ack.accepted, null);
+      assert.equal(ack.consumed, null);
+      const queued = await sendLiveCommand(h.cwd, h.job.id, "message", { queue: true }, "basic");
+      assert.notEqual(queued.queuedJobId, h.job.id);
+      assert.equal(readStoredJob(h.cwd, h.job.id).status, "running");
+      assert.deepEqual(recordingPrompts(h.recording), ["hold", "qoder-steer:updated answer"]);
+      const live = await liveStatus(h.cwd, h.job);
+      assert.equal(live.turnId, h.job.turnId);
+      assert.deepEqual(live.pendingMessages.map(entry => entry.input[0].text), ["qoder-steer:updated answer", "basic"]);
+      h.release();
+      const exited = await waitForExit(h);
+      assert.equal(exited.code, 0, exited.stderr);
+      const original = await readRoundContext(h.cwd, h.job.id);
+      const history = await readRecordHistory(h.cwd, original.recordId);
+      const events = history.events.filter(event => event.jobId === h.job.id);
+      assert.equal(events.filter(event => event.type === "turn.started").length, 1);
+      assert.equal(events.filter(event => event.type === "turn.completed").length, 1);
+      assert.equal(events.filter(event => event.type === "job.completed").length, 1);
+      const control = events.find(event => event.type === "control.message.updated" && event.payload.mode === "steer");
+      assert.equal(control.payload.accepted, null);
+      assert.equal(control.payload.sent, true);
+      assert.equal(control.identity.turnId, h.job.turnId);
+      assert.match(original.receipt.job.result.rawOutput, /updated answer/);
+      assert.deepEqual(recordingPrompts(h.recording), ["hold", "qoder-steer:updated answer", "basic"]);
+      const calls = fs.readFileSync(h.recording, "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(calls.some(call => call.method === "session/cancel"), false);
+      const view = JSON.parse(fs.readFileSync((await observationThreads(resolveStateDir(h.cwd)))[0].thread.viewPath, "utf8"));
+      assert.equal(view.tail.filter(row => row.text?.includes("director → message: qoder-steer:updated answer")).length, 1);
+    }
+  },
   {
     name: "cancel lets the ACP worker finish its receipt and settle queued rounds",
     run: async (t) => {
