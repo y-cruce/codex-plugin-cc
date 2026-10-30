@@ -812,7 +812,7 @@ test("queued follow-up rounds share the running task row through handoff and pan
     const base = "/home/test/.claude/plugins/data/codex/state/main";
     const queued = Array.from({ length: count }, (_, i) => ({ id: `follow-up-${i}`, recordId: "record-a",
       executor: "acp", executorSessionId: "acp-session", sessionId: "session", workspaceRoot: "/work",
-      status: "queued", label: "Alpha task", createdAt: new Date(Date.now() + i).toISOString(),
+      status: "queued", label: `Follow-up task ${i}`, createdAt: new Date(Date.now() + i).toISOString(),
       request: { prompt: `Internal context\n---- Brief ----\nFollow-up instruction ${i}` } }));
     const pane = await paneHarness(new Map(), undefined, "session", {
       preset: queued.map(job => [`${base}/jobs/${job.id}.json`, job]),
@@ -825,10 +825,11 @@ test("queued follow-up rounds share the running task row through handoff and pan
     pane.live.rounds = [{ jobId: "job-a", label: "Alpha task" }];
     pane.touch();
     await pane.tick();
-    const row = async (status, pending) => {
+    const row = async (status, pending, label) => {
       const rendered = await pane.render();
       const tabs = JSON.parse(rendered).children[1].children;
       assert.deepEqual(tabs.map(tab => tab.children[1].key), ["codex_tab_record-a"]);
+      assert.match(tabs[0].children[1].label, new RegExp(`^1 ${label}(?: ·|$)`));
       const state = status === "queued" ? `${pending} queued` : `${status}${pending ? ` · ${pending} queued` : ""}`;
       assert.match(JSON.stringify(tabs), new RegExp(` · ${state}"`));
       assert.match(rendered, /Qoder/);
@@ -838,7 +839,7 @@ test("queued follow-up rounds share the running task row through handoff and pan
       assert.doesNotMatch(rendered, /Internal context/);
       if (!pending) assert.doesNotMatch(rendered, /queued/);
     };
-    await row("running", count);
+    await row("running", count, "Alpha task");
     assert.equal((await pane.command("1")).text, "Codex tasks · Alpha task");
     assert.equal((await pane.command("Alpha")).text, "Codex tasks · Alpha task");
     assert.equal((await pane.focus("codex_tab_record-a")).element, "codex_tab_record-a");
@@ -850,18 +851,23 @@ test("queued follow-up rounds share the running task row through handoff and pan
       pane.listing[0].status = "queued";
       pane.touch();
       await pane.tick();
-      await row("queued", count - i);
+      await row("queued", count - i, i ? queued[i - 1].label : "Alpha task");
       job.status = "running";
       pane.files.set(`${base}/job-index/${job.id}.json`, { schemaVersion: 1, jobId: job.id, roundId: job.id, recordId: "record-a" });
-      Object.assign(pane.live, { status: "running", activeRoundId: job.id, latestRoundId: job.id, endedAt: null });
-      pane.live.rounds.push({ jobId: job.id, prompt: `Follow-up instruction ${i}`, firstSeq: String(i + 1), lastSeq: String(i + 1) });
+      Object.assign(pane.live, { status: "running", label: job.label, activeRoundId: job.id, latestRoundId: job.id, endedAt: null });
+      pane.live.rounds.push({ jobId: job.id, label: job.label, prompt: `Follow-up instruction ${i}`, firstSeq: String(i + 1), lastSeq: String(i + 1) });
       Object.assign(pane.listing[0], { jobId: job.id, status: "running" });
       pane.touch();
       await pane.tick();
-      await row("running", count - i - 1);
-      assert.deepEqual((await pane.autocomplete("/codex:message Alpha")).suggestions.map(item => item.text), [job.id]);
+      await row("running", count - i - 1, job.label);
+      assert.equal((await pane.command(job.label)).text, `Codex tasks · ${job.label}`);
+      for (const [command, id] of [["tasks", "record-a"], ["message", job.id]]) {
+        assert.deepEqual((await pane.autocomplete(`/codex:${command} Follow-up`)).suggestions.map(item => ({ text: item.text, label: item.label })),
+          [{ text: id, label: job.label }]);
+        assert.deepEqual((await pane.autocomplete(`/codex:${command} Alpha`)).suggestions, []);
+      }
     }
-    assert.match((await pane.command("forget 1")).text, /forgot Alpha task/);
+    assert.equal((await pane.command("forget 1")).text, `Codex tasks · forgot ${queued.at(-1).label}`);
     await pane.tick();
     assert.doesNotMatch(await pane.render(), /codex_tab_/);
     assert.deepEqual(pane.stored.get("codex:tasks:session:forgotten"), ["record-a"]);
@@ -1790,8 +1796,7 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   assert.match(button.children[1].children[0], /completed/);
   button.props.onPress();
   assert.equal(selected, "task-old");
-  // The row is named by the round that opened the thread, not by the newest one.
-  assert.match(nodes.find((node) => node.type === "Button").props.label, /opening round/);
+  assert.equal(button.props.label, "1 newest");
   assert.ok(text.indexOf("first round trace") < text.indexOf("second round trace"), text);
   // Each round's brief opens that round, and the round boundary is the brief
   // rather than a terminal row that says what the heading already says.

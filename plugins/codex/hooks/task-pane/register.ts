@@ -1388,7 +1388,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       .filter(view => !message || view.status === 'running' && !view.pendingQuestion && !isOver(view))
       .map(view => ({
         text: message ? view.activeRoundId ?? view.jobId : view.recordId ?? view.jobId,
-        label: view.rounds?.[0]?.label ?? view.label,
+        label: view.label,
         description: view.status,
       }))
       .filter(row => row.text.toLowerCase().includes(token) || row.label.toLowerCase().includes(token))

@@ -525,6 +525,25 @@ describe('live row polish', () => {
     assert.match(text, /^\$ Build project · 0s$/m);
     assert.equal(statusText([data], Date.parse(data.startedAt)), 'Qoder · 1 running · fixture task 0s $ Build project');
   });
+  test('pane footer shows native context usage without repeating the task name', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.executor = { kind: 'acp', label: 'Antigravity' };
+    data.usage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false, contextUsed: 700000, contextSize: 1000000 };
+    const now = Date.parse(data.startedAt);
+    const draw = (headingLast) => liveTree($.ui.resolve(row()), data, 120, now, 48, undefined, 200, headingLast);
+    const footer = () => textOf(draw(true).children.at(-1));
+    assert.equal(footer(), '● Antigravity · running · 0s · ctx 700k/1000k (70%)');
+    assert.match(textOf(draw(false).children[0]), /Antigravity · fixture task · running/);
+    data.usage.contextUsed = 0;
+    assert.match(footer(), /ctx 0\/1000k \(0%\)/);
+    data.usage = { ...data.usage, contextUsed: 700000, contextSize: null };
+    assert.match(footer(), /ctx 700k$/);
+    for (const context of [{}, { contextSize: 1000000 }]) {
+      data.usage = { inputTokens: 900000, outputTokens: 100000, cachedInputTokens: 0, complete: true, ...context };
+      assert.doesNotMatch(footer(), /ctx/);
+    }
+  });
   test('times and counts only the newest round in a thread header', ($, on) => {
     world($, on);
     const data = fixture();

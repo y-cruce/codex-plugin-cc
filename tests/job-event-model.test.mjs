@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
+import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
 import { renderJobEvent, createLiveView, applyJobEvent, jobConfig, questionIds } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 
@@ -361,6 +362,42 @@ test("resumed usage excludes tokens consumed before this job", () => {
   accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 125, outputTokens: 32, cachedInputTokens: 16 },
     last: { inputTokens: 25, outputTokens: 7, cachedInputTokens: 4 } } });
   assert.deepEqual(view.usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 4, complete: false });
+});
+
+test("native context snapshots use the current context and survive cumulative-only usage", async () => {
+  for (const executor of ["codex", "acp"]) {
+    const { view, accept } = harness({ executor });
+    let seq = 0;
+    const adapter = new AcpEventAdapter((event) => {
+      event.seq = String(++seq);
+      applyJobEvent(view, event);
+    }, { job: { id: "job-1" } });
+    adapter.bindSession("thread-1");
+    const context = async (used) => {
+      if (executor === "codex") return accept("thread/tokenUsage/updated", { tokenUsage: {
+        total: { inputTokens: 200000, outputTokens: 5000, totalTokens: 205000 },
+        last: { inputTokens: used - 100, outputTokens: 100, totalTokens: used }, modelContextWindow: 1000000,
+      } });
+      return adapter.accept({ sessionId: "thread-1", update: { sessionUpdate: "usage_update", used, size: 1000000 } });
+    };
+    await context(700000);
+    assert.equal(view.usage.contextUsed, 700000, executor);
+    assert.equal(view.usage.contextSize, 1000000, executor);
+    // Compaction can reduce a context snapshot; this is not a counter.
+    await context(20000);
+    assert.equal(view.usage.contextUsed, 20000, executor);
+    if (executor === "codex") accept("thread/tokenUsage/updated", { tokenUsage: { total: { inputTokens: 200001, outputTokens: 5000 } } });
+    else await adapter.completeTurn({ stopReason: "end_turn", usage: { inputTokens: 200001, outputTokens: 5000 } });
+    assert.equal(view.usage.contextUsed, 20000, executor);
+    assert.equal(view.usage.contextSize, 1000000, executor);
+    adapter.subagent = { id: "child", path: "Explore" };
+    await adapter.accept({ sessionId: "thread-1", update: { sessionUpdate: "usage_update", used: 1000, size: 10000 } });
+    assert.equal(view.usage.contextUsed, 20000, `${executor}: child context belongs to the child`);
+    assert.equal(view.usage.contextSize, 1000000, executor);
+    adapter.subagent = null;
+    await context(0);
+    assert.equal(view.usage.contextUsed, 0, executor);
+  }
 });
 
 test("director controls and delivered answers appear in default output and tail", () => {

@@ -259,6 +259,21 @@ Opens or closes the tasks pane for this session. Select a task by its row number
 or a case-insensitive part of its name. Live rows are reconciled with job files
 and live views on each poll.
 
+When a thread continues, its list row and name completions show the latest task name.
+
+线程续接后，列表名称和名称补全随最新实际任务名称更新。
+
+Task names appear in the list; the pane footer shows the executor, status and elapsed
+time. Native context usage appears as `ctx 700k/1000k (70%)` when reported. Codex
+supplies `tokenUsage.last.totalTokens` and `modelContextWindow`; ACP supplies
+`usage_update.used` and `size`. Antigravity `view_file` rows include the file path
+and requested line range.
+
+任务名称显示在列表中，面板底部状态行显示执行器、状态和耗时。执行器上报原生上下文数据时，
+显示如 `ctx 700k/1000k (70%)` 的已用量、容量和占比。Codex 取
+`tokenUsage.last.totalTokens` 和 `modelContextWindow`，ACP 取 `usage_update.used`
+和 `size`。Antigravity 的 `view_file` 行显示文件路径和请求读取的行范围。
+
 The pane leaves two columns of space on the right, shows the director's delivered
 answers after the questions, and displays durations in whole seconds.
 

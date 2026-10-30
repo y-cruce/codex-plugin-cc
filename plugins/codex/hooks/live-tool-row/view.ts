@@ -28,7 +28,7 @@ export type LiveView = {
   thinkingSince?: string | null
   compactingSince?: string | null
   files: { path: string; kind: 'add' | 'update' | 'delete'; additions: number | null; deletions: number | null }[]
-  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean }
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; complete: boolean; contextUsed?: number | null; contextSize?: number | null }
   pendingQuestion: { requestId: string; text: string; openedAt: string; expiresAt: string | null } | null
   plan?: { entries: { content: string; status: string; priority?: string }[]; markdown: string | null; uri?: string | null } | null
   prompt?: string | null
@@ -206,14 +206,17 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const current = latestRound(data)
   const usage = current?.usage ?? data.usage
   const startedAt = current?.startedAt ?? data.startedAt
-  // An ACP agent never reports usage, so its counts stay at zero for the whole
-  // run: the header says nothing rather than saying the same nothing forever.
+  // Agents without token counts leave this segment out.
   const counted = usage.inputTokens > 0 || usage.outputTokens > 0 || usage.cachedInputTokens > 0
+  const { contextUsed, contextSize } = data.usage
+  const context = contextUsed == null ? '' : ` · ctx ${tokens(contextUsed)}${contextSize != null && contextSize > 0
+    ? `/${tokens(contextSize)} (${Math.round(contextUsed / contextSize * 100)}%)` : ''}`
   const header = [
-    { text: `● ${executor} · ` },
-    { text: data.label, bold: true },
+    { text: `● ${executor}${headingLast ? '' : ' · '}` },
+    ...(headingLast ? [] : [{ text: data.label, bold: true }]),
     { text: ` · ${status}`, color: colors[status] },
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
+    { text: context },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]
   // Clip once across styled segments, preserving the terminal cell budget.

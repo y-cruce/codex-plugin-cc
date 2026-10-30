@@ -86,6 +86,26 @@ test("ACP shell lifecycle renders one command or tool row, including legacy prog
   }
 });
 
+test("Antigravity file reads show the file and requested lines throughout the tool lifecycle", async () => {
+  for (const status of ["completed", "failed"]) {
+    const h = harness();
+    await h.adapter.startTurn("turn", []);
+    await h.update("tool_call", { toolCallId: "read", kind: "read", title: "Running view_file", status: "in_progress" });
+    assert.match(h.draw(), /Running view_file/);
+    await h.update("tool_call_update", { toolCallId: "read",
+      rawInput: { file_path: "/repo/src/ExecutionView.jsx", start_line: 0, end_line: 799 } });
+    const title = "Running view_file: /repo/src/ExecutionView.jsx (lines 0–799)";
+    assert.equal(h.events.at(-1).payload.tool.title, title);
+    assert.ok(h.draw().includes(title));
+    await h.update("tool_call_update", { toolCallId: "read", status,
+      rawOutput: status === "failed" ? "Cannot view file: missing" : "Read ExecutionView.jsx" });
+    h.view.status = "completed";
+    assert.equal(h.view.tail.length, 1);
+    assert.ok(h.draw(true).includes(title));
+    assert.equal(h.events.at(-1).payload.tool.error?.message ?? null, status === "failed" ? "Cannot view file: missing" : null);
+  }
+});
+
 test("Qoder replies stay in the 200-row view when tool lifecycle updates follow them", async () => {
   const h = harness();
   await h.adapter.startTurn("turn", []);

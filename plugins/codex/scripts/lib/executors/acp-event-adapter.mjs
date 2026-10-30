@@ -82,6 +82,14 @@ function toolTitle(tool) {
   const title = vendorTool(tool) && tool._files === false && ["edit", "delete", "move"].includes(tool.kind)
     ? vendorTool(tool)
     : tool.title ?? tool.name ?? vendorTool(tool);
+  // Antigravity's view_file title names only the tool; its input carries the
+  // file and requested range. Keep the range in the agent's own line numbers.
+  const input = tool.rawInput;
+  if (tool.kind === "read" && typeof input?.file_path === "string" && input.file_path) {
+    const range = Number.isInteger(input.start_line) && Number.isInteger(input.end_line)
+      ? ` (lines ${input.start_line}–${input.end_line})` : "";
+    return `${title ?? String(tool.toolCallId)}: ${input.file_path}${range}`;
+  }
   const command = typeof tool.rawInput?.command === "string" ? tool.rawInput.command.trim() : "";
   if (!command) return title ?? String(tool.toolCallId);
   const named = title && title !== String(tool.toolCallId) ? title : null;

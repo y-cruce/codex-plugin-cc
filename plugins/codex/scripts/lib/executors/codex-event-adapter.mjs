@@ -119,15 +119,15 @@ function toolSnapshot(item, status) {
   };
 }
 
-function usage(total = {}, last = null, complete = true) {
+function usage(total = {}, last = null, complete = true, contextSize = null) {
   return {
     inputTokens: total.inputTokens ?? 0,
     outputTokens: total.outputTokens ?? 0,
     cachedInputTokens: total.cachedInputTokens ?? 0,
     thoughtTokens: total.thoughtTokens ?? null,
     totalTokens: total.totalTokens ?? null,
-    contextUsed: null,
-    contextSize: null,
+    contextUsed: last?.totalTokens ?? null,
+    contextSize,
     cost: null,
     basis: "session",
     complete,
@@ -193,7 +193,7 @@ function payloadFor(type, message, receivedAt) {
     case "tool.started": return { tool: toolSnapshot(item, "in_progress") };
     case "tool.completed": return { tool: toolSnapshot(item, item.status === "failed" || item.status === "declined" ? "failed" : "completed") };
     case "tool.progress": return { message: p.message ?? "", content: content(p.message) };
-    case "usage.updated": return { usage: usage(p.tokenUsage?.total, p.tokenUsage?.last, Boolean(p.tokenUsage?.total)) };
+    case "usage.updated": return { usage: usage(p.tokenUsage?.total, p.tokenUsage?.last, Boolean(p.tokenUsage?.total), p.tokenUsage?.modelContextWindow) };
     case "turn.diff.updated": return { diff: p.diff ?? "", files: changedFiles(p.changes) };
     case "question.opened": {
       const questions = p.questions ?? [];

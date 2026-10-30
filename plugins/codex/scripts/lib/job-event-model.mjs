@@ -557,6 +557,11 @@ export function applyJobEvent(view, event, options = {}) {
       break;
     case "usage.updated": {
       const total = p.usage;
+      // Context is the latest native snapshot, independent of accumulated
+      // tokens. ACP can report it without any input/output token counters.
+      if (!child) for (const field of ["contextUsed", "contextSize"]) {
+        if (typeof total?.[field] === "number") view.usage[field] = total[field];
+      }
       if (!total || total.inputTokens == null || total.outputTokens == null) {
         view.usage.complete = false;
         if (round) round.usage.complete = false;
