@@ -100,6 +100,8 @@ test("parallel thread owners receive only their own events and reject another so
     h.start("hold first"),
     second.request("turn/start", { threadId: secondThread.id, input: [{ type: "text", text: "hold second" }] })
   ]);
+  await waitFor(() => h.notifications.some(message => message.method === "turn/started" && message.params.turn.id === firstTurn.id)
+    && secondEvents.some(message => message.method === "turn/started" && message.params.turn.id === secondTurn.id), "both turns to start");
   await assert.rejects(control.request("turn/start", {
     threadId: h.thread.id, input: [{ type: "text", text: "steal" }]
   }), (error) => error.rpcCode === BROKER_BUSY_RPC_CODE && /busy/.test(error.message));
