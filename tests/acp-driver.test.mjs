@@ -68,9 +68,9 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("new Antigravity sessions default to Opus 5.5 high, honor overrides and preserve resumed sessions", async () => {
+test("new Antigravity sessions default to Argon high, honor overrides and preserve resumed sessions", async () => {
   for (const row of [
-    { agent: "antigravity-acp", model: "claude-opus-5-5", effort: "high" },
+    { agent: "antigravity-acp", model: "gemini-4-argon", effort: "high" },
     { agent: "antigravity-acp", overrides: { modelId: "gemini-3.8-flash", effortId: "low" }, model: "gemini-3.8-flash", effort: "low" },
     { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low" },
     { agent: "other-acp", model: "gemini-3.8-flash", effort: "low" }

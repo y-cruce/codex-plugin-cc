@@ -548,17 +548,13 @@ The updated code-director skill assigns frontend design, implementation, debuggi
 
 更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
 
-New Antigravity sessions default to `claude-opus-5-5` with `high` thinking. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
+New Antigravity sessions default to `gemini-4-argon` with `high` thinking. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
 
-Antigravity 新会话默认使用 `claude-opus-5-5`、思考强度 `high`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
+Antigravity 新会话默认使用 `gemini-4-argon`、思考强度 `high`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
 
-Within agy, explicitly select `gemini-4-argon` for frontend-focused work and `claude-opus-5-5` for complex tasks, including complex frontend work. Both use `executor_effort: "high"`; an explicit user model choice takes precedence.
+The local agy adapter reports `clientInfo.name: "zed"` on initialize. Official ACP 1.4.4 uses that client identity to include third-party models in the signed-in account's catalog. The catalog is returned and validated by the official server.
 
-agy 内按任务选择模型：偏前端工作显式选择 `gemini-4-argon`，复杂任务（含复杂前端任务）使用 `claude-opus-5-5`，两者都用 `executor_effort: "high"`；用户显式指定模型时遵从用户选择。
-
-The local agy adapter reports `clientInfo.name: "zed"` on initialize. Official ACP 1.4.4 uses that client identity to include third-party models in the signed-in account's catalog. Select the returned model ID, such as `claude-opus-5-5`, and use `executor_effort` for thinking level; the default is Opus 5.5 High.
-
-本地 agy 适配器初始化时使用 `clientInfo.name: "zed"`，官方 ACP 1.4.4 根据该客户端名称返回账号可用的第三方模型。模型选择使用服务实际返回的 ID，例如 `claude-opus-5-5`，思考强度通过 `executor_effort` 设置；默认使用 Opus 5.5 High。
+本地 agy 适配器初始化时使用 `clientInfo.name: "zed"`，官方 ACP 1.4.4 根据该客户端名称返回账号可用的第三方模型。模型列表由官方服务返回和校验。
 
 With the updated code-director skill, dispatch with `executor: "antigravity"`. It runs Google's official `agy_acp_server.par` / `agy_acp_server` over stdio ACP, with no launch arguments. Install the binary from the [ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json), keeping `localharness_external` beside it, and complete its Google login first. The server stores settings in `~/.gemini/antigravity-acp/`. Override the executable with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; the default permission policy is `allow-once`. Continue with the returned session id and the same executor. For direct companion calls:
 

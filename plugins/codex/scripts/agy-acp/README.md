@@ -14,7 +14,7 @@ node plugins/codex/scripts/agy-acp/acp-proxy.mjs
 export CODEX_DIRECTOR_ANTIGRAVITY_COMMAND="$PWD/plugins/codex/scripts/agy-acp/acp-proxy.mjs"
 ```
 
-The default is `claude-opus-5-5` with high thinking (`claude-opus-5-5-high` in
+The default is `gemini-4-argon` with high thinking (`gemini-4-argon-high` in
 the official runtime's combined model form). The proxy passes the launcher's proxy
 environment to the official ACP server and its helper. OAuth, account, quota,
 settings and the official binaries are used in place. No global installation or
@@ -43,7 +43,7 @@ on initialize, preserving the client's other fields and capabilities. Official
 ACP 1.4.4 filters third-party models by client surface; `zed` is on that list.
 This is an explicit compatibility identity choice, not a separate Zed process.
 The model catalog and selection are still validated by the official server for
-the signed-in account. The default model is Opus 5.5 with high thinking.
+the signed-in account. The default model is Gemini 4 Argon with high thinking.
 
 Plugin 1.4.103 includes both proxy scripts under `scripts/agy-acp/` and their
 runtime dependency. An installed plugin's `scripts/agy-acp/acp-proxy.mjs` can

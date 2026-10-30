@@ -51,7 +51,7 @@ export async function runAcpProxy() {
     socket.on("close", () => { for (const [id, entry] of bridges) if (entry.socket === socket) bridges.delete(id); });
   });
   await new Promise((resolve) => server.listen(endpoint, resolve));
-  const env = { ...process.env, AGY_ACP_DEFAULT_MODEL: "claude-opus-5-5-high",
+  const env = { ...process.env, AGY_ACP_DEFAULT_MODEL: "gemini-4-argon-high",
     AGY_OFFICIAL_RUNTIME_DIR: runtimeDir, ANTIGRAVITY_HARNESS_PATH: path.join(ROOT, "harness-proxy.mjs"),
     AGY_STEERING_CONTROL: endpoint };
   const child = spawn(path.join(runtimeDir, "agy_acp_server.par"), process.argv.slice(2), { env, stdio: ["pipe", "pipe", "pipe"] });
