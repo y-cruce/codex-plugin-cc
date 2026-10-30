@@ -1430,8 +1430,10 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // for the next rescan would show it up to half a minute late.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const line = String(e.command ?? '')
+    const dispatch = /(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)
+    if (director && dispatch) await bindDirector($, director)
     const result = await next(e)
-    if (/(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)) {
+    if (dispatch) {
       state.ticks = 0
       $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
     }
@@ -1440,6 +1442,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // `/codex:tasks` opens and closes the pane and switches its task; answering without next()
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
+    if (director) await bindDirector($, director)
     if (e.command === 'goal') {
       const result = await next(e)
       const goal = goalCommand(e.args, result.text)

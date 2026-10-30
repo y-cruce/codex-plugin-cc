@@ -1,13 +1,12 @@
 import type { On, PluginOptions } from 'claude-code'
 import { register as registerLiveToolRow } from './live-tool-row/register.ts'
-import { directorChannel, registerDirectorChannel } from './director-channel/register.ts'
+import { directorChannel } from './director-channel/register.ts'
 import { registerTaskPane } from './task-pane/register.ts'
 import { directorTools, registerDirectorTools } from './director-tools/register.ts'
 import { remoteRelay } from './remote-relay/register.ts'
 
 export function register(on: On, options: PluginOptions = {}) {
   const director = directorChannel()
-  registerDirectorChannel(on, director)
   // A job with a visible follow row already reports to the director through the
   // agent that runs it; the pane shows it but must not report it twice.
   const followed = new Set<string>()

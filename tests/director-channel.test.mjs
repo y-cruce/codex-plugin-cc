@@ -215,10 +215,8 @@ test("Monitor and channel share receipts in either switching order, including co
 
 test("session rebind fences consumers and replays frames the old-session ingress dropped on clear", async (t) => {
   const h = fixture(t);
-  const { directorChannel, registerDirectorChannel, bindDirector } = await import("../plugins/codex/hooks/director-channel/register.ts");
-  const hooks = new Map();
+  const { directorChannel } = await import("../plugins/codex/hooks/director-channel/register.ts");
   const director = directorChannel();
-  registerDirectorChannel((name, fn) => hooks.set(name, fn), director);
   let sessionId = h.job.sessionId;
   const engine = { plugin: { root: "/plugin" }, session: { id: async () => sessionId }, process: { run: async (args) =>
     ({ exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" }) } };
@@ -425,16 +423,14 @@ test("retention removes 30-day inactive sessions at startup and keeps live consu
 });
 
 test("the independent ingress hook binds lifecycle sessions, confirms probes and rejects old-session frames", async () => {
-  const { directorChannel, registerDirectorChannel, bindDirector } = await import("../plugins/codex/hooks/director-channel/register.ts");
-  const hooks = new Map();
+  const { directorChannel, bindDirector } = await import("../plugins/codex/hooks/director-channel/register.ts");
   const director = directorChannel();
-  registerDirectorChannel((event, fn) => hooks.set(event, fn), director);
   const runs = [];
   let sessionId = "first";
   const engine = { plugin: { root: "/plugin" }, session: { id: async () => sessionId },
     process: { run: async (args) => { runs.push(args); return { exitCode: 0, stdout: args[0] === "sh" ? "4242" : "", stderr: "" }; } },
-    env: { set: async () => {} }, ui: { log: () => {} } };
-  await hooks.get("classic.SessionStart")(engine, { session_id: sessionId }, async () => {});
+    env: { get: async () => undefined, set: async () => {} }, ui: { log: () => {} } };
+  await bindDirector(engine, director);
   sessionId = "resumed";
   await bindDirector(engine, director);
   sessionId = "cleared";

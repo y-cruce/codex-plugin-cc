@@ -5,24 +5,49 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { register } from "../plugins/codex/hooks/register.ts";
+import { resolveClaudeSessionPath } from "../plugins/codex/scripts/lib/claude-session-transfer.mjs";
 import { handleSessionStart, handleSessionEnd } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 import { createJobRecord } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { loadState, updateState, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
-test("function SessionStart restores ownership when the command env export is absent", async () => {
+test("native lifecycle restores ownership without command exports and clears a previous transcript", async (t) => {
+  isolateTestEnvironment(t);
   const hooks = new Map();
-  register((name, matcher, hook) => hooks.set(name, hook ?? matcher));
-  const values = new Map();
-  const handler = hooks.get("classic.SessionStart");
-  assert.equal(typeof handler, "function");
-  const input = { session_id: "branch", transcript_path: "/transcript/branch.jsonl" };
-  const result = await handler({ env: { set: async (key, value) => values.set(key, value) },
-    process: { run: async () => ({ exitCode: 1, stdout: "", stderr: "" }) }, ui: { log() {} } }, input,
-    async () => ({ legacy: "timed out" }));
-  assert.equal(values.get("CODEX_COMPANION_SESSION_ID"), "branch");
-  assert.equal(values.get("CODEX_COMPANION_TRANSCRIPT_PATH"), input.transcript_path);
-  assert.equal(result.legacy, "timed out");
+  register((name, matcher, hook) => hooks.set(hook && matcher.tool ? `${name}:${matcher.tool}` : name, hook ?? matcher));
+  assert.equal(hooks.has("classic.SessionStart"), false);
+  let sessionId;
+  const engine = {
+    plugin: { root: "/plugin" }, session: { id: async () => sessionId }, clock: { after() {} },
+    env: {
+      get: async (key) => key === "HOME" ? undefined : process.env[key],
+      set: async (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; },
+    },
+    process: { run: async () => ({ exitCode: 1, stdout: "", stderr: "" }) }, ui: { log() {} },
+  };
+  const jobs = [];
+  for (const [id, event, input] of [
+    ["started", "session.start", { isInteractive: false }],
+    ["resumed", "turn.start", {}],
+    ["cleared", "command.run", { command: "codex:transfer", args: "" }],
+    ["branch", "tool.call:Bash", { command: "node /plugin/scripts/codex-companion.mjs task" }],
+  ]) {
+    sessionId = id;
+    process.env.CODEX_COMPANION_TRANSCRIPT_PATH = "/transcript/previous.jsonl";
+    const result = await hooks.get(event)(engine, input, async () => {
+      assert.equal(process.env.CODEX_COMPANION_SESSION_ID, sessionId);
+      assert.equal(process.env.CODEX_COMPANION_TRANSCRIPT_PATH, undefined);
+      assert.throws(() => resolveClaudeSessionPath("/work"), /Could not identify.*--source/);
+      jobs.push(createJobRecord({ id: sessionId }));
+      return { continued: true };
+    });
+    assert.equal(result.continued, true);
+    // A real command export for this session must survive the next native hook.
+    process.env.CODEX_COMPANION_TRANSCRIPT_PATH = `/transcript/${sessionId}.jsonl`;
+    await hooks.get("turn.start")(engine, {}, async () => ({}));
+    assert.equal(process.env.CODEX_COMPANION_TRANSCRIPT_PATH, `/transcript/${sessionId}.jsonl`);
+  }
+  assert.deepEqual(jobs.map(job => job.sessionId), ["started", "resumed", "cleared", "branch"]);
 });
 
 test("lifecycle command budgets cover delayed Node startup and state-lock cleanup", () => {

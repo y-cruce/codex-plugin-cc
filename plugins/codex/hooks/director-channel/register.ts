@@ -1,4 +1,4 @@
-import type { EngineInterface, Hook, On } from 'claude-code'
+import type { EngineInterface, Hook } from 'claude-code'
 import { deliveryRefs, stripDeliveryTags } from '../../scripts/lib/director-refs.mjs'
 
 const SERVER = 'plugin:codex:director'
@@ -23,8 +23,7 @@ export type DirectorChannel = { pid: string; bound: string }
 // event can be consumed, even when the pane has never opened. Claude Code takes
 // one hook per event without a matcher from the whole module, so the task pane's
 // session.start, turn.start and prompt.submit hooks call bindDirector and
-// admitDirector first. Made apart from its registration, as directorTools() is:
-// the scan refuses a module that keeps what a function given `on` returns.
+// admitDirector first.
 export function directorChannel(): DirectorChannel {
   return { pid: '', bound: '' }
 }
@@ -40,11 +39,20 @@ async function controlDirector($: EngineInterface, director: DirectorChannel, se
   director.bound = sessionId
 }
 
-// A given session id is bound even when it is the one already bound.
-export async function bindDirector($: EngineInterface, director: DirectorChannel, given?: string) {
-  const sessionId = given ?? await $.session.id()
-  if (!given && sessionId === director.bound) return
-  try { await controlDirector($, director, sessionId) }
+export async function bindDirector($: EngineInterface, director: DirectorChannel) {
+  const sessionId = await $.session.id()
+  try {
+    // Native lifecycle hooks run where user classic.SessionStart hooks are
+    // skipped. Restore ownership even when the command hook exported nothing.
+    await $.env.set('CODEX_COMPANION_SESSION_ID', sessionId)
+    const transcript = await $.env.get('CODEX_COMPANION_TRANSCRIPT_PATH')
+    // Only the command hook supplies the real path. After a session change,
+    // transfer must ask for --source rather than use the previous transcript.
+    if (transcript && transcript.split(/[/\\]/).at(-1) !== `${sessionId}.jsonl`) {
+      await $.env.set('CODEX_COMPANION_TRANSCRIPT_PATH', undefined)
+    }
+    if (sessionId !== director.bound) await controlDirector($, director, sessionId)
+  }
   catch (error) { $.ui.log(String(error), { to: 'debug' }) }
 }
 
@@ -113,13 +121,4 @@ export async function admitDirector($: EngineInterface, director: DirectorChanne
   // leave every item pending so channel replay or /resume can recover it.
   return { event: { ...e, text: stripDeliveryTags(text) },
     accept: { events, route: channel ? 'channel' : 'monitor' } }
-}
-
-export function registerDirectorChannel(on: On, director: DirectorChannel) {
-  on('classic.SessionStart', async ($, e, next) => {
-    await $.env.set('CODEX_COMPANION_SESSION_ID', e.session_id)
-    await $.env.set('CODEX_COMPANION_TRANSCRIPT_PATH', e.transcript_path)
-    await bindDirector($, director, e.session_id)
-    return next(e)
-  })
 }

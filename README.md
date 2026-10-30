@@ -142,6 +142,15 @@ At session start, a detached cleanup runs at most once every 24 hours under a pr
 
 ### Director channel
 
+Native lifecycle and command hooks keep task ownership and the channel bound to the current
+session, including after `/clear` and `/resume`. The command `SessionStart` hook
+exports the transcript path. If it is unavailable, `/codex:transfer` asks for
+`--source`; a path left over from another session is cleared.
+
+普通生命周期与命令 hooks 负责同步当前会话的任务归属和 channel 绑定，包括 `/clear`、`/resume`
+之后的会话。命令式 `SessionStart` 导出会话文件路径；路径缺失时 `/codex:transfer` 提示提供
+`--source`，上一会话遗留的路径会被清除。
+
 From 1.4.58 the plugin also ships a [channel](https://code.claude.com/docs/en/channels) MCP server, `director`. Start Claude Code with the plugin named among its channels:
 
 ```bash
