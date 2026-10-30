@@ -472,6 +472,13 @@ Native subagent activity binds the child thread to the same job, including notif
 
 Writes are batched at 50 ms or 256 KiB and become visible only after durable commit. Histories rotate at 64 MiB, retain up to 1 GiB per job, and keep completed jobs for 30 days within a 20 GiB total budget. Retention removes oldest segments/jobs, never truncates individual payloads; expired cursors return `CURSOR_EXPIRED` and `earliestAvailableCursor`. Crashes or retention are marked as partial history. Legacy jobs do not acquire invented event history.
 
+At startup, the broker reconciles unfinished legacy histories in their original
+format. New dispatches use thread records. Startup failures retain their stack
+trace in `broker-start-failure.log` in the workspace's plugin state directory.
+
+broker 启动时按原有格式补齐未结束的旧任务历史，新派单使用线程记录。
+启动失败的调用栈保存在工作区插件状态目录的 `broker-start-failure.log`。
+
 Each repository retains its newest 150 jobs, always keeping queued and running jobs even if they exceed that cap. When a thread record has no retained or live round and no active writer, pruning removes it and its indexes; daily GC also reclaims records orphaned by earlier versions. Persisted events omit `source.raw` and keep command text output in `payload.outputText`. Resuming a pruned thread with `--thread` explains that its local history is unavailable; `--allow-other-repo` lets the executor try its own session history.
 
 写入以 50ms/256KiB 批量提交，公开游标只指向已持久化的数据。异常退出可能丢失尚未提交的批次，上游未提供重放的通知也无法补造。保留策略为单任务 1GiB、64MiB 分段、已结束任务 30 天、总量 20GiB；超限清理最旧历史并明确标记缺口。`job.log` 继续作为兼容文本日志，新增消费者不应解析它。

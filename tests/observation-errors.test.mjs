@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import { JobRuntime } from "../plugins/codex/scripts/lib/job-runtime.mjs";
 import { JobEventStore, readHistory } from "../plugins/codex/scripts/lib/job-event-store.mjs";
-import { resolveJobFile, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveJobFile, resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
 import { handleObserve } from "../plugins/codex/scripts/lib/job-observe.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
@@ -253,7 +253,7 @@ test("startup reconciliation fails unfinished history whose owner exited", async
   const before = await h.cli("observe", "list", "--json");
   assert.equal(JSON.parse(before.stdout).jobs[0].status, "running");
 
-  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
+  const runtime = new JobRuntime({ historySweepMs: 0 });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
@@ -275,13 +275,23 @@ test("startup reconciliation fails unfinished history without a job record", asy
   await seedUnfinishedHistory(h);
   fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
 
-  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
+  const runtime = new JobRuntime({ historySweepMs: 0 });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
   const history = await readHistory(h.cwd, h.job.id);
   assert.equal(history.events.at(-1).type, "job.failed");
   assert.equal(history.events.at(-1).payload.reason.message, "owner process exited");
+  assert.equal(runtime.threadRecords, true);
+  assert.equal(history.metadata.job.status, "failed");
+  assert.equal(history.closed, true);
+  assert.equal(JSON.parse(Buffer.from(history.nextCursor, "base64url")).protocolVersion, 1);
+  assert.equal(fs.existsSync(path.join(resolveStateDir(h.cwd), "thread-records")), false);
+  const reopened = await new JobEventStore(h.cwd, h.job.id).initialize();
+  await reopened.close();
+  await runtime.sweepHistory();
+  assert.equal((await readHistory(h.cwd, h.job.id)).events.filter(event => event.type === "job.failed").length, 1);
+  assert.equal(runtime.jobs.size, 0);
 });
 
 test("startup reconciliation preserves unfinished history with a live owner", async (t) => {
@@ -291,7 +301,7 @@ test("startup reconciliation preserves unfinished history with a live owner", as
   upsertJob(h.cwd, h.job);
   await seedUnfinishedHistory(h);
 
-  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
+  const runtime = new JobRuntime({ historySweepMs: 0 });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 
@@ -310,7 +320,7 @@ test("periodic reconciliation recovers an owner that exits after startup", async
   upsertJob(h.cwd, h.job);
   await seedUnfinishedHistory(h);
 
-  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
+  const runtime = new JobRuntime({ historySweepMs: 0 });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
   assert.equal((await readHistory(h.cwd, h.job.id)).events.at(-1).type, "job.started");
@@ -332,7 +342,7 @@ test("startup reconciliation preserves recordless history owned by a live writer
   await owner.register({}, h.cwd, h.job.id);
   fs.unlinkSync(resolveJobFile(h.cwd, h.job.id));
 
-  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: false });
+  const runtime = new JobRuntime({ historySweepMs: 0 });
   t.after(() => runtime.close());
   await runtime.start(h.cwd);
 

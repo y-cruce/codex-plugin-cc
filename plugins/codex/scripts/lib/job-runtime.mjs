@@ -127,7 +127,7 @@ export class JobRuntime {
     const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
     let entry = this.jobs.get(key);
     if (entry) return entry;
-    entry = { key, cwd: job.workspaceRoot ?? cwd, job, view: createLiveView(job), writeTail: Promise.resolve(), viewTimer: null,
+    entry = { key, cwd: job.workspaceRoot ?? cwd, job, threadRecords: false, view: createLiveView(job), writeTail: Promise.resolve(), viewTimer: null,
       lastViewAt: 0, ended: false, failure: null };
     entry.store = new JobEventStore(entry.cwd, jobId, {
       createCheckpoint: (events, snapshot) => {
@@ -207,14 +207,14 @@ export class JobRuntime {
     if (entry.finalizing) return entry.finalizing;
     entry.finalizing = (async () => {
       await entry.store.flush();
-      if (this.threadRecords) {
+      if (entry.threadRecords) {
         await entry.store.updateManifest({ activeRoundId: null });
         await this.persistRound(entry);
       } else await entry.store.updateMetadata({ job: entry.job, status: entry.job.status, completedAt: entry.job.completedAt });
       clearTimeout(entry.viewTimer);
       entry.viewTimer = null;
       await this.writeView(entry);
-      if (this.threadRecords) {
+      if (entry.threadRecords) {
         await entry.store.close();
         entry.store = null;
       }
@@ -322,7 +322,7 @@ export class JobRuntime {
       const key = `${job.workspaceRoot}\0${job.id}`;
       let entry = this.jobs.get(key);
       if (!entry) {
-        entry = { key, cwd: job.workspaceRoot ?? cwd, job, provisional: createProvisionalDispatch({
+        entry = { key, cwd: job.workspaceRoot ?? cwd, job, threadRecords: true, provisional: createProvisionalDispatch({
           workspaceRoot: job.workspaceRoot ?? cwd, job, executor: this.executorIdentity ?? {}
         }), view: createLiveView(job, { recordId: job.id }), writeTail: Promise.resolve(), viewTimer: null,
         lastViewAt: 0, ended: false, failure: null, bound: false, store: null };
@@ -390,18 +390,18 @@ export class JobRuntime {
     const entry = [...this.jobs.values()].find((item) => item.job.id === event.jobId);
     if (!entry) return false;
     if (entry.ended && TERMINAL_EVENTS.has(event.type)) return true;
-    if (this.threadRecords && entry.binding) {
+    if (entry.threadRecords && entry.binding) {
       this.queueBindingEvent(entry, event);
       return true;
     }
-    if (this.threadRecords && !entry.bound) {
+    if (entry.threadRecords && !entry.bound) {
       if (TERMINAL_EVENTS.has(event.type)) return true;
       bufferProvisionalEvent(entry.provisional, event);
       return true;
     }
-    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) entry.job = this.terminalJob(entry, event);
+    if (entry.threadRecords && TERMINAL_EVENTS.has(event.type)) entry.job = this.terminalJob(entry, event);
     await this.append(entry, event);
-    if (this.threadRecords && TERMINAL_EVENTS.has(event.type)) {
+    if (entry.threadRecords && TERMINAL_EVENTS.has(event.type)) {
       entry.terminalRecorded = true;
       await this.finalize(entry);
     } else if (immediateEvents.has(event.type)) await entry.store.flush();
@@ -456,7 +456,7 @@ export class JobRuntime {
     if (!entry) return { recorded: false };
     const job = await fs.readFile(entry.jobFile, "utf8").then(JSON.parse).catch(() => null);
     if (!job || !terminal(job.status)) return { recorded: entry.ended };
-    entry.job = this.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
+    entry.job = entry.threadRecords ? { ...job, recordId: entry.recordId, roundId: job.id,
       threadId: entry.job.threadId ?? job.threadId ?? null } : job;
     this.publishDirectorEvent(entry.job, `job.${job.status}`);
     // A round finalizes on its executor's terminal event, and only afterwards
@@ -467,17 +467,17 @@ export class JobRuntime {
     // answer sat in the job file. Codex never showed it: its terminal event
     // carries the payload, so its receipt is right the first time.
     if (entry.ended) {
-      if (this.threadRecords) await this.persistRound(entry);
+      if (entry.threadRecords) await this.persistRound(entry);
       return { recorded: true };
     }
-    if (this.threadRecords && !entry.bound) {
+    if (entry.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(job, `job.${job.status}`, true));
       entry.job = { ...job, recordId: binding.recordId, roundId: job.id, threadId: null };
       await this.openThreadEntry(entry, binding);
       entry.terminalRecorded = true;
-    } else if (!this.threadRecords || !entry.terminalRecorded) {
-      await this.append(entry, jobEvent(entry.job, `job.${job.status}`, this.threadRecords));
-      if (this.threadRecords) entry.terminalRecorded = true;
+    } else if (!entry.threadRecords || !entry.terminalRecorded) {
+      await this.append(entry, jobEvent(entry.job, `job.${job.status}`, entry.threadRecords));
+      if (entry.threadRecords) entry.terminalRecorded = true;
     }
     await this.finalize(entry);
     return { recorded: true };
@@ -512,14 +512,14 @@ export class JobRuntime {
   async failOwnerExited(entry, job) {
     entry.job = { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
     this.publishDirectorEvent(entry.job, "job.failed");
-    if (this.threadRecords && !entry.bound) {
+    if (entry.threadRecords && !entry.bound) {
       const binding = await failProvisionalDispatch(entry.provisional, jobEvent(entry.job, "job.failed", true));
       entry.job = { ...entry.job, recordId: binding.recordId, roundId: entry.job.id, threadId: null };
       await this.openThreadEntry(entry, binding);
       entry.terminalRecorded = true;
     } else {
-      await this.append(entry, jobEvent(entry.job, "job.failed", this.threadRecords));
-      if (this.threadRecords) entry.terminalRecorded = true;
+      await this.append(entry, jobEvent(entry.job, "job.failed", entry.threadRecords));
+      if (entry.threadRecords) entry.terminalRecorded = true;
     }
     await this.finalize(entry);
   }
@@ -589,7 +589,7 @@ export class JobRuntime {
     for (const entry of this.jobs.values()) {
       await entry.store?.close();
       clearTimeout(entry.viewTimer);
-      if (!this.threadRecords || entry.bound) await this.writeView(entry);
+      if (!entry.threadRecords || entry.bound) await this.writeView(entry);
     }
     await this.cleanup().catch((error) => this.diagnostic(error));
   }
