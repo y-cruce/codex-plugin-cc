@@ -104,7 +104,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs observe reported --session <id> --jobs <job-id,...> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe view-path <job-id> --cwd <repo>",
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
-      "  node scripts/codex-companion.mjs message <job-id> [--interrupt] [--prompt-file <path>] [text] [--json]",
+      "  node scripts/codex-companion.mjs message <job-id> [--interrupt|--queue] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--thread <thread-id>] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
@@ -1183,6 +1183,31 @@ async function handleStatus(argv) {
   outputResult(renderStatusPayload(report, options.json), options.json);
 }
 
+async function queueIdleTaskMessage(cwd, reference, text) {
+  if (!reference) throw new Error("Pass an explicit job ID from /codex:status.");
+  const { job } = buildSingleJobSnapshot(cwd, reference);
+  const context = await readRoundContext(cwd, job.id);
+  const idle = context.layout === "thread-record" ? !context.activeRoundId : !isActiveJobStatus(job.status);
+  if (!idle) return null;
+  const threadId = job.executorSessionId ?? job.threadId;
+  if (job.jobClass !== "task" || !threadId) {
+    throw new Error("Queuing a follow-up requires a task with a known executor session.");
+  }
+  if (!text?.trim()) throw new Error("message requires text or --prompt-file.");
+  const previous = job.request ?? {};
+  const executor = job.executor ?? previous.executor ?? "codex";
+  const write = previous.write ?? job.write ?? false;
+  const sandbox = previous.sandbox ?? job.sandbox ?? (write ? "workspace-write" : "read-only");
+  const network = previous.network ?? job.network ?? false;
+  const prompt = text.trim();
+  const metadata = buildTaskRunMetadata({ prompt, resumeLast: true, executor });
+  const next = buildTaskJob(cwd, metadata, write, sandbox, network, job.label, executor);
+  const request = buildTaskRequest({ ...previous, cwd: previous.cwd ?? cwd, executor, write, sandbox, network,
+    prompt, resumeLast: false, resumeThreadId: threadId, jobId: next.id });
+  const { payload } = await enqueueBackgroundTask(request.cwd, next, request);
+  return { jobId: job.id, queued: true, queuedJobId: payload.jobId };
+}
+
 async function handleLiveCommand(command, argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "prompt-file", "request-id", "answers-file"],
@@ -1193,7 +1218,10 @@ async function handleLiveCommand(command, argv) {
   const text = options["prompt-file"]
     ? fs.readFileSync(path.resolve(resolveCommandCwd(options), options["prompt-file"]), "utf8")
     : positionals.slice(1).join(" ");
-  const result = await sendLiveCommand(cwd, positionals[0], command, options, text);
+  if (options.interrupt && options.queue) throw new Error("--interrupt and --queue are two different intents; pass one.");
+  const queued = command === "message" && options.queue
+    ? await queueIdleTaskMessage(cwd, positionals[0], text) : null;
+  const result = queued ?? await sendLiveCommand(cwd, positionals[0], command, options, text);
   outputCommandResult(result, `${JSON.stringify(result, null, 2)}\n`, options.json);
 }
 

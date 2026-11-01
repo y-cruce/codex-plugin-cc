@@ -109,4 +109,25 @@ test("broker seam binds resumed dispatches to one shared record", async (t) => {
   assert.ok(secondHistory.events.every((event) => event.jobId === second.id));
   assert.ok(recordHistory.events.every((event, index) => index === 0 || BigInt(event.seq) > BigInt(recordHistory.events[index - 1].seq)));
   assert.ok(BigInt(secondHistory.events[0].seq) > BigInt(firstHistory.events.at(-1).seq));
+
+  const queued = cli("message", second.id, "--queue", "write idle follow-up", "--json");
+  assert.equal(queued.status, 0, queued.stderr);
+  const accepted = JSON.parse(queued.stdout);
+  assert.equal(accepted.queued, true);
+  assert.notEqual(accepted.queuedJobId, second.id);
+  const third = await waitFor(() => {
+    const file = path.join(stateDir, "jobs", `${accepted.queuedJobId}.json`);
+    if (!fs.existsSync(file)) return null;
+    const job = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (job.pid) workers.add(job.pid);
+    return TERMINAL.has(`job.${job.status}`) ? job : null;
+  }, "idle queued round completion");
+  assert.equal(third.status, "failed");
+  assert.equal(third.result.rawOutput, "read-only");
+  assert.equal(third.threadId, second.job.threadId);
+  assert.equal(third.label, second.job.label);
+  assert.equal(third.write, second.job.write);
+  assert.equal(third.sandbox, second.job.sandbox);
+  assert.equal(fs.existsSync(path.join(repo, "written.txt")), false);
+  assert.equal((await resolveJobHistory(repo, third.id, { stateDir })).recordId, firstLocation.recordId);
 });

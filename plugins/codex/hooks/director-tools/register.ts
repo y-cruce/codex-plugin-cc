@@ -53,10 +53,10 @@ const TOOLS = [
   },
   {
     name: 'message',
-    description: 'Send a correction to a running job: dispatch.sh message. Defaults to Codex steer, an advertised ACP steering extension, '
+    description: 'Send a correction to a job: dispatch.sh message. Defaults to Codex steer, an advertised ACP steering extension, '
       + 'or Qoder active-session input when its promptQueueing capability is supported by the plugin. A Qoder receipt confirms local submission, not model consumption. '
       + 'Set delivery to queue for an explicitly requested next turn or an ACP executor without steering support, '
-      + 'or interrupt to cancel the turn and run this now. '
+      + 'or interrupt to cancel the turn and run this now. Queue also starts a follow-up when the thread is idle, returning queuedJobId. '
       + 'Returns MESSAGED or MESSAGE_FAILED.',
     inputSchema: {
       type: 'object',

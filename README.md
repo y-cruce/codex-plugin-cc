@@ -102,6 +102,8 @@ rejection received before the original prompt completes fails the turn. Use `del
 next turn or an ACP agent without steering support; use
 `delivery: "interrupt"` when the current turn must stop.
 
+`delivery: "queue"` (or `/codex:message <job-id> --queue`) also works after the task has ended. When the thread has no active round, it starts a background follow-up in the same thread and returns `queuedJobId`, retaining the task name, write permissions and executor configuration.
+
 主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认引导当前任务。Qoder 初始化声明
 `agentCapabilities._meta.qoder.promptQueueing: true`，且插件报告 `midTurnSteer: true` 时，
 插件向同一会话追加 `session/prompt`，以原始请求的响应作为同一个 job 和 turn 的完成边界。
@@ -109,6 +111,8 @@ Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求�
 回执 `sent: true, accepted: null, consumed: null` 只确认本地已提交，代理接受与模型消费没有独立确认；
 原始请求完成前收到追加请求的明确拒绝，会使当前轮失败。未提供引导能力的 ACP 执行器，或明确要求下一轮执行时，
 使用 `delivery: "queue"`；需要停止当前轮时使用 `delivery: "interrupt"`。
+
+任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。
 
 ACP agents can also advertise top-level `_meta.steering.supported: true`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. Local DSH and Antigravity extensions can expose their runtime's mid-turn input through this route. Unmodified servers that do not advertise it keep queue/interrupt behavior.
 
@@ -120,7 +124,7 @@ Plugin 1.4.103 includes the [Antigravity proxy and setup instructions](plugins/c
 
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 
-Tasks require the shared broker; live commands never start a second runtime or silently create another thread. The broker enables `default_mode_request_user_input` for its Codex process without editing global configuration. Existing sessions must restart to load an updated broker. `task --thread <id> --write` applies workspace-write on `turn/start`; omitting `--write` explicitly restores read-only. Native `thread/queue/*` (follow-up turns after completion) is separate and is not exposed by these mid-turn controls.
+Codex tasks require the shared broker. Active-turn controls use the existing runtime; an idle queued follow-up resumes the same thread through the normal task runner. The broker enables `default_mode_request_user_input` for its Codex process without editing global configuration. Existing sessions must restart to load an updated broker. `task --thread <id> --write` applies workspace-write on `turn/start`; omitting `--write` explicitly restores read-only. Native `thread/queue/*` (follow-up turns after completion) is separate and is not exposed by these mid-turn controls.
 
 Run `npm test` and `npm run build` for local checks. The optional `CODEX_REAL_APP_SERVER_TEST=1 node --test tests/real-app-server.test.mjs` uses an installed Codex CLI with isolated temporary configuration and a local mock model, including actual file writing and syntax validation. It does not contact a real model service.
 

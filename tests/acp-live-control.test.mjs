@@ -204,6 +204,22 @@ const cases = [
         [accepted.queuedJobId, "job.started"], [accepted.queuedJobId, "job.completed"],
         [second.queuedJobId, "job.started"], [second.queuedJobId, "job.completed"]
       ]);
+
+      const idleQueued = h.cli("message", second.queuedJobId, "--queue", "idle-next");
+      assert.equal(idleQueued.status, 0, idleQueued.stderr);
+      const idleAccepted = JSON.parse(idleQueued.stdout);
+      assert.equal(idleAccepted.queued, true);
+      const resumed = await waitFor(() => {
+        const current = readStoredJob(h.cwd, idleAccepted.queuedJobId);
+        return current && ["completed", "failed", "cancelled"].includes(current.status) ? current : null;
+      }, "idle ACP follow-up completion");
+      assert.equal(resumed.status, "completed", resumed.errorMessage);
+      assert.equal(resumed.executorSessionId, job.executorSessionId);
+      assert.equal(resumed.label, label);
+      assert.equal(resumed.request.executorCommand, job.request.executorCommand);
+      assert.deepEqual(resumed.request.executorArgs, job.request.executorArgs);
+      assert.equal((await readRoundContext(h.cwd, resumed.id)).recordId, original.recordId);
+      assert.deepEqual(recordingPrompts(h.recording), ["hold", "queued-next", "queued-second", "idle-next"]);
     }
   },
   {
