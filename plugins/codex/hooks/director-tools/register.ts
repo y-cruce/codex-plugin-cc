@@ -46,7 +46,7 @@ const TOOLS = [
         executor_args: { type: 'array', items: { type: 'string' }, description: 'EXECUTOR_ARGS: arguments for the ACP executable; dsh defaults to --profile acp.' },
         executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP permission policy. dsh and antigravity default to allow-once; ask forwards offered choices to the director.' },
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor.' },
-        executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for a non-Codex executor; agy defaults to high.' },
+        executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for a non-Codex executor; agy defaults to medium for Opus and high for Argon.' },
       },
       required: ['mode', 'name', 'cwd', 'brief'],
     },

@@ -15,7 +15,9 @@ export CODEX_DIRECTOR_ANTIGRAVITY_COMMAND="$PWD/plugins/codex/scripts/agy-acp/ac
 ```
 
 The default is `gemini-4-argon` with high thinking (`gemini-4-argon-high` in
-the official runtime's combined model form). The proxy passes the launcher's proxy
+the official runtime's combined model form). New Opus sessions started through
+the plugin default to medium thinking; an explicit effort overrides the default.
+The proxy passes the launcher's proxy
 environment to the official ACP server and its helper. OAuth, account, quota,
 settings and the official binaries are used in place. No global installation or
 launcher modification is performed by these commands.

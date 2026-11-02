@@ -68,9 +68,12 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("new Antigravity sessions default to Argon high, honor overrides and preserve resumed sessions", async () => {
+test("new Antigravity sessions default to Argon high or Opus medium, honor overrides and preserve resumed sessions", async () => {
   for (const row of [
     { agent: "antigravity-acp", model: "gemini-4-argon", effort: "high" },
+    { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
+    { agent: "antigravity-acp", request: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
+    { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
     { agent: "antigravity-acp", overrides: { modelId: "gemini-3.8-flash", effortId: "low" }, model: "gemini-3.8-flash", effort: "low" },
     { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low" },
     { agent: "other-acp", model: "gemini-3.8-flash", effort: "low" }
@@ -85,7 +88,7 @@ test("new Antigravity sessions default to Argon high, honor overrides and preser
     h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });
     h.port.connection.resumeSession = async () => h.response;
     h.port.sessionResult = async (sessionId, response) => ({ sessionId, configOptions: response.configOptions });
-    const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession({});
+    const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession(row.request ?? {});
     const configured = Boolean(row.overrides) || row.agent === "antigravity-acp" && !row.resume;
     assert.equal(result.configOptions.find(option => option.id === "model").currentValue, row.model);
     assert.equal(result.configOptions.find(option => option.id === "thinking_level").currentValue, row.effort);
