@@ -1,7 +1,7 @@
 import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 
-const INTERVAL_MS = 45_000
+const INTERVAL_MS = 60_000
 export type ActivityEntry = { jobId: string; nextAt: number; signature?: string; text?: string }
 export type ActivityState = { entries: Map<string, ActivityEntry>; pending: Set<string> }
 export type ActivityRequest = { threadId: string; entry: ActivityEntry; task: string; notes: string; previousSummary?: string }

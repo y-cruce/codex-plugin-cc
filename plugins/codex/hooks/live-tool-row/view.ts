@@ -212,13 +212,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const { contextUsed, contextSize } = data.usage
   const context = contextUsed == null ? '' : ` · ctx ${tokens(contextUsed)}${contextSize != null && contextSize > 0
     ? `/${tokens(contextSize)} (${Math.round(contextUsed / contextSize * 100)}%)` : ''}`
+  const footerOnlyTime = headingLast && status === 'running' && !data.activitySummary
   const header = [
-    { text: `● ${executor}${headingLast ? '' : ' · '}` },
+    { text: headingLast ? '● ' : `● ${executor} · ` },
     ...(headingLast ? [] : [{ text: data.label, bold: true }]),
     ...(headingLast && status === 'running'
-      ? data.activitySummary ? [{ text: ` · ${data.activitySummary}`, color: colors[status] }] : []
-      : [{ text: ` · ${status}`, color: colors[status] }]),
-    { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
+      ? data.activitySummary ? [{ text: data.activitySummary, color: colors[status] }] : []
+      : [{ text: `${headingLast ? '' : ' · '}${status}`, color: colors[status] }]),
+    { text: `${footerOnlyTime ? '' : ' · '}${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)}${headingLast ? '' : ' tokens'}` : ''}` },
     { text: context },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },
   ]

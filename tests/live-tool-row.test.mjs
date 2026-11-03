@@ -533,9 +533,10 @@ describe('live row polish', () => {
     const now = Date.parse(data.startedAt);
     const draw = (headingLast) => liveTree($.ui.resolve(row()), data, 120, now, 48, undefined, 200, headingLast);
     const footer = () => textOf(draw(true).children.at(-1));
-    assert.equal(footer(), '● Antigravity · 0s · ctx 700k/1000k (70%)');
+    assert.equal(footer(), '● 0s · ctx 700k/1000k (70%)');
     data.activitySummary = '正在核对通知路由';
-    assert.equal(footer(), '● Antigravity · 正在核对通知路由 · 0s · ctx 700k/1000k (70%)');
+    data.usage.outputTokens = 45300;
+    assert.equal(footer(), '● 正在核对通知路由 · 0s · ↓45.3k · ctx 700k/1000k (70%)');
     const other = { ...data, recordId: 'other-thread', jobId: 'other-job', label: 'second task', activitySummary: '正在运行回归测试' };
     const ui = { ...$.ui.resolve(row()), Button: ({ children, ...props }) => ({ type: 'Button', props, children }) };
     const selected = textOf(paneBody(ui, [data, other], 120, 24, now, 'other-thread', () => {}));
@@ -543,6 +544,7 @@ describe('live row polish', () => {
     assert.doesNotMatch(selected, /正在核对通知路由/);
     assert.match(selected, /fixture task/);
     assert.match(selected, /second task/);
+    assert.match(selected, /second task · Antigravity/);
     assert.match(textOf(draw(false).children[0]), /Antigravity · fixture task · running/);
     data.status = 'waiting-for-answer';
     assert.match(footer(), /waiting-for-answer/);

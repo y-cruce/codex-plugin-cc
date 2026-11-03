@@ -70,7 +70,7 @@ export function paneBody(
   const list = threads.map((data, index) => {
     const recordId = data.recordId ?? data.jobId
     const isFocused = recordId === (focused.recordId ?? focused.jobId)
-    const executor = data.executor && data.executor.kind !== 'codex' ? ` · ${data.executor.label}` : ''
+    const executor = ` · ${data.executor?.label ?? 'Codex'}`
     const status = data.status === 'waiting-for-answer' ? 'waiting' : data.status
     const queued = data.queuedCount ? `${data.queuedCount} queued` : ''
     const state = [status === 'queued' && queued ? queued : status, status !== 'queued' ? queued : '', data.foreign ? 'other' : ''].filter(Boolean).join(' · ')

@@ -8,11 +8,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { readFrame, writeFrame, varint } from "../plugins/codex/scripts/agy-acp/harness-proxy.mjs";
+import { BROKER_READY_MS } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("a helper that listens 400 ms after OutputConfig preserves the official startup retry boundary", { timeout: 6000 }, async () => {
+// Process startup precedes the retry window measured after OutputConfig below.
+test("a helper that listens 400 ms after OutputConfig preserves the official startup retry boundary", { timeout: BROKER_READY_MS }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-startup-"));
   const controlPath = path.join(directory, "control.sock");
   const sockets = new Set();

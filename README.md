@@ -280,9 +280,9 @@ When a thread continues, its list row and name completions show the latest task 
 
 线程续接后，列表名称和名称补全随最新实际任务名称更新。
 
-Task names appear in the list; the pane footer shows the executor, current activity and elapsed
-time. Each running thread independently generates a short activity summary with
-`qoder -p --model dfmodel` after 45 seconds, then 45 seconds after each attempt when
+Task names and executor names appear in the list; the pane footer shows the current
+activity, elapsed time and compact usage such as `↓45.3k`. Each running thread independently generates a short activity summary with
+`qoder -p --model dfmodel` after one minute, then one minute after each attempt when
 its activity changes. Threads run concurrently without a panel-wide limit. Calls
 use a dedicated system prompt, disable thinking, bypass proxy environment variables
 and do not persist Qoder sessions. The footer omits `running`; waiting and terminal
@@ -292,9 +292,9 @@ supplies `tokenUsage.last.totalTokens` and `modelContextWindow`; ACP supplies
 `usage_update.used` and `size`. Antigravity `view_file` rows include the file path
 and requested line range.
 
-任务名称显示在列表中，面板底部状态行显示执行器、当前活动和耗时。每个 running thread
-独立通过 `qoder -p --model dfmodel` 生成短摘要：运行45秒后首次请求，此后每次尝试结束
-再等45秒，活动未变就跳过。thread 之间并行，不设面板级上限。调用使用专用系统提示词，
+任务名称和执行器名称显示在列表中，面板底部状态行显示当前活动、耗时及 `↓45.3k` 形式的用量。每个 running thread
+独立通过 `qoder -p --model dfmodel` 生成短摘要：运行1分钟后首次请求，此后每次尝试结束
+再等1分钟，活动未变就跳过。thread 之间并行，不设面板级上限。调用使用专用系统提示词，
 关闭思考、清除代理环境变量并直连，不保存 Qoder 会话。状态栏省略 `running`，等待和
 结束状态继续明确显示；可通过插件选项 `activitySummary` 关闭摘要。执行器上报原生上下文数据时，
 显示如 `ctx 700k/1000k (70%)` 的已用量、容量和占比。Codex 取
