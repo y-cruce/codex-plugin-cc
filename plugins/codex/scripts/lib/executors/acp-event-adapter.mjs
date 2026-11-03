@@ -72,6 +72,33 @@ function commandText(tool) {
   return tool.title ?? "";
 }
 
+// A tool's arguments are what the call is about, and ACP sends them as a bag
+// of names. The keys below are tried in order, from what the call is for to
+// where it happens, so a search says what it looked for and a read says which
+// file rather than both saying "/repo". DSH's own pane reads its arguments in
+// this order, which is why it is this one; a command is its own row above and
+// is not looked for here.
+const DETAIL_KEYS = ["title", "description", "objective", "task", "task_name", "name", "question",
+  "prompt", "message", "queries", "query", "pattern", "url", "uri",
+  "file_path", "path", "target", "action"];
+// A row is a line to read, not a place to spill an argument; DSH itself caps
+// the detail it shows at this much.
+const DETAIL_MAX = 160;
+
+// The argument that describes a call the title left unsaid, if one does.
+function argumentDetail(tool, title) {
+  const input = tool.rawInput;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  for (const key of DETAIL_KEYS) {
+    if (typeof input[key] !== "string") continue;
+    const detail = input[key].replace(/\s+/gu, " ").trim();
+    // A title that already carries the value would otherwise repeat it.
+    if (!detail || (title && title.includes(detail))) continue;
+    return detail.length > DETAIL_MAX ? `${detail.slice(0, DETAIL_MAX - 1)}…` : detail;
+  }
+  return null;
+}
+
 // A shell tool arrives titled with the agent's own word for it -- DSH sends
 // "bash" -- and the command it runs in rawInput. A row that shows the title
 // alone says only "bash"; the command joins it the way a Codex command row
@@ -91,20 +118,40 @@ function toolTitle(tool) {
     return `${title ?? String(tool.toolCallId)}: ${input.file_path}${range}`;
   }
   const command = typeof tool.rawInput?.command === "string" ? tool.rawInput.command.trim() : "";
-  if (!command) return title ?? String(tool.toolCallId);
-  const named = title && title !== String(tool.toolCallId) ? title : null;
-  return named ? `${named}: ${command}` : command;
+  if (command) {
+    const named = title && title !== String(tool.toolCallId) ? title : null;
+    return named ? `${named}: ${command}` : command;
+  }
+  // A title that is only the tool's own name -- "read", "grep" -- said nothing
+  // about what the call was given, and the row read as a bullet and a word. A
+  // title that says more than the name is the agent's own wording and keeps it.
+  const detail = title && title === toolName(tool) ? argumentDetail(tool, title) : null;
+  if (!detail) return title ?? String(tool.toolCallId);
+  return `${title}: ${detail}`;
+}
+
+// What the pane files a call under. ACP sends no name, and a vendor that
+// titles the call with the tool's own name ("read", "bash") is saying what the
+// call is, not what it did with its input. The fold above the rows counts them
+// by this name, so a title-only vendor had every call of a run counted as one
+// more generic tool: a run of reads and searches read "called 6 tools".
+function toolName(tool) {
+  const named = tool.name ?? vendorTool(tool);
+  if (named) return named;
+  const title = typeof tool.title === "string" ? tool.title.trim() : "";
+  // A title that is only the call's id names nothing a reader would recognize.
+  return title && !/\s/u.test(title) && title !== String(tool.toolCallId) ? title : null;
 }
 
 function toolSnapshot(tool) {
   return {
     toolCallId: String(tool.toolCallId),
-    name: tool.name ?? vendorTool(tool),
-    // The title already says what the tool did ("Read …/register.ts"), and the
-    // pane drops the name a row is prefixed with, so naming the tool again
-    // reads as "Read · Read …/register.ts". The name is worth having only
-    // where the title misleads: a tool that calls itself an edit and changes
-    // no file is Qoder's task list, and "Edit file" is not what it did.
+    name: toolName(tool),
+    // The pane counts a run of work by the name and strips it from the row it
+    // prefixes, so a title that already says what the tool did ("Read
+    // …/register.ts") must not repeat the name. A title worth having over the
+    // name is one that corrects it: a tool that calls itself an edit and
+    // changes no file is Qoder's task list, and "Edit file" is not what it did.
     title: toolTitle(tool),
     kind: tool.kind ?? "other",
     status: tool.status ?? "pending",
@@ -175,6 +222,7 @@ export class AcpEventAdapter {
     this.currentMessages = new Map();
     this.tools = new Map();
     this.plan = null;
+    this.planWritten = null;
     this.subagent = null;
     this.speaker = 0;
   }
@@ -189,6 +237,7 @@ export class AcpEventAdapter {
     this.currentMessages.clear();
     this.tools.clear();
     this.plan = null;
+    this.planWritten = null;
     this.subagent = null;
     this.speaker = 0;
     return this.emit("turn.started", { ordinal: 0, prompt }, { turnId });
@@ -308,6 +357,23 @@ export class AcpEventAdapter {
         detail: said ?? (created && typeof tool.rawInput?.description === "string" ? tool.rawInput.description : null) },
       { agentId: String(tool.toolCallId) }, notification);
       if (created) this.subagent = { id: String(tool.toolCallId), path: subagent };
+      return;
+    }
+    // DSH keeps its task list behind an ordinary tool call and sends no plan
+    // update of its own, so the pane's plan -- the checklist it pins at its
+    // foot -- never appeared for a DSH task, and every rewrite of the list was
+    // a row saying only "todo_write". The list, which each call replaces
+    // wholesale, is that plan: the foot carries it, and a row per rewrite
+    // would put it in the trace again.
+    const todos = Array.isArray(tool.rawInput?.todos) ? tool.rawInput.todos.filter((entry) => entry && typeof entry === "object") : null;
+    if (todos?.length) {
+      const entries = planEntries(todos);
+      const written = JSON.stringify(entries);
+      if (written !== this.planWritten) {
+        this.planWritten = written;
+        this.plan = { entries, markdown: null, uri: null };
+        await this.emit("plan.updated", this.plan, identity, notification);
+      }
       return;
     }
     if (tool.kind === "execute") {

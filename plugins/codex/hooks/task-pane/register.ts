@@ -1510,6 +1510,15 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }
   })
+  // Since 2.1.312 the surface can paint the whole body, including space outside
+  // the tree. Older hosts still use the background drawn by paneBody.
+  on('ui.open', { id: PANE }, async ($, e, next) => {
+    if (!background) return next(e)
+    const { version } = await $.session.version()
+    const [major, minor, patch] = version.split('.').map(Number)
+    const nativeBackground = major > 2 || major === 2 && (minor > 1 || minor === 1 && patch >= 312)
+    return next(nativeBackground ? { ...e, backgroundColor: background } : e)
+  })
   // A person's close stops automatic opens for this session, including reloads.
   // Plugin and engine closes leave that choice alone; an explicit open clears it.
   on('ui.close', async ($, e, next) => {

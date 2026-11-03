@@ -86,6 +86,56 @@ test("ACP shell lifecycle renders one command or tool row, including legacy prog
   }
 });
 
+test("a tool titled with its own name shows the argument it was given and is counted by that name", async () => {
+  const h = harness();
+  await h.adapter.startTurn("turn", []);
+  // DSH sends the tool's name as the title and what it was given in rawInput:
+  // every row read "read" or "grep" alone, and the fold counted them all as
+  // generic tools.
+  for (const [toolCallId, title, rawInput] of [["call-1", "read", { file_path: "/repo/src/adapter.mjs" }],
+    ["call-2", "grep", { pattern: "EXECUTION_WINDOW", path: "/repo" }], ["call-3", "bash", { command: "npm test" }]]) {
+    await h.update("tool_call", { toolCallId, title, kind: "other", rawInput, status: "pending" });
+    await h.update("tool_call_update", { toolCallId, status: "completed" });
+  }
+  h.view.status = "completed";
+  const drawn = h.draw(true);
+  assert.match(drawn, /● read: \/repo\/src\/adapter\.mjs/);
+  assert.match(drawn, /● grep: EXECUTION_WINDOW/);
+  assert.match(drawn, /● bash: npm test/);
+  // Folded clauses keep the pane's own order (searches, reads, then tools).
+  assert.match(drawn, /Searched for 1 pattern, read 1 file, called 1 tool/);
+});
+
+test("a title that says more than the tool's name keeps the agent's own wording", async () => {
+  const h = harness();
+  await h.adapter.startTurn("turn", []);
+  await h.update("tool_call", { toolCallId: "call-1", title: "Inspect fixture", kind: "other", status: "pending",
+    rawInput: { path: "README.md" } });
+  assert.equal(h.events.at(-1).payload.tool.title, "Inspect fixture");
+  // The detail is one line however the argument spelled its breaks, and a
+  // value the title already carries is not repeated.
+  await h.update("tool_call_update", { toolCallId: "call-2", title: "Shell", kind: "other",
+    rawInput: { description: "a\nb  c" } });
+  assert.equal(h.events.at(-1).payload.tool.title, "Shell: a b c");
+  await h.update("tool_call_update", { toolCallId: "call-2", title: "a b c", rawInput: { description: "a b c" } });
+  assert.equal(h.events.at(-1).payload.tool.title, "a b c");
+});
+
+test("DSH's task list call becomes the pane's plan instead of a row naming the tool", async () => {
+  const h = harness();
+  await h.adapter.startTurn("turn", []);
+  await h.update("tool_call", { toolCallId: "call-1", title: "todo_write", kind: "other", status: "pending",
+    rawInput: { todos: [{ content: "Read the rules", status: "completed" }, { content: "Check the pane", status: "in_progress" }] } });
+  await h.update("tool_call_update", { toolCallId: "call-1", status: "completed" });
+  assert.deepEqual(h.view.plan.entries.map((entry) => [entry.content, entry.status]),
+    [["Read the rules", "completed"], ["Check the pane", "in_progress"]]);
+  assert.equal(h.view.tail.length, 0, "the list is drawn at the foot, not as a trace row");
+  const drawn = h.draw();
+  assert.match(drawn, /Plan · 1\/2/);
+  assert.match(drawn, /☑ Read the rules/);
+  assert.match(drawn, /▸ Check the pane/);
+});
+
 test("Antigravity file reads show the file and requested lines throughout the tool lifecycle", async () => {
   for (const status of ["completed", "failed"]) {
     const h = harness();

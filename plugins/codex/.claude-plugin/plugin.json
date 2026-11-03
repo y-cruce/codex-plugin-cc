@@ -1,6 +1,6 @@
 {
   "name": "codex",
-  "version": "1.4.111",
+  "version": "1.4.112",
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"
@@ -9,7 +9,7 @@
     "paneBackground": {
       "type": "string",
       "title": "Tasks pane background",
-      "description": "Colour the Codex tasks pane paints behind itself, so it matches your terminal instead of the engine's grey. Something like rgb(42,42,42) or #1e1e1e; empty keeps the engine's own.",
+      "description": "Tasks pane background: a theme colour, rgb(42,42,42), #1e1e1e or transparent; empty keeps the engine's own. Claude Code 2.1.312+ also applies it beneath the whole pane body.",
       "default": "rgb(42,42,42)"
     }
   }

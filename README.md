@@ -292,6 +292,13 @@ answers after the questions, and displays durations in whole seconds.
 
 面板右侧保留两个字符的空白；提问后显示主 agent 送达的回复内容，耗时显示到整秒。
 
+On Claude Code 2.1.312 or later, `paneBackground` colours the whole pane body,
+including empty space. It accepts theme colours, RGB, hex or `transparent`;
+empty keeps the engine's default. Earlier versions colour the rendered content.
+
+Claude Code 2.1.312 起，`paneBackground` 通过宿主设置整个面板正文区的底色，包含空白区域。
+支持主题颜色、RGB、十六进制颜色和 `transparent`；留空使用宿主默认值。旧版继续绘制内容区底色。
+
 Commands with a nonzero exit code show `exit N`. The pane and inline traces
 omit command output and output preview controls.
 

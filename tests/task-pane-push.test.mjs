@@ -212,6 +212,31 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   };
 }
 
+test("pane background uses the host body colour from 2.1.312", async () => {
+  for (const [version, background, expected] of [
+    ["2.1.299", "#1e1e1e", undefined],
+    ["2.1.312", "transparent", "transparent"],
+    ["2.1.314", "#1e1e1e", "#1e1e1e"],
+    ["2.1.312", "", undefined],
+  ]) {
+    let open;
+    registerTaskPane((event, matcher, callback) => {
+      if (event === "ui.open") {
+        assert.deepEqual(matcher, { id: "codex_tasks" });
+        open = callback;
+      }
+    }, new Set(), background);
+    const request = { id: "codex_tasks", title: "Codex tasks", focus: true, rows: 24 };
+    let received;
+    const result = await open({ session: { version: async () => ({ version }) } }, request, async (event) => {
+      received = event;
+      return { isPlaced: true };
+    });
+    assert.deepEqual(received, expected ? { ...request, backgroundColor: expected } : request);
+    assert.deepEqual(result, { isPlaced: true });
+  }
+});
+
 test("subagent turns leave director bootstrap and completion polling alone", async () => {
   const hooks = new Map();
   registerTaskPane((event, matcher, callback) => hooks.set(event, callback ?? matcher));

@@ -107,12 +107,8 @@ export function paneBody(
   // The whole trace is drawn and the pane scrolls it; the visible height only
   // sets how much of it shows at once.
   const TAIL = 200
-  // The pane's own ground is a mid grey the engine paints, which reads as a slab
-  // in the middle of a dark session. There is no value meaning "the terminal's
-  // own", so the colour is a plugin option; empty keeps the engine's.
-  // The trace takes the height that is going: a shorter one leaves the ground
-  // showing to the foot of the pane rather than the mid grey the engine paints
-  // under an element that stops early.
+  // Keep the tree's background for hosts before 2.1.312, where ui.open cannot
+  // set the body's background. A short trace fills the available height too.
   // Tab walks the pane's buttons in tree order and keeps its place as a count,
   // not as an element. With the trace first, a fold coming or going above the
   // list moved that count onto another button without a move being made:

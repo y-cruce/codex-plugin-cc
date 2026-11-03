@@ -67,19 +67,22 @@ test("an ACP edit that changes no file is reported as the tool it is", async () 
 test("an ACP tool row names the command it runs", async () => {
   // DSH reports its shell as an "other" tool whose title is the word "bash",
   // so the row drew "bash" and the command it ran never reached the pane.
+  // A title that is the tool's own name is also the name the row is filed
+  // under, so a run of those calls is counted as what they were.
   const cases = [
     ["the agent's own name for it", { title: "bash", rawInput: { command: "touch /tmp/marker && echo MADE" } },
-      "bash: touch /tmp/marker && echo MADE"],
-    ["a call that never had a title", { rawInput: { command: "npm test" } }, "npm test"],
-    ["a tool that runs no command", { title: "Read …/acp.mjs", kind: "read", rawInput: { path: "acp.mjs" } }, "Read …/acp.mjs"],
+      "bash: touch /tmp/marker && echo MADE", "bash"],
+    ["a call that never had a title", { rawInput: { command: "npm test" } }, "npm test", null],
+    ["a tool that runs no command", { title: "Read …/acp.mjs", kind: "read", rawInput: { path: "acp.mjs" } }, "Read …/acp.mjs", null],
   ];
-  for (const [name, update, expected] of cases) {
+  for (const [name, update, expected, expectedName] of cases) {
     const events = [];
     const adapter = new AcpEventAdapter((event) => events.push(event), { job: { id: "job-1" } });
     adapter.bindSession("session-1");
     await adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "tool-1", status: "pending", ...update } });
     assert.equal(events[0].payload.tool.title, expected, name);
-    assert.equal(renderJobEvent(events[0]), `Tool started: ${expected}`, name);
+    assert.equal(events[0].payload.tool.name, expectedName, name);
+    assert.equal(renderJobEvent(events[0]), `${expectedName ?? "Tool"} started: ${expected}`, name);
   }
 });
 
