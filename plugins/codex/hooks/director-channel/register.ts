@@ -100,18 +100,11 @@ export async function admitDirector($: EngineInterface, director: DirectorChanne
   if (!pending.length) return { drop: 'Codex event already accepted or question closed' }
   const events = await forwardDirectorEvents($, pending.map(item => item.event))
   if (!events.length) return { drop: 'Codex event sent to its director agent' }
-  const forwarded = events.length !== pending.length
   const failures = events.filter(event => event.directorAgentId)
-  const ids = new Set(events.map(event => event.eventId))
-  const kept = new Set(pending.filter(item => ids.has(item.event.eventId)).map(item => item.ref))
-  const filter = (body: string) => body.split('\n').filter(line => {
-    const items = deliveryRefs(line)
-    return !items.length || items.some(ref => kept.has(ref))
-  }).join('\n')
-  let text = channel ? e.text.replace(/ delivery="[^"]*"/, '') : e.text.includes('<event>')
-    ? e.text.replace(/<event>([\s\S]*?)<\/event>/g, (_match, body) => `<event>${filter(body)}</event>`)
-    : filter(e.text)
-  if (!channel && (forwarded || failures.length)) {
+  let text = e.text.replace(/ delivery="[^"]*"/, '')
+  if (!channel) {
+    // Monitor stdout carries a short summary and a receipt on one line so the
+    // host cannot split their delivery. Read the full text from the event.
     const body = events.map(event => event.text).join('\n')
     text = e.text.includes('<event>') ? e.text.replace(/<event>[\s\S]*?<\/event>/g, () => `<event>${body}</event>`) : body
   } else if (channel && failures.length) {

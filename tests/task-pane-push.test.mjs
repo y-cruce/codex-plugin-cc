@@ -146,7 +146,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         await wait();
       }
       if (threads instanceof Error) throw threads;
-      return { exitCode: 0, stdout: JSON.stringify({ threads: init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
+      return { exitCode: 0, stdout: JSON.stringify({ threads: options.listThreads ? options.listThreads(init.cwd, threads)
+        : init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
     tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
     ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return request.focus ? options.focusResult ?? { isPlaced: true } : openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
@@ -205,37 +206,13 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     },
     goal: async (args, text) => { await hooks.get("command.run:")(engine, { command: "goal", args }, async () => ({ text })); await settle(writes); },
     turn: async (reason = "answer") => hooks.get("turn.complete:")(engine, { reason }, async () => ({ text: "" })),
+    stop: async (tasks) => hooks.get("classic.Stop:")(engine, { background_tasks: tasks }, async () => ({})),
     focus: async (element) => hooks.get("ui.focus:")(engine, { requestId: "codex_tasks", element }, async (event) => event),
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
-
-test("pane background uses the host body colour from 2.1.312", async () => {
-  for (const [version, background, expected] of [
-    ["2.1.299", "#1e1e1e", undefined],
-    ["2.1.312", "transparent", "transparent"],
-    ["2.1.314", "#1e1e1e", "#1e1e1e"],
-    ["2.1.312", "", undefined],
-  ]) {
-    let open;
-    registerTaskPane((event, matcher, callback) => {
-      if (event === "ui.open") {
-        assert.deepEqual(matcher, { id: "codex_tasks" });
-        open = callback;
-      }
-    }, new Set(), background);
-    const request = { id: "codex_tasks", title: "Codex tasks", focus: true, rows: 24 };
-    let received;
-    const result = await open({ session: { version: async () => ({ version }) } }, request, async (event) => {
-      received = event;
-      return { isPlaced: true };
-    });
-    assert.deepEqual(received, expected ? { ...request, backgroundColor: expected } : request);
-    assert.deepEqual(result, { isPlaced: true });
-  }
-});
 
 test("subagent turns leave director bootstrap and completion polling alone", async () => {
   const hooks = new Map();
@@ -1225,6 +1202,54 @@ test("a fallback Monitor survives a poll whose listing of its repository failed"
   await pane.tick()
   assert.deepEqual(calls.filter(tool => tool !== 'Bash'), ['Monitor'], "kept through the failed listing, not stopped and rearmed")
 })
+
+test("channel confirmation stops a Monitor whose launch reply arrives after retirement", async () => {
+  const calls = [];
+  const launched = Promise.withResolvers();
+  const now = Date.now();
+  const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", watch: false, now,
+    toolCall: request => {
+      calls.push(request);
+      return request.tool === "Monitor" ? launched.promise : Promise.resolve({});
+    } });
+  assert.equal(calls.filter(request => request.tool === "Monitor").length, 1);
+  pane.files.set("/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 });
+  await pane.tick();
+  launched.resolve({ result: { taskId: "late-monitor" } });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.filter(request => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "late-monitor" }]);
+});
+
+test("a reloaded pane retires its orphaned Monitor from the host's background tasks", async () => {
+  const calls = [];
+  const now = Date.now();
+  const stored = new Map([["codex:tasks:session:ownedMonitors", ["orphan", "hold"]]]);
+  const base = "/home/test/.claude/plugins/data/codex/state/main";
+  const pane = await paneHarness(stored, undefined, "session", { ppid: "4242", now, dirs: ["/fallback"], watch: false,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }],
+      [`${base}/jobs/job-b.json`, { id: "job-b", sessionId: "session", workspaceRoot: "/fallback", status: "running" }]],
+    fsList: directory => directory.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
+      : directory.endsWith("/state") ? [{ kind: "dir", name: "main" }]
+      : directory.endsWith("/jobs") ? ["job-a.json", "job-b.json"].map(name => ({ kind: "file", name, mtimeMs: now })) : [],
+    listThreads: (cwd, threads) => cwd === "/work" ? threads : [{ id: "record-b", recordId: "record-b", jobId: "job-b",
+      status: "running", live: true, directorPush: false, sessionIds: ["session"], viewPath: "/view-b", historyAvailable: false }],
+    toolCall: async request => { calls.push(request); return { result: { taskId: "fallback" } }; } });
+  const command = "bash /home/test/.claude/skills/code-director/scripts/dispatch.sh events --cwd /work --session session";
+  // The host reports script Monitors as shell tasks. Reload can lose both the
+  // per-root record and the launch reply that would have recorded the ID.
+  const tasks = [{ id: "orphan", type: "shell", command }, { id: "unrecorded", type: "shell", command },
+    { id: "hold", type: "shell", command: "Codex jobs running" },
+    { id: "fallback", type: "shell", command: command.replace("--cwd /work", "--cwd /fallback") },
+    { id: "other", type: "shell", command: command.replace("--session session", "--session other") }];
+  await pane.stop(tasks);
+  await new Promise(resolve => setImmediate(resolve));
+  await pane.stop(tasks);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(request => request.tool === "Monitor").length, 1, "the other root keeps its fallback");
+  assert.deepEqual(calls.filter(request => request.tool === "TaskStop"),
+    ["orphan", "unrecorded"].map(task_id => ({ tool: "TaskStop", task_id })));
+});
 
 test("Monitors require a live job record with and without a confirmed channel", async () => {
   for (const confirmed of [true, false]) for (const [status, live] of [["running", false], ["completed", false],

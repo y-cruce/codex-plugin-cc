@@ -39,12 +39,12 @@ function oneLine(text) {
   return String(text ?? "").replace(/[\r\n]+/g, " ");
 }
 
-// Claude Code cuts a Monitor line at 500 characters, and the ingress accepts an
-// event only by a whole tag ending a line: a longer line has its tag on the next.
+// Claude Code cuts each Monitor line at 500 characters and may deliver lines
+// separately. Keep the tag with its summary; ingress restores the full event.
 const MONITOR_LINE_CHARS = 500;
 function taggedLine(line, event) {
   const tag = deliveryTag(event);
-  return `${line}${line.length + 1 + tag.length > MONITOR_LINE_CHARS ? "\n" : " "}${tag}`;
+  return `${line.slice(0, Math.max(0, MONITOR_LINE_CHARS - tag.length - 1))} ${tag}`;
 }
 
 // Fallback also drains accepted items after their broker has exited. This

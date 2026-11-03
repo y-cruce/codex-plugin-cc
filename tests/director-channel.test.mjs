@@ -171,13 +171,24 @@ async function monitor(h, live, job = h.job, ingress = true) {
   return lines;
 }
 
-test("a Monitor line past Claude Code's 500-character cut keeps its delivery tag whole", async (t) => {
+test("a long Monitor notification keeps its receipt on one line and ingress restores its full text", async (t) => {
   const h = fixture(t);
   const note = { id: "long", message: "长".repeat(400) };
   const [written] = await monitor(h, { notifications: [note] }, h.job, false);
-  const shown = written.split("\n").map(line => line.length > 500 ? `${line.slice(0, 500)}...(truncated)` : line).join("\n");
-  assert.deepEqual(deliveryRefs(shown).map(eventFromRef).map(event => event?.eventId),
-    [directorEvent(h.job, "director.notified", note, h.stateDir).eventId]);
+  assert.equal(written.includes("\n"), false, "the host may batch each stdout line separately");
+  assert.ok(written.length <= 500);
+  const event = directorEvent(h.job, "director.notified", note, h.stateDir);
+  assert.deepEqual(deliveryRefs(written).map(eventFromRef).map(event => event?.eventId), [event.eventId]);
+  const engine = { plugin: { root: "/plugin" }, session: { id: async () => h.job.sessionId },
+    process: { run: async args => ({ exitCode: 0, stdout: JSON.stringify(await runIngress(args[2], JSON.parse(args[3]))), stderr: "" }) } };
+  const notification = { origin: { kind: "task-notification" },
+    text: `<task-notification><task-id>monitor</task-id><event>${written}</event></task-notification>` };
+  await through({})(engine, notification, async e => {
+    assert.ok(e.text.includes(event.text), "the director reads the complete persisted notification");
+    return {};
+  });
+  assert.equal(wasDelivered(event), true);
+  assert.ok((await through({})(engine, notification, async () => assert.fail("replayed Monitor notification"))).drop);
 });
 
 test("Monitor and channel share receipts in either switching order, including concurrent delivery", async (t) => {

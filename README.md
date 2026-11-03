@@ -155,6 +155,10 @@ exports the transcript path. If it is unavailable, `/codex:transfer` asks for
 之后的会话。命令式 `SessionStart` 导出会话文件路径；路径缺失时 `/codex:transfer` 提示提供
 `--source`，上一会话遗留的路径会被清除。
 
+After `/reload-plugins`, the pane stops leftover event Monitors at the end of a turn once the channel is confirmed and that repository needs no fallback watch. Long Monitor notifications carry their delivery receipt on the same stdout line; ingress restores the full event text before delivery.
+
+`/reload-plugins` 后，channel 确认且对应仓库无需后备监听时，面板在本轮结束时停止残留的事件 Monitor。长通知的正文摘要与去重标记放在同一行，入口从事件记录恢复全文后投递。
+
 From 1.4.58 the plugin also ships a [channel](https://code.claude.com/docs/en/channels) MCP server, `director`. Start Claude Code with the plugin named among its channels:
 
 ```bash
@@ -291,13 +295,6 @@ The pane leaves two columns of space on the right, shows the director's delivere
 answers after the questions, and displays durations in whole seconds.
 
 面板右侧保留两个字符的空白；提问后显示主 agent 送达的回复内容，耗时显示到整秒。
-
-On Claude Code 2.1.312 or later, `paneBackground` colours the whole pane body,
-including empty space. It accepts theme colours, RGB, hex or `transparent`;
-empty keeps the engine's default. Earlier versions colour the rendered content.
-
-Claude Code 2.1.312 起，`paneBackground` 通过宿主设置整个面板正文区的底色，包含空白区域。
-支持主题颜色、RGB、十六进制颜色和 `transparent`；留空使用宿主默认值。旧版继续绘制内容区底色。
 
 Commands with a nonzero exit code show `exit N`. The pane and inline traces
 omit command output and output preview controls.

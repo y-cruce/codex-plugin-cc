@@ -312,7 +312,9 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
     }).then(async result => {
       const taskId = (result.result as { taskId?: string } | undefined)?.taskId
       if (!taskId) return
-      if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId) return stopMonitor($, state, taskId, key)
+      if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || state.monitors.get(root) !== armed) {
+        return stopMonitor($, state, taskId, key)
+      }
       armed.taskId = taskId
       recordOwned($, state, taskId)
       await recordMonitors($, state)
@@ -1401,6 +1403,21 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     }
     return next(e)
   })
+  on('classic.Stop', ($, e, next) => {
+    // Reload can lose a Monitor's launch reply and its stored ID. The host
+    // lists script Monitors as shell tasks here, including their commands.
+    // Once the channel needs no fallback, retire those exact session watches.
+    if (state.channelOn) {
+      const commands = new Set([...state.roots].filter(root => !state.monitors.has(root) && !state.unreadable.has(root))
+        .map(root => `bash ${state.worker} events --cwd ${root} --session ${state.sessionId}`))
+      for (const task of e.background_tasks ?? []) {
+        if (task.type === 'shell' && task.command && commands.has(task.command) && !state.retiredMonitors.has(task.id)) {
+          stopMonitor($, state, task.id)
+        }
+      }
+    }
+    return next(e)
+  })
   on('session.end', async ($, e, next) => {
     state.epoch += 1
     state.leaving = true
@@ -1509,15 +1526,6 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (!threads.length) return { text: 'Codex tasks · nothing dispatched from this session yet' }
     const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]!
     return { text: `Codex tasks · ${shown.label}` }
-  })
-  // Since 2.1.312 the surface can paint the whole body, including space outside
-  // the tree. Older hosts still use the background drawn by paneBody.
-  on('ui.open', { id: PANE }, async ($, e, next) => {
-    if (!background) return next(e)
-    const { version } = await $.session.version()
-    const [major, minor, patch] = version.split('.').map(Number)
-    const nativeBackground = major > 2 || major === 2 && (minor > 1 || minor === 1 && patch >= 312)
-    return next(nativeBackground ? { ...e, backgroundColor: background } : e)
   })
   // A person's close stops automatic opens for this session, including reloads.
   // Plugin and engine closes leave that choice alone; an explicit open clears it.
