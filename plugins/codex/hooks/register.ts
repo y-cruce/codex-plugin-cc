@@ -14,6 +14,6 @@ export function register(on: On, options: PluginOptions = {}) {
   // A job started through the director's dispatch tool reaches the pane at its
   // next poll, as one started from Bash does.
   const tools = directorTools()
-  registerTaskPane(on, followed, typeof options.paneBackground === 'string' ? options.paneBackground : undefined, true, tools, director, remoteRelay())
+  registerTaskPane(on, followed, typeof options.paneBackground === 'string' ? options.paneBackground : undefined, true, tools, director, remoteRelay(), options.activitySummary !== false)
   registerDirectorTools(on, tools)
 }

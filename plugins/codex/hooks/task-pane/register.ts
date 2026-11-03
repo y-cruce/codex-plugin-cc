@@ -8,6 +8,8 @@ import { isOver, latestRound } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
 import { paneBody } from './pane.ts'
 import type { PaneView } from './pane.ts'
+import { activityState, activityRequests, activityText, finishActivity } from './activity.ts'
+import type { ActivityState, ActivityEntry, ActivityRequest } from './activity.ts'
 import { shouldDropRelayEnd, startRemoteRelay } from '../remote-relay/register.ts'
 import type { RemoteRelay } from '../remote-relay/register.ts'
 
@@ -97,6 +99,9 @@ type State = {
   // Whether this session has a /goal set, as far as the pane can tell; no
   // goal, no hold (see goalCommand).
   goal: boolean
+  summaries: boolean
+  activities: ActivityState
+  activitySaved: string
 }
 
 const PANE = 'codex_tasks'
@@ -211,6 +216,50 @@ function readStore($: EngineInterface, key: string) {
     $.ui.log(`Codex tasks store: ${String(error)}`, { to: 'debug' })
     return undefined
   })
+}
+
+async function generateActivity($: EngineInterface, state: State, request: ActivityRequest) {
+  const activities = state.activities
+  const epoch = state.epoch
+  try {
+    if (!await ownsPane($, state)) return
+    const result = await $.process.run(['node', `${$.plugin.root}/scripts/activity-summary.mjs`], {
+      cwd: state.cwd, timeoutMs: 50000,
+      stdin: JSON.stringify({ task: request.task, notes: request.notes, previousSummary: request.previousSummary }),
+    })
+    if (!await ownsPane($, state) || state.leaving || state.epoch !== epoch) return
+    const view = state.views.get(request.threadId)
+    if (!view || view.status !== 'running' || isOver(view) || view.pendingQuestion
+      || (view.activeRoundId ?? view.jobId) !== request.entry.jobId
+      || activities.entries.get(request.threadId) !== request.entry) return
+    if (result.exitCode !== 0) throw new Error(result.stderr || 'Qoder activity summary failed')
+    const { summary } = JSON.parse(result.stdout) as { summary?: string }
+    if (typeof summary !== 'string' || !summary.trim()) throw new Error('Qoder returned no activity summary')
+    request.entry.text = summary
+    $.ui.invalidate('ui.render')
+  } catch (error) {
+    $.ui.log(`Codex activity summary: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  } finally {
+    finishActivity(activities, request, await $.clock.now())
+    if (state.epoch === epoch && !state.leaving && !state.replaced) {
+      saveActivities($, state)
+    }
+  }
+}
+
+function saveActivities($: EngineInterface, state: State) {
+  const value = Object.fromEntries(state.activities.entries)
+  const serialized = JSON.stringify(value)
+  if (serialized === state.activitySaved) return
+  state.activitySaved = serialized
+  writeStore($, state, `${state.key}:activitySummaries`, value)
+}
+
+function updateActivities($: EngineInterface, state: State, views: LiveView[], now: number, liveThreads: ReadonlySet<string>) {
+  if (!state.summaries) return
+  const requests = activityRequests(state.activities, views, now, liveThreads)
+  saveActivities($, state)
+  for (const request of requests) void generateActivity($, state, request)
 }
 
 // Armed once per repository and never awaited: the call resolves when the
@@ -740,6 +789,7 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   const retired = (await readStore($, `${key}:retiredMonitors`) ?? []) as string[]
   const armed = await readStore($, `${key}:monitors`)
   const owned = (await readStore($, `${key}:ownedMonitors`) ?? []) as string[]
+  const summaries = (await readStore($, `${key}:activitySummaries`) ?? {}) as Record<string, ActivityEntry>
   const hold = (await readStore($, `${key}:hold`) ?? null) as Hold | null
   let goal = await readStore($, `${key}:goal`) as boolean | undefined
   if (goal === undefined) goal = goalFromMessages(await Promise.resolve().then(() => $.session.messages()).catch(() => [])) ?? false
@@ -749,6 +799,8 @@ async function bindSession($: EngineInterface, state: State, sessionId: string) 
   state.leaving = false
   state.ledger = ledger
   state.saved = JSON.stringify(ledger)
+  state.activities = activityState(summaries)
+  state.activitySaved = JSON.stringify(summaries)
   if (!state.opened && !state.dismissed) state.dismissed = dismissed
   for (const id of forgotten) state.forgotten.add(id)
   state.now = now
@@ -1070,6 +1122,8 @@ async function pollOnce($: EngineInterface, state: State) {
         else $.ui.log(`Codex tasks pane: ${opened.reason}`, { to: 'debug' })
       }
     }
+    const liveThreads = new Set(found.filter(({ thread }) => thread.live === true).map(({ thread }) => thread.id))
+    updateActivities($, state, visibleThreads(state), now, liveThreads)
     if (!lines.length && !state.pending.length) {
       // Written even with nothing to say: this round still moved cursors and
       // claimed endings, and losing them makes the next round report twice.
@@ -1336,7 +1390,8 @@ function visibleThreads(state: State): PaneView[] {
         const text = job.request?.prompt?.split('---- Brief ----').at(-1)?.trim()
         if (text) queuedPrompts.push({ jobId: job.id, text })
       }
-      return { ...view, queuedPrompts, queuedCount: pending.length + queuedPrompts.filter(prompt => !prompt.jobId).length,
+      return { ...view, activitySummary: state.summaries ? activityText(state.activities, view) : undefined,
+        queuedPrompts, queuedCount: pending.length + queuedPrompts.filter(prompt => !prompt.jobId).length,
         ...(pending.length && isOver(view) ? { status: 'queued', endedAt: null } : {}) }
     })
     .filter(view => !isOver(view) || !view.endedAt || Date.parse(view.endedAt) > Date.now() - KEEP_MS)
@@ -1346,7 +1401,7 @@ function visibleThreads(state: State): PaneView[] {
     })
 }
 
-export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel, relay?: RemoteRelay) {
+export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel, relay?: RemoteRelay, summaries = true) {
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
@@ -1358,6 +1413,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
     instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
+    summaries, activities: activityState(), activitySaved: '{}',
   }
 
   on('session.start', async ($, e, next) => {

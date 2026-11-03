@@ -11,6 +11,7 @@ export type LiveView = {
   recordId?: string
   jobId: string
   label: string
+  activitySummary?: string
   status: 'queued' | 'running' | 'waiting-for-answer' | 'completed' | 'failed' | 'cancelled'
   startedAt: string
   endedAt: string | null
@@ -214,7 +215,9 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const header = [
     { text: `● ${executor}${headingLast ? '' : ' · '}` },
     ...(headingLast ? [] : [{ text: data.label, bold: true }]),
-    { text: ` · ${status}`, color: colors[status] },
+    ...(headingLast && status === 'running'
+      ? data.activitySummary ? [{ text: ` · ${data.activitySummary}`, color: colors[status] }] : []
+      : [{ text: ` · ${status}`, color: colors[status] }]),
     { text: ` · ${data.endedAt ? duration(Date.parse(data.endedAt) - Date.parse(startedAt)) : elapsed(startedAt, now)}${result ? ` · ${data.files.length} files` : counted ? ` · ↓${tokens(usage.outputTokens)} tokens` : ''}` },
     { text: context },
     { text: !result && stalled > 120000 ? ` · no progress ${Math.floor(stalled / 60000)}m` : '', dimColor: true },

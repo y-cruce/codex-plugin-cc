@@ -130,6 +130,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     process: { run: async (args, init) => {
       const routed = await ingressRun(args);
       if (routed) return routed;
+      if (args[1] === "/plugin/scripts/activity-summary.mjs") return options.activityRun(init);
       if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
@@ -154,7 +155,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       notify: async (text) => { notices.push(text); if (options.notify) return options.notify(); return { isSent: true, channel: "terminal_bell" }; },
       scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
   };
-  registerTaskPane((event, options, callback) => hooks.set(`${event}:${options?.component ?? ""}`, callback ?? options), new Set(), undefined, options.push ?? false);
+  registerTaskPane((event, matcher, callback) => hooks.set(`${event}:${matcher?.component ?? ""}`, callback ?? matcher), new Set(), undefined, options.push ?? false,
+    undefined, undefined, undefined, options.activitySummaries ?? false);
   // A round writes the ledger only when it changed, so one that changed nothing
   // is done once its queued work has drained.
   const settle = async (previous) => {
@@ -213,6 +215,63 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
   };
 }
+
+test("pane summaries run without blocking polling, restore their text, and discard an old session's reply", async () => {
+  const stored = new Map();
+  const replies = [Promise.withResolvers(), Promise.withResolvers()];
+  const calls = [];
+  const now = Date.now();
+  const pane = await paneHarness(stored, undefined, "session", { now, activitySummaries: true,
+    activityRun: request => { calls.push(JSON.parse(request.stdin)); return replies[calls.length - 1].promise; } });
+  pane.live.lastMessage = { kind: "assistant", text: "正在核对 Monitor 退出条件", at: "" };
+  pane.touch();
+  await pane.tick();
+  assert.equal(calls.length, 0);
+  pane.advance(45000);
+  await pane.tick();
+  assert.equal(calls.length, 1);
+  pane.advance(46000);
+  await pane.tick();
+  assert.equal(calls.length, 1, "polling still runs while this thread's request waits");
+  replies[0].resolve({ exitCode: 0, stdout: JSON.stringify({ summary: "正在核对 Monitor 退出条件" }), stderr: "" });
+  await pane.tick();
+  assert.match(await pane.render(), /正在核对 Monitor 退出条件/);
+  assert.match(await pane.render(), /"label":"1 Alpha task"/);
+  pane.list(new Error("temporary listing failure"));
+  await pane.tick();
+  assert.match(await pane.render(), /正在核对 Monitor 退出条件/);
+  pane.list(true);
+  await pane.tick();
+  pane.advance(45000);
+  await pane.tick();
+  assert.equal(calls.length, 1);
+  assert.equal(stored.get("codex:tasks:session:activitySummaries")["record-a"].nextAt, now + 181000);
+  let restoredCalls = 0;
+  const restored = await paneHarness(stored, undefined, "session", { now: now + 137000, activitySummaries: true,
+    activityRun: () => { restoredCalls++; return new Promise(() => {}); } });
+  assert.match(await restored.render(), /正在核对 Monitor 退出条件/);
+  restored.live.lastMessage = { kind: "assistant", text: "新的活动", at: "" };
+  restored.touch();
+  await restored.tick();
+  assert.equal(restoredCalls, 0, "a skipped attempt's next time survives reload");
+  // Restore gives the new instance ownership; the original no longer launches.
+  pane.advance(45000);
+  await pane.tick();
+  assert.equal(calls.length, 1);
+  const nextReplies = Promise.withResolvers();
+  let activeCalls = 0;
+  const active = await paneHarness(stored, undefined, "session", { activitySummaries: true,
+    activityRun: () => { activeCalls++; return activeCalls === 1 ? nextReplies.promise : new Promise(() => {}); } });
+  active.live.lastMessage = { kind: "assistant", text: "正在修复另一个条件", at: "" };
+  active.touch(); active.advance(200000);
+  await active.tick();
+  assert.equal(activeCalls, 1);
+  active.session("next");
+  await active.command("");
+  nextReplies.resolve({ exitCode: 0, stdout: JSON.stringify({ summary: "旧会话的摘要" }), stderr: "" });
+  await active.tick();
+  assert.doesNotMatch(await active.render(), /旧会话的摘要/);
+});
 
 test("subagent turns leave director bootstrap and completion polling alone", async () => {
   const hooks = new Map();
