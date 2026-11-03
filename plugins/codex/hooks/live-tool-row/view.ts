@@ -210,7 +210,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   // Agents without token counts leave this segment out.
   const counted = usage.inputTokens > 0 || usage.outputTokens > 0 || usage.cachedInputTokens > 0
   const { contextUsed, contextSize } = data.usage
-  const context = contextUsed == null ? '' : ` · ctx ${tokens(contextUsed)}${contextSize != null && contextSize > 0
+  const context = contextUsed == null ? '' : ` · ${headingLast ? '' : 'ctx '}${tokens(contextUsed)}${contextSize != null && contextSize > 0
     ? `/${tokens(contextSize)} (${Math.round(contextUsed / contextSize * 100)}%)` : ''}`
   const footerOnlyTime = headingLast && status === 'running' && !data.activitySummary
   const header = [

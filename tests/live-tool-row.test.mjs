@@ -533,10 +533,10 @@ describe('live row polish', () => {
     const now = Date.parse(data.startedAt);
     const draw = (headingLast) => liveTree($.ui.resolve(row()), data, 120, now, 48, undefined, 200, headingLast);
     const footer = () => textOf(draw(true).children.at(-1));
-    assert.equal(footer(), '● 0s · ctx 700k/1000k (70%)');
+    assert.equal(footer(), '● 0s · 700k/1000k (70%)');
     data.activitySummary = '正在核对通知路由';
     data.usage.outputTokens = 45300;
-    assert.equal(footer(), '● 正在核对通知路由 · 0s · ↓45.3k · ctx 700k/1000k (70%)');
+    assert.equal(footer(), '● 正在核对通知路由 · 0s · ↓45.3k · 700k/1000k (70%)');
     const other = { ...data, recordId: 'other-thread', jobId: 'other-job', label: 'second task', activitySummary: '正在运行回归测试' };
     const ui = { ...$.ui.resolve(row()), Button: ({ children, ...props }) => ({ type: 'Button', props, children }) };
     const selected = textOf(paneBody(ui, [data, other], 120, 24, now, 'other-thread', () => {}));
@@ -551,12 +551,12 @@ describe('live row polish', () => {
     assert.doesNotMatch(footer(), /正在核对通知路由/);
     data.status = 'running';
     data.usage.contextUsed = 0;
-    assert.match(footer(), /ctx 0\/1000k \(0%\)/);
+    assert.match(footer(), / · 0\/1000k \(0%\)/);
     data.usage = { ...data.usage, contextUsed: 700000, contextSize: null };
-    assert.match(footer(), /ctx 700k$/);
+    assert.match(footer(), / · 700k$/);
     for (const context of [{}, { contextSize: 1000000 }]) {
       data.usage = { inputTokens: 900000, outputTokens: 100000, cachedInputTokens: 0, complete: true, ...context };
-      assert.doesNotMatch(footer(), /ctx/);
+      assert.doesNotMatch(footer(), /700k|1000k|ctx/);
     }
   });
   test('times and counts only the newest round in a thread header', ($, on) => {

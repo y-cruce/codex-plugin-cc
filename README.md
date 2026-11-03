@@ -287,7 +287,7 @@ its activity changes. Threads run concurrently without a panel-wide limit. Calls
 use a dedicated system prompt, disable thinking, bypass proxy environment variables
 and do not persist Qoder sessions. The footer omits `running`; waiting and terminal
 states remain explicit. Disable summaries with the `activitySummary` plugin option.
-Native context usage appears as `ctx 700k/1000k (70%)` when reported. Codex
+The pane shows native context usage as `700k/1000k (70%)` when reported. Codex
 supplies `tokenUsage.last.totalTokens` and `modelContextWindow`; ACP supplies
 `usage_update.used` and `size`. Antigravity `view_file` rows include the file path
 and requested line range.
@@ -297,7 +297,7 @@ and requested line range.
 再等1分钟，活动未变就跳过。thread 之间并行，不设面板级上限。调用使用专用系统提示词，
 关闭思考、清除代理环境变量并直连，不保存 Qoder 会话。状态栏省略 `running`，等待和
 结束状态继续明确显示；可通过插件选项 `activitySummary` 关闭摘要。执行器上报原生上下文数据时，
-显示如 `ctx 700k/1000k (70%)` 的已用量、容量和占比。Codex 取
+状态栏显示如 `700k/1000k (70%)` 的已用量、容量和占比。Codex 取
 `tokenUsage.last.totalTokens` 和 `modelContextWindow`，ACP 取 `usage_update.used`
 和 `size`。Antigravity 的 `view_file` 行显示文件路径和请求读取的行范围。
 
