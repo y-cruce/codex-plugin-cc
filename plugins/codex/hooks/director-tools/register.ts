@@ -237,9 +237,9 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
 
 // Shared with the tasks pane, which owns the plugin's one `session.start` hook:
 // it starts the tools there, and reads `pending` to rescan for a job a dispatch
-// just started, as its Bash hook does for a shell dispatch. `wake`, set by the
-// pane, starts that rescan at once instead of at the next poll.
-export type DirectorTools = { pending: boolean; context: Context | null; wake?: ($: EngineInterface) => void }
+// just started, as its Bash hook does for a shell dispatch. The pane's next
+// poll (two seconds at most) lists threads at once, even while idle.
+export type DirectorTools = { pending: boolean; context: Context | null }
 
 export function directorTools(): DirectorTools {
   return { pending: false, context: null }
@@ -281,10 +281,7 @@ export async function startDirectorTools($: EngineInterface, tools: DirectorTool
 async function answerCall($: EngineInterface, tools: DirectorTools, name: string, input: ToolInput): Promise<Answer> {
   if (!tools.context) return { deny: 'the code-director skill is not installed, so there is no dispatch.sh to run' }
   const answer = await serve($, tools.context, name, input)
-  if (name === 'dispatch' && 'result' in answer) {
-    tools.pending = true
-    tools.wake?.($)
-  }
+  if (name === 'dispatch' && 'result' in answer) tools.pending = true
   return answer
 }
 

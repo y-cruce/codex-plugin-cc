@@ -168,7 +168,6 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    engine,
     files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, refusedReads, observed, acks, writes: () => writes,
     autocomplete: async (text) => { const token = /\S*$/.exec(text)[0]; return hooks.get("prompt.autocomplete:")(engine,
       { text, token, cursor: text.length, start: text.length - token.length }, async () => ({ suggestions: [] })); },
@@ -1001,7 +1000,7 @@ test("discovery drops seventy old roots and finds a piped dispatch while the cur
   await polling;
 });
 
-test("an idle pane lists threads every thirty seconds and a dispatch tool call lists at once", async () => {
+test("an idle pane lists threads every thirty seconds and a dispatch tool call lists at the next poll", async () => {
   let dispatched = false;
   const tools = { pending: false, context: null };
   const h = await paneHarness(new Map(), undefined, "session", { tools,
@@ -1020,8 +1019,10 @@ test("an idle pane lists threads every thirty seconds and a dispatch tool call l
   await h.tick();
   assert.equal(h.observed.length, first + 1, "an idle pane still lists every thirty seconds");
   dispatched = true;
-  tools.wake(h.engine);
-  await waitFor(() => h.observed.length === first + 2, "the dispatch's immediate listing", 2000);
+  tools.pending = true;
+  h.advance(2000);
+  await h.tick();
+  assert.equal(h.observed.length, first + 2, "the dispatch tool's mark lists at the next poll");
   await waitFor(async () => (await h.render()).includes("Alpha task"), "the dispatched row", 2000);
   h.advance(2000);
   await h.tick();

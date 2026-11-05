@@ -1428,14 +1428,6 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
     summaries, activities: activityState(), activitySaved: '{}', listedAt: 0,
   }
-  // A dispatch creates its job in whatever repository the brief names, so the
-  // pane rescans and lists at once rather than at its next (possibly idle) poll.
-  const wake = ($: EngineInterface) => {
-    state.ticks = 0
-    state.listedAt = 0
-    $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
-  }
-  tools.wake = wake
 
   on('session.start', async ($, e, next) => {
     if (director) await bindDirector($, director)
@@ -1520,13 +1512,18 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (!result?.drop && 'accept' in admitted && admitted.accept) await directorIngress($, 'accept', admitted.accept)
     return result
   })
-  // A dispatch from Bash wakes the pane as the dispatch tool does.
+  // A dispatch creates its job in whatever repository the brief names; waiting
+  // for the next rescan would show it up to half a minute late.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const line = String(e.command ?? '')
     const dispatch = /(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)
     if (director && dispatch) await bindDirector($, director)
     const result = await next(e)
-    if (dispatch) wake($)
+    if (dispatch) {
+      state.ticks = 0
+      state.listedAt = 0
+      $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
+    }
     return result
   })
   // `/codex:tasks` opens and closes the pane and switches its task; answering without next()
