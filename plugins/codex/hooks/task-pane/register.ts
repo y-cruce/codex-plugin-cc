@@ -102,6 +102,8 @@ type State = {
   summaries: boolean
   activities: ActivityState
   activitySaved: string
+  // When the companion last listed this session's threads; 0 lists next poll.
+  listedAt: number
 }
 
 const PANE = 'codex_tasks'
@@ -168,6 +170,10 @@ const KEEP_MS = 180_000
 const MONITOR_MS = 1_800_000
 const SETTLE_MS = 15_000
 const CHECK_MS = 15_000
+// With nothing to show, listing threads starts a companion process every poll
+// for a session that may never dispatch. Discovery still runs every poll from
+// the job files and a dispatch wakes the pane, so the listing can wait.
+const IDLE_LIST_MS = 30_000
 
 // Pane controls commit in memory first. A refused store write is retried by the
 // timer, so persistence cannot interrupt a command or close the person's pane.
@@ -765,6 +771,7 @@ function resetRows(state: State) {
   state.expanded.clear()
   state.clock = ''
   state.ticks = 0
+  state.listedAt = 0
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
@@ -865,6 +872,7 @@ async function pollOnce($: EngineInterface, state: State) {
     if (state.tools.pending) {
       state.tools.pending = false
       state.ticks = 0
+      state.listedAt = 0
     }
     if (state.ticks % RESCAN_TICKS === 0) await discoverRoots($, state)
     if (stale()) return
@@ -872,6 +880,10 @@ async function pollOnce($: EngineInterface, state: State) {
     const now = await $.clock.now()
     if (stale()) return
     state.now = now
+    const busy = state.roots.size > 1 || state.liveRoots.size > 0 || state.pending.length > 0
+      || state.hold !== null || visibleThreads(state).length > 0
+    if (!busy && now - state.listedAt < IDLE_LIST_MS) return
+    state.listedAt = now
     const found: { thread: Thread; cwd: string }[] = []
     const returnedByRoot = new Map<string, Set<string>>()
     await each([...state.roots], async root => {
@@ -1201,6 +1213,7 @@ async function refreshRows($: EngineInterface, state: State) {
   state.unreadable.clear()
   state.forgotten.clear()
   state.ticks = 0
+  state.listedAt = 0
   writeStore($, state, `${state.key}:forgotten`, [])
   await poll($, state)
 }
@@ -1413,8 +1426,16 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
     instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
-    summaries, activities: activityState(), activitySaved: '{}',
+    summaries, activities: activityState(), activitySaved: '{}', listedAt: 0,
   }
+  // A dispatch creates its job in whatever repository the brief names, so the
+  // pane rescans and lists at once rather than at its next (possibly idle) poll.
+  const wake = ($: EngineInterface) => {
+    state.ticks = 0
+    state.listedAt = 0
+    $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
+  }
+  tools.wake = wake
 
   on('session.start', async ($, e, next) => {
     if (director) await bindDirector($, director)
@@ -1499,17 +1520,13 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (!result?.drop && 'accept' in admitted && admitted.accept) await directorIngress($, 'accept', admitted.accept)
     return result
   })
-  // A dispatch creates its job in whatever repository the brief names; waiting
-  // for the next rescan would show it up to half a minute late.
+  // A dispatch from Bash wakes the pane as the dispatch tool does.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const line = String(e.command ?? '')
     const dispatch = /(?:codex-worker|dispatch)\.sh|codex-companion\.mjs/.test(line)
     if (director && dispatch) await bindDirector($, director)
     const result = await next(e)
-    if (dispatch) {
-      state.ticks = 0
-      $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
-    }
+    if (dispatch) wake($)
     return result
   })
   // `/codex:tasks` opens and closes the pane and switches its task; answering without next()

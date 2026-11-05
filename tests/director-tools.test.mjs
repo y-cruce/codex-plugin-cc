@@ -76,6 +76,8 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
 test("dispatch passes its caller only in the process environment and records the director agent", async () => {
   for (const agentId of [undefined, "agent-1"]) {
     const h = harness();
+    const woken = [];
+    h.tools.wake = ($) => woken.push($);
     await startDirectorTools(h.$, h.tools);
     const answer = await h.call("dispatch", { mode: "investigate", name: "locate x", cwd: "/repo", brief: "Find it.", agentId });
     assert.deepEqual(answer, { result: "STATUS: started\nJOB: task-a-b" });
@@ -90,6 +92,7 @@ test("dispatch passes its caller only in the process environment and records the
     assert.equal(job.sessionId, "session-1");
     assert.equal(job.directorAgentId, agentId);
     assert.equal(h.tools.pending, true, "the pane is told to rescan");
+    assert.deepEqual(woken, [h.$], "and woken at once with the call's engine");
   }
 });
 
