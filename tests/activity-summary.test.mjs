@@ -32,7 +32,8 @@ process.stdin.on("end", () => {
   if (mode === "malformed") { process.stdout.write("not-json\\n"); return; }
   const result = mode === "error" ? { type: "result", subtype: "error", is_error: true, result: "PRIVATE_BACKEND_CONTENT" }
     : { type: "result", subtype: "success", is_error: false,
-      result: mode === "multiline" ? "第一行\\n第二行" : mode === "empty" ? " " : mode === "long" ? "测".repeat(101) : "正在验证任务面板的测试结果" };
+      result: mode === "multiline" ? "第一行\\n第二行" : mode === "empty" ? " " : mode === "long" ? "测".repeat(61)
+        : mode === "boundary" ? "测".repeat(56) + "a ！😀" : "正在验证任务面板的测试结果" };
   process.stderr.write("PRIVATE_BACKEND_CONTENT");
   const output = JSON.stringify(result) + "\\n";
   process.stdout.write('{"type":"assistant","message":"partial"}\\n' + output.slice(0, 20));
@@ -68,11 +69,18 @@ test("CLI fixes Qoder configuration, sends stdin directly and stops after its fi
   assert.deepEqual(JSON.parse(record.input), INPUT);
   assert.deepEqual(record.proxy, { NO_PROXY: "*", no_proxy: "*" });
   assert.deepEqual(record.args.slice(0, 6), ["-p", "--model", "dfmodel", "--thinking", "disabled", "--system-prompt"]);
+  assert.match(record.args[6], /12 至 30 个字符/);
   assert.deepEqual(record.args.slice(7), ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
     "--setting-sources", "user", "--max-output-tokens", "512", "--max-model-request-retries", "0",
     "--no-session-persistence", "--output-format", "stream-json", "--include-partial-messages"]);
   assert.equal(fs.existsSync(record.cwd), false, "the neutral working directory is removed");
   assertStopped(record.pid);
+});
+
+test("accepts a 60-character summary including English, spaces and punctuation", async (t) => {
+  const fake = fixture(t);
+  assert.equal(await summarizeActivity(INPUT, { command: fake.command, args: ["boundary"] }), "测".repeat(56) + "a ！😀");
+  assertStopped(fake.read().pid);
 });
 
 test("invalid or failed stream results produce safe failures", async (t) => {

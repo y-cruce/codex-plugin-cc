@@ -1,6 +1,6 @@
 {
   "name": "codex",
-  "version": "1.4.118",
+  "version": "1.4.119",
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"
@@ -9,7 +9,7 @@
     "activitySummary": {
       "type": "boolean",
       "title": "Tasks activity summaries",
-      "description": "Describe each running thread in the pane footer using Qoder DeepSeek-Flash. Calls run directly, without proxy variables, about once a minute when activity changes.",
+      "description": "Describe each running thread in the pane footer using Qoder DeepSeek-Flash. Calls run directly, without proxy variables, about once every two minutes when activity changes.",
       "default": true
     },
     "paneBackground": {

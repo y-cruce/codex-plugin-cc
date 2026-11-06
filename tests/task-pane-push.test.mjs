@@ -227,10 +227,10 @@ test("pane summaries run without blocking polling, restore their text, and disca
   pane.touch();
   await pane.tick();
   assert.equal(calls.length, 0);
-  pane.advance(60000);
+  pane.advance(120000);
   await pane.tick();
   assert.equal(calls.length, 1);
-  pane.advance(61000);
+  pane.advance(121000);
   await pane.tick();
   assert.equal(calls.length, 1, "polling still runs while this thread's request waits");
   replies[0].resolve({ exitCode: 0, stdout: JSON.stringify({ summary: "正在核对 Monitor 退出条件" }), stderr: "" });
@@ -242,12 +242,12 @@ test("pane summaries run without blocking polling, restore their text, and disca
   assert.match(await pane.render(), /正在核对 Monitor 退出条件/);
   pane.list(true);
   await pane.tick();
-  pane.advance(60000);
+  pane.advance(120000);
   await pane.tick();
   assert.equal(calls.length, 1);
-  assert.equal(stored.get("codex:tasks:session:activitySummaries")["record-a"].nextAt, now + 241000);
+  assert.equal(stored.get("codex:tasks:session:activitySummaries")["record-a"].nextAt, now + 481000);
   let restoredCalls = 0;
-  const restored = await paneHarness(stored, undefined, "session", { now: now + 182000, activitySummaries: true,
+  const restored = await paneHarness(stored, undefined, "session", { now: now + 362000, activitySummaries: true,
     activityRun: () => { restoredCalls++; return new Promise(() => {}); } });
   assert.match(await restored.render(), /正在核对 Monitor 退出条件/);
   restored.live.lastMessage = { kind: "assistant", text: "新的活动", at: "" };
@@ -255,7 +255,7 @@ test("pane summaries run without blocking polling, restore their text, and disca
   await restored.tick();
   assert.equal(restoredCalls, 0, "a skipped attempt's next time survives reload");
   // Restore gives the new instance ownership; the original no longer launches.
-  pane.advance(60000);
+  pane.advance(120000);
   await pane.tick();
   assert.equal(calls.length, 1);
   const nextReplies = Promise.withResolvers();
@@ -263,7 +263,7 @@ test("pane summaries run without blocking polling, restore their text, and disca
   const active = await paneHarness(stored, undefined, "session", { activitySummaries: true,
     activityRun: () => { activeCalls++; return activeCalls === 1 ? nextReplies.promise : new Promise(() => {}); } });
   active.live.lastMessage = { kind: "assistant", text: "正在修复另一个条件", at: "" };
-  active.touch(); active.advance(300000);
+  active.touch(); active.advance(600000);
   await active.tick();
   assert.equal(activeCalls, 1);
   active.session("next");
