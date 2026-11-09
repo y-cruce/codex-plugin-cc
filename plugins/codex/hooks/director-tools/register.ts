@@ -33,7 +33,9 @@ const TOOLS = [
         mode: { type: 'string', enum: ['investigate', 'implement', 'continue', 'review', 'adversarial-review'] },
         name: { type: 'string', description: 'Three to eight words saying what the task does; never a job id or a mode name.' },
         cwd: CWD,
-        brief: { type: 'string', description: 'The brief body Codex reads (for review modes, the focus text).' },
+        brief: { type: 'string', description: 'The brief body Codex reads (for review modes, the focus text). '
+          + 'For investigate, implement and continue, dispatch.sh appends a final-report block requiring evidence '
+          + '(diff stat, commit hash, commands run with their output, file:line); do not repeat it here.' },
         thread: { type: 'string', description: 'THREAD: the thread to continue (required for mode continue).' },
         base: { type: 'string', description: 'BASE: the base ref for review modes.' },
         write: { type: 'boolean', description: 'WRITE: yes, letting a continue round write files.' },
