@@ -187,7 +187,7 @@ function writeStore($: EngineInterface, state: State, key: string, value: unknow
 // host leaves its timers running until that call ends, so each new pane claims
 // the session and the old one must stop without releasing the adopted shell.
 async function ownsPane($: EngineInterface, state: State): Promise<boolean> {
-  if (state.replaced || !state.key) return false
+  if (state.replaced || !state.key || !state.script) return false
   try {
     if (await $.store.get(`${state.key}:instance`) === state.instance) return true
   } catch { return true } // Keep the existing live-state fallback on a failed store read.
@@ -775,6 +775,7 @@ function resetRows(state: State) {
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
+  if (state.replaced) return
   const epoch = ++state.epoch
   if (state.sessionId && sessionId !== state.sessionId) {
     stopMonitors($, state)
@@ -1289,7 +1290,7 @@ async function answer($: EngineInterface, state: State) {
 // Run once per module environment. The host cancels its timers on reload and
 // fires session.start for the new instance; turn.start also retries bootstrap.
 function bootstrap($: EngineInterface, state: State, push: boolean): Promise<string | undefined> {
-  if (state.script) return Promise.resolve(undefined)
+  if (state.replaced || state.script) return Promise.resolve(undefined)
   if (state.booting) return state.booting
   const epoch = state.epoch
   // A timed-out read may still settle later. It initializes only this attempt's
@@ -1529,6 +1530,13 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // `/codex:tasks` opens and closes the pane and switches its task; answering without next()
   // keeps the command inside the session instead of sending it to the model.
   on('command.run', async ($, e, next) => {
+    // Only a fresh tasks call can revive the module the host still routes to.
+    // Check before awaiting: an in-flight call must stay retired if replaced.
+    if (state.replaced && /(^|:)tasks$/.test(e.command)) {
+      state.replaced = state.leaving = false
+      state.script = ''
+      state.polling = null
+    }
     if (director) await bindDirector($, director)
     if (e.command === 'goal') {
       const result = await next(e)

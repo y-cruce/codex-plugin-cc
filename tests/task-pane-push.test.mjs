@@ -90,7 +90,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const element = (type) => (props) => ({ type, ...props });
   const engine = {
     plugin: { name: "codex", root: "/plugin" },
-    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => sessionId, usage: async () => ({ startedAt }),
+    session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => { if (options.sessionRead) await options.sessionRead(); return sessionId; }, usage: async () => ({ startedAt }),
       messages: async () => options.messages ?? [] },
     env: { get: async (name) => name === "TMPDIR" ? options.tmpdir ?? "/tmp" : "/home/test" },
     clock: { now: async () => { if (options.clockNow) await options.clockNow(); return now; }, sleep: clockSleep, every: (ms, fn) => { timers.set(ms, fn); return { cancel: () => timers.delete(ms) }; }, after: (_ms, fn) => setImmediate(() => { if (!options.unloaded?.()) fn(); }) },
@@ -168,7 +168,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   await hooks.get("session.start:")(engine, { isInteractive: true }, async () => {});
   await settle(0);
   return {
-    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, refusedReads, observed, acks, writes: () => writes,
+    files, jobPath, viewPath, live, stored, listing, opened, logs, debugLogs, toasts, notices, statPaths, refusedReads, observed, acks, timers, writes: () => writes,
     autocomplete: async (text) => { const token = /\S*$/.exec(text)[0]; return hooks.get("prompt.autocomplete:")(engine,
       { text, token, cursor: text.length, start: text.length - token.length }, async () => ({ suggestions: [] })); },
     removeDir: (path) => { dirs.delete(path); },
@@ -1548,7 +1548,7 @@ test("reload with a missing hold record adopts the shell and releases it without
   assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the marker stops the shell without a taskId");
 });
 
-test("a replaced pane cannot release or rearm the new instance's goal hold", async () => {
+test("a replaced pane stays retired until a new tasks command restores its polling", async () => {
   const now = Date.now();
   const key = "codex:tasks:session";
   const stored = new Map([[`${key}:goal`, true]]);
@@ -1561,10 +1561,16 @@ test("a replaced pane cannot release or rearm the new instance's goal hold", asy
   };
   const old = await paneHarness(stored, undefined, "session", options);
   await old.tick();
+  const retiredTimers = [...old.timers.values()];
   const reading = old.holdThreadsRead();
   old.list([{ ...old.listing[0], status: "completed" }]);
   const pending = old.tick();
   await within(reading.reading, 1000, "the retired pane poll");
+  const commandReading = Promise.withResolvers();
+  const commandRelease = Promise.withResolvers();
+  options.sessionRead = () => { options.sessionRead = undefined; commandReading.resolve(); return commandRelease.promise; };
+  const pendingCommand = old.command("refresh");
+  await within(commandReading.promise, 1000, "the in-flight tasks command");
   const current = await paneHarness(stored, undefined, "session", options);
   await current.tick();
   const hold = structuredClone(stored.get(`${key}:hold`));
@@ -1579,6 +1585,20 @@ test("a replaced pane cannot release or rearm the new instance's goal hold", asy
   old.advance(20000);
   await old.tick();
   assert.equal(old.observed.length, observed, "the old instance stops polling after replacement");
+  const owner = stored.get(`${key}:instance`);
+  commandRelease.resolve();
+  await pendingCommand;
+  await Promise.all(retiredTimers.map(timer => timer()));
+  assert.equal(stored.get(`${key}:instance`), owner, "in-flight commands and retired callbacks do not reclaim ownership");
+  assert.equal(old.timers.size, 0);
+  await old.command("refresh");
+  await waitFor(() => old.observed.length > observed, "polling after the new tasks command", 1000);
+  assert.match(await old.render(), /Alpha task/, "a new command restores this session's rows");
+  assert.notEqual(stored.get(`${key}:instance`), owner);
+  assert.deepEqual([...old.timers.keys()].sort((a, b) => a - b), [500, 1000, 2000], "bootstrap restores each timer once");
+  const resumed = old.observed.length;
+  await old.tick();
+  assert.ok(old.observed.length > resumed, "polling continues after the command");
   assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
   assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0);
 });
