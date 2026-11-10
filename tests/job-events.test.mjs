@@ -415,10 +415,10 @@ test("a confirmed channel keeps Monitor fallback until the producer declares pus
   }
 });
 
-test("ACP owner loss still stages an ending when the channel is confirmed", async (t) => {
+test("a confirmed channel suppresses ACP owner-loss Monitor fallback", async (t) => {
   isolateTestEnvironment(t);
   const directorStateDir = path.join(process.env.CLAUDE_PLUGIN_DATA, "state", "repo");
-  const current = { ...job, executor: "acp", sessionId: "owner", pid: 123 };
+  const current = { ...job, executor: "acp", directorPush: true, sessionId: "owner", pid: 123 };
   const event = directorEvent(current, "job.failed", {}, directorStateDir);
   const confirmationFile = path.join(makeTempDir(), "channel-confirmed.json");
   durableJson(confirmationFile, { instance: "instance", sessionId: "owner", until: Date.now() + 60000 });
@@ -427,7 +427,7 @@ test("ACP owner loss still stages an ending when the channel is confirmed", asyn
     directorStateDir, ownerAlive: () => false, status: async () => ({ unavailable: "worker exited" }),
     fail: (_cwd, record, reason) => ({ ...record, status: "failed", errorMessage: reason }),
   }, { session: "owner" });
-  assert.deepEqual(lines, ["FAILED job=job-1 thread=thread-1 owner process exited"]);
+  assert.deepEqual(lines, []);
 });
 
 test("an owner failure already marked by status is reported without acknowledging stale notes", async () => {

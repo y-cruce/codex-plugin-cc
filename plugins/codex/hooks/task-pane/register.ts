@@ -189,7 +189,10 @@ function writeStore($: EngineInterface, state: State, key: string, value: unknow
 async function ownsPane($: EngineInterface, state: State): Promise<boolean> {
   if (state.replaced || !state.key || !state.script) return false
   try {
-    if (await $.store.get(`${state.key}:instance`) === state.instance) return true
+    const instance = await $.store.get(`${state.key}:instance`)
+    if (instance === state.instance) return true
+    // A new session's key is visible before bindSession finishes claiming it.
+    if (state.leaving && instance === undefined) return false
   } catch { return true } // Keep the existing live-state fallback on a failed store read.
   state.replaced = state.leaving = true
   state.epoch += 1
@@ -398,8 +401,7 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
   const confirmation = base && await $.fs.exists(`${base}.confirmed.json`) ? JSON.parse(await $.fs.read(`${base}.confirmed.json`)) as { sessionId?: string; until?: number } : null
   const confirmed = Boolean(confirmation && confirmation.sessionId === state.sessionId && (confirmation.until ?? 0) > now)
   if (confirmed) {
-    // Unknown/old producers retain polling. ACP also needs owner-exit recovery
-    // because its runtime runs inside the worker that could be killed.
+    // Unknown/old producers retain polling.
     let retired = false
     for (const [root, monitor] of state.monitors) {
       // A listing that failed this poll (it can take seconds under load) says
@@ -990,7 +992,7 @@ async function pollOnce($: EngineInterface, state: State) {
     // push, and a Monitor armed for old rows reported endings long since read.
     state.liveRoots = new Set(found.filter(({ thread }) => thread.live === true).map(entry => entry.cwd))
     const fallbackRoots = new Set(found.filter(({ thread }) => thread.live === true
-      && (thread.directorPush !== true || state.views.get(thread.id)?.executor?.kind === 'acp')).map(entry => entry.cwd))
+      && thread.directorPush !== true).map(entry => entry.cwd))
     await routeEvents($, state, state.liveRoots, now, fallbackRoots)
     if (stale()) return
     await each(found, async ({ thread, cwd }) => {

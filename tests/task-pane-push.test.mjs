@@ -1243,7 +1243,7 @@ test("an ending reported from the view is not reported again when its event is r
   assert.equal(pane.toasts.filter((text) => /job\.completed/.test(text)).length, 1, pane.toasts.join("\n"));
 });
 
-test("confirmed channels retain fallback for undeclared producers and ACP owner exit", async () => {
+test("confirmed channels retain fallback only for undeclared producers", async () => {
   for (const [kind, declared] of [["codex", true], ["codex", false], ["codex", undefined], ["acp", true]]) {
     let replays = 0
     const calls = []
@@ -1267,7 +1267,7 @@ test("confirmed channels retain fallback for undeclared producers and ACP owner 
     await pane.tick()
     assert.equal(replays > 0, declared !== true)
     assert.equal(pane.toasts.some(text => text.includes('request=old-q')), declared !== true)
-    assert.equal(calls.filter(tool => tool === 'Monitor').length, kind === 'acp' || declared !== true ? 1 : 0)
+    assert.equal(calls.filter(tool => tool === 'Monitor').length, declared !== true ? 1 : 0)
     assert.equal(pane.acks.length, 0)
     assert.deepEqual([...pane.files].filter(([file]) => file.includes('.spool/')), [])
   }
@@ -1291,7 +1291,7 @@ test("a fallback Monitor survives a poll whose listing of its repository failed"
   assert.deepEqual(calls.filter(tool => tool !== 'Bash'), ['Monitor'], "kept through the failed listing, not stopped and rearmed")
 })
 
-test("channel confirmation stops a Monitor whose launch reply arrives after retirement", async () => {
+test("channel confirmation stops an ACP Monitor whose launch reply arrives after retirement", async () => {
   const calls = [];
   const launched = Promise.withResolvers();
   const now = Date.now();
@@ -1301,12 +1301,16 @@ test("channel confirmation stops a Monitor whose launch reply arrives after reti
       return request.tool === "Monitor" ? launched.promise : Promise.resolve({});
     } });
   assert.equal(calls.filter(request => request.tool === "Monitor").length, 1);
+  pane.live.executor = { kind: "acp", label: "dsh" };
+  pane.touch();
   pane.files.set("/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 });
   await pane.tick();
   launched.resolve({ result: { taskId: "late-monitor" } });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls.filter(request => request.tool === "TaskStop"), [{ tool: "TaskStop", task_id: "late-monitor" }]);
+  await pane.tick();
+  assert.equal(calls.filter(request => request.tool === "Monitor").length, 1, "the confirmed ACP repository does not rearm its Monitor");
 });
 
 test("a reloaded pane retires its orphaned Monitor from the host's background tasks", async () => {
@@ -1546,6 +1550,39 @@ test("reload with a missing hold record adopts the shell and releases it without
   await reloaded.tick();
   assert.deepEqual(await within(once(shells[0], "exit"), 5000, "untracked hold exit"), [0, null]);
   assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the marker stops the shell without a taskId");
+});
+
+test("fork session binding survives a pending parent store flush", async () => {
+  const stored = new Map();
+  const key = "codex:tasks:forked";
+  const reading = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const pane = await paneHarness(stored, undefined, "parent", { storeRead: async name => {
+    if (name === key) { reading.resolve(); await release.promise; }
+  } });
+  const owner = stored.get("codex:tasks:parent:instance");
+  await pane.close();
+  pane.session("forked");
+  pane.live.label = "Fork task";
+  pane.touch();
+  const binding = pane.command("refresh");
+  await within(reading.promise, 1000, "fork binding's first store read");
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pane.timers.size, 3, "the pending flush must not retire the pane during binding");
+    assert.equal(stored.has(`${key}:instance`), false, "the new session has not been claimed yet");
+  } finally {
+    release.resolve();
+    await binding;
+  }
+  await waitFor(() => stored.get(`${key}:instance`) === owner, "fork session ownership", 1000);
+  await pane.tick();
+  assert.match(await pane.render(), /Fork task/);
+  assert.equal(stored.get("codex:tasks:parent:dismissed"), true, "the deferred parent write is retained");
+  stored.set(`${key}:monitors`, { stale: true });
+  await pane.end();
+  await waitFor(() => Object.keys(stored.get(`${key}:monitors`) ?? {}).length === 0, "session-end monitor cleanup", 1000);
 });
 
 test("a replaced pane stays retired until a new tasks command restores its polling", async () => {
