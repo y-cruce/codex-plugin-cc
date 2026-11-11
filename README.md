@@ -590,6 +590,8 @@ Expose the matching helper on PATH or set `ANTIGRAVITY_HARNESS_PATH` to its abso
 
 The plugin adds HOME to agy's additional directories for both new and resumed sessions, preserving other roots and cwd. File tools can read and write those roots; edit approval remains separate. In a Git repository, it idempotently adds only the untracked generated skill's exact path `/skills/system/run-workflow/SKILL.md` to Git's resolved local `info/exclude`. This writes local metadata even for a read-only investigation; linked worktrees share it. Tracked files and sibling skills remain visible.
 
+agy sorts the workspace list shown to its model, so changing the order of additional roots does not preserve cwd as primary. The plugin uses agy's supported appended system prompt on both new and resumed sessions to name the task's cwd as the default directory for shell commands.
+
 插件在 agy 新建及续接会话时把 HOME 合并进额外目录，保留已有来源和 cwd。文件工具的读写范围随之扩大，编辑批准仍独立。对于 Git 根目录中的未跟踪系统技能，插件只把精确规则 `/skills/system/run-workflow/SKILL.md` 幂等写入 Git 定位的本地 `info/exclude`；只读排查也会发生这项已约定的元数据写入，linked worktree 共用规则。
 
 ## DeepSeek Harness executor / DSH 执行器
@@ -640,5 +642,7 @@ CODEX_REAL_ACP_SMOKE=1 CODEX_COMPANION="$PWD/plugins/codex/scripts/codex-compani
 ```
 
 It uses isolated Git/data/session directories, receives notifications before completion, answers the second option for all three agents, verifies final output and skill reads, and checks agy's local exclusion. `CODEX_SMOKE_OUTPUT` selects the evidence directory; missing capabilities are reported as SKIP.
+
+Set `CODEX_SMOKE_MONITOR=1` to exercise Monitor fallback, including a seven-second ingress delay. Monitor attempts use a thirty-second window for every event: delayed ingress avoids duplicate frames within that window, while unaccepted frames can still be retried afterwards.
 
 Protocol reference: [DSH ACP contract](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/acp/acp/README.md).

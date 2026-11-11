@@ -427,6 +427,9 @@ export class AcpExecutorJobPort {
     const codexHome = this.env.CODEX_HOME || path.join(home, ".codex");
     const directories = antigravitySkillDirectories(params.cwd, { home, geminiHome, codexHome });
     params.additionalDirectories = [...new Set([...params.additionalDirectories, path.resolve(home), ...directories])];
+    // agy's workspace prompt sorts all roots, losing cwd's primary position.
+    params._meta = { antigravity: { systemPrompt: { append:
+      `The task's primary working directory is ${params.cwd}. Use it as Cwd for run_command unless the task explicitly requests another directory. Other workspace roots grant file access; their listed order does not select the task directory.` } } };
     const { mcpServers, warnings } = antigravityMcpServers(geminiHome, this.initializeResponse.agentCapabilities?.mcpCapabilities,
       params.mcpServers);
     params.mcpServers = mcpServers;

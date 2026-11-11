@@ -1,4 +1,4 @@
-import { acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, directorEvent, eventPaths, durableJson } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { acceptDirectorEvents, deliveryRefs, eventFromRef, stripDeliveryTags, directorEvent, eventPaths, durableJson, DirectorPublisher } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
@@ -377,6 +377,42 @@ test("events retries acknowledgement and drains terminal notifications before DO
   });
   assert.equal(attempts, 2);
   assert.deepEqual(lines, ["NOTIFIED job=job-1 thread=thread-1 Ready", "DONE job=job-1 thread=thread-1"]);
+});
+
+test("Monitor replays any unaccepted outbox event after 30 seconds, retaining status notification acknowledgements", async (t) => {
+  const start = Date.now();
+  let time = start;
+  t.mock.method(Date, "now", () => time);
+  for (const type of ["director.notified", "question.opened", "job.completed"]) {
+    const stateDir = path.join(makeTempDir(), "state", "repo");
+    const owned = { ...job, executor: "acp", sessionId: "director", workspaceRoot: "/repo" };
+    const note = { id: "shared-note", notificationId: "shared-note", message: "Need a decision" };
+    const payload = type === "question.opened" ? { requestId: "request", questions: [{ id: "choice", question: "Choose?" }] }
+      : type === "director.notified" ? note : {};
+    const event = directorEvent(owned, type, payload, stateDir);
+    time = start;
+    new DirectorPublisher().publish(owned, type, payload, stateDir);
+    const controller = new AbortController(), printedAt = [], acknowledged = [];
+    const offsets = [0, 6000, 12000, 29000, 31000];
+    let polls = 0;
+    await streamJobEvents("/repo", { session: owned.sessionId, signal: controller.signal, pollMs: 1 }, {
+      directorStateDir: stateDir, terminalReportsFile: path.join(path.dirname(stateDir), "monitor.json"),
+      snapshot: () => {
+        if (polls === offsets.length) controller.abort();
+        else time = start + offsets[polls++];
+        return { running: [owned], latestFinished: null, recent: [] };
+      },
+      roundContext: async () => ({ layout: "legacy" }),
+      status: async () => {
+        if (polls === offsets.length) await acceptDirectorEvents([event], "monitor", async () => ({}));
+        return type === "director.notified" ? { notifications: [note] } : {};
+      },
+      acknowledge: async (_cwd, _job, ids) => acknowledged.push(...ids),
+      writeLine: async () => { printedAt.push(time); }
+    });
+    assert.deepEqual(printedAt, [start, start + 31000], type);
+    assert.deepEqual(acknowledged, type === "director.notified" ? [note.id] : []);
+  }
 });
 
 test("events fails a dead owner once even when its broker is unavailable", async () => {

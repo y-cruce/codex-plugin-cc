@@ -42,6 +42,7 @@ function oneLine(text) {
 // Claude Code cuts each Monitor line at 500 characters and may deliver lines
 // separately. Keep the tag with its summary; ingress restores the full event.
 const MONITOR_LINE_CHARS = 500;
+const MONITOR_ATTEMPT_MS = 30000;
 function taggedLine(line, event) {
   const tag = deliveryTag(event);
   return `${line.slice(0, Math.max(0, MONITOR_LINE_CHARS - tag.length - 1))} ${tag}`;
@@ -71,7 +72,8 @@ export async function streamJobEvents(cwd, { pollMs = 2000, questionRemindMs = D
   const emit = async (job, type, payload, output) => {
     const event = directorEvent(job, type, payload, directorStateDir);
     if (!event) { await writeLine(await output()); return true; }
-    return deliverDirectorEvents([event], "monitor", async () => writeLine(taggedLine(await output(), event)));
+    return deliverDirectorEvents([event], "monitor", async () => writeLine(taggedLine(await output(), event)),
+      { attemptMs: MONITOR_ATTEMPT_MS });
   };
   const now = dependencies.now ?? Date.now;
   const claim = dependencies.claimQuestion ?? ((cwd, jobId, requestId) => claimQuestion(resolveStateDir(cwd), jobId, requestId));
@@ -109,7 +111,8 @@ export async function streamJobEvents(cwd, { pollMs = 2000, questionRemindMs = D
       for (const event of pendingEvents(deliveryRoot(directorStateDir), session)) {
         if (signal?.aborted) break;
         if (!isDirectorEventPending(event) || confirmedRoute(event)) continue;
-        await deliverDirectorEvents([event], "monitor", () => writeLine(taggedLine(outboxLine(event), event)));
+        await deliverDirectorEvents([event], "monitor", () => writeLine(taggedLine(outboxLine(event), event)),
+          { attemptMs: MONITOR_ATTEMPT_MS });
         lastActiveAt = now();
       }
     }

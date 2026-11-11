@@ -127,6 +127,7 @@ test("agy session scope keeps additional roots and HOME; generated skill exclusi
   const params = port.sessionRequest({ cwd: "/tmp/task", additionalDirectories: ["/tmp/extra"] }).params;
   assert.ok(params.additionalDirectories.includes("/tmp/parity-home"));
   assert.ok(params.additionalDirectories.includes("/tmp/extra"));
+  assert.match(params._meta.antigravity.systemPrompt.append, /primary working directory is \/tmp\/task\. Use it as Cwd for run_command/);
   const cwd = makeTempDir();
   initGitRepo(cwd);
   excludeGeneratedSkill(cwd);

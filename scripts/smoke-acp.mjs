@@ -7,7 +7,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { acceptDirectorEvents, deliveryRoot, pendingEvents } from "../plugins/codex/scripts/lib/director-delivery.mjs";
+import { createInterface } from "node:readline";
+import { acceptDirectorEvents, deliveryRefs, eventFromRef, deliveryRoot, pendingEvents } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
@@ -19,6 +20,7 @@ const memory = process.env.CODEX_SMOKE_MEMORY_INDEX;
 const root = process.env.CODEX_SMOKE_OUTPUT ?? fs.mkdtempSync(path.join(os.tmpdir(), "acp-smoke-"));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const enabled = process.env.CODEX_REAL_ACP_SMOKE === "1";
+const monitorMode = process.env.CODEX_SMOKE_MONITOR === "1";
 if (!enabled) {
   console.log("SKIP real ACP smoke: set CODEX_REAL_ACP_SMOKE=1; optionally CODEX_SMOKE_OUTPUT and CODEX_SMOKE_MEMORY_INDEX.");
   process.exit(0);
@@ -79,7 +81,7 @@ ${question}
 Finish with ${done}, the answer received, and the last nonempty line of each requested file copied verbatim.
 If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the missing capability; do not invent a result.
 `);
-  let id;
+  let id, monitor, monitorClosed;
   try {
     const launched = await command(["bash", dispatch, "dispatch", brief], env, cwd);
     record("launch", launched);
@@ -95,16 +97,32 @@ If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the 
       }
     };
     const stateDir = withData(() => resolveStateDir(cwd));
+    const received = [], monitorEvents = [];
+    if (monitorMode) {
+      monitor = spawn(process.execPath, [companion, "events", "--cwd", cwd, "--session", sessionId, "--poll-ms", "1000"],
+        { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
+      monitorClosed = new Promise(resolve => monitor.once("close", resolve));
+      monitor.stderr.on("data", data => record("monitor.stderr", data.toString()));
+      createInterface({ input: monitor.stdout }).on("line", line => {
+        record("monitor.output", line);
+        const events = deliveryRefs(line).map(eventFromRef).filter(Boolean);
+        monitorEvents.push(...events);
+        received.push(...events);
+      });
+    }
     const snapshot = () => JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${id}.json`), "utf8"));
     let notified = false, answered = false, terminal = null;
-    const deadline = Date.now() + 300000;
+    const deadline = Date.now() + 600000;
     while (Date.now() < deadline && !terminal) {
-      for (const event of pendingEvents(deliveryRoot(stateDir), sessionId)) {
+      for (const event of monitorMode ? received.splice(0) : pendingEvents(deliveryRoot(stateDir), sessionId)) {
         record("received", event);
         if (event.type === "director.notified") {
           assert.equal(event.payload.message, notify);
           assert.equal(snapshot().status, "running", "notification must arrive before the terminal");
           notified = true;
+          // The host can queue a Monitor line for longer than the 5s attempt
+          // lease. Do not accept it yet: the same process must not print again.
+          if (monitorMode) await pause(7000);
         }
         if (event.type === "question.opened") {
           const status = JSON.parse(await command([process.execPath, companion, "status", id, "--cwd", cwd, "--json"], env, cwd)).job;
@@ -120,7 +138,7 @@ If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the 
           answered = true;
         }
         if (event.type.startsWith("job.")) terminal = event;
-        await acceptDirectorEvents([event], "smoke", async () => ({}));
+        await acceptDirectorEvents([event], monitorMode ? "monitor" : "smoke", async () => ({}));
       }
       if (!terminal) await pause(300);
     }
@@ -136,6 +154,11 @@ If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the 
     assert.ok(notified && answered, "notification and director answer are required");
     assert.ok(output.includes(done) && output.includes("SECOND"), output);
     assert.ok(terminal.text.includes(done), terminal.text);
+    if (monitorMode) {
+      const notes = monitorEvents.filter(event => event.type === "director.notified");
+      assert.equal(notes.length, 1, "Monitor notification must appear only once, including delayed ingress");
+      record("monitor.passed", { notificationLines: notes.length, receiptDelayMs: 7000 });
+    }
     for (const file of [skill, ...(memory ? [memory] : [])]) {
       const last = fs.readFileSync(file, "utf8").trim().split("\n").at(-1);
       assert.ok(output.includes(last), `missing file-read evidence: ${file}\n${output}`);
@@ -149,6 +172,7 @@ If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the 
     record("passed", { id, terminal: terminal.text, output });
     console.log(`PASS ${agent}: ${id}; notified before completion; SECOND received; skill${memory ? " and memory index" : ""} read.`);
   } finally {
+    if (monitor) { monitor.kill("SIGTERM"); await monitorClosed; }
     if (id && fs.existsSync(path.join(data, "state"))) {
       const jobFile = path.join(data, "state");
       for (const name of fs.readdirSync(jobFile)) {
