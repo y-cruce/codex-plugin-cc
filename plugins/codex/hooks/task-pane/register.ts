@@ -73,6 +73,10 @@ type State = {
   rootIds: Map<string, Set<string>>
   // Sessions moved to the background as this one: their jobs are this session's.
   continued: Set<string>
+  // Other sessions already asked about. continued-in is written right after the
+  // background session is spawned, before it starts, and names a session made
+  // on the spot: one not continued here at the first ask never will be.
+  asked: Set<string>
   pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string; delivery?: any; fallback?: boolean }[]
   worker: string
   toEnd: boolean
@@ -642,7 +646,7 @@ async function scanRoots($: EngineInterface, state: State) {
         if (!job.workspaceRoot) continue
         if (DONE.includes(job.status) && job.completedAt && Date.parse(job.completedAt) <= now - KEEP_MS) continue
         if (job.sessionId !== state.sessionId && !state.continued.has(job.sessionId ?? '')) {
-          if (job.sessionId) others.add(job.sessionId)
+          if (job.sessionId && !state.asked.has(job.sessionId)) others.add(job.sessionId)
           continue
         }
         roots.add(job.workspaceRoot)
@@ -690,6 +694,7 @@ async function scanRoots($: EngineInterface, state: State) {
   // Another session's jobs may have been dispatched before this one took over
   // its conversation; ask which of those sessions now continue here.
   if (others.size && !stale()) {
+    for (const id of others) state.asked.add(id)
     const { sessions } = JSON.parse(await companion($, state, state.cwd, ['continued', '--sessions', [...others].join(',')])
       .catch(() => '{}')) as { sessions?: Record<string, string> }
     const found = Object.entries(sessions ?? {}).filter(([id, latest]) => latest === state.sessionId && !state.continued.has(id))
@@ -786,6 +791,7 @@ function resetRows(state: State) {
   state.owners.clear()
   state.rootIds.clear()
   state.continued.clear()
+  state.asked.clear()
   state.forgotten.clear()
   state.unreadable.clear()
   state.liveRoots.clear()
@@ -1441,7 +1447,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
-    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), continued: new Set<string>(), forgotten: new Set<string>(), generation: 0,
+    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), continued: new Set<string>(), asked: new Set<string>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false, epoch: 0,
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),

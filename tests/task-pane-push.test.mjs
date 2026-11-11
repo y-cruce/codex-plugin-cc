@@ -139,7 +139,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (args[0] === "pgrep") return { exitCode: args[2].includes("the codex plugin stops this when they end")
         ? stored.get(`codex:tasks:${sessionId}:hold`)?.taskId ? 0 : 1 : options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
       if (args.includes("ack") || args.includes("reported")) { acks.push(args); return { exitCode: 0, stdout: "{}", stderr: "" }; }
-      if (args.includes("continued")) return { exitCode: 0, stdout: JSON.stringify({ sessions: options.continued ?? {} }), stderr: "" };
+      if (args.includes("continued")) return options.asked?.(args), { exitCode: 0, stdout: JSON.stringify({ sessions: options.continued ?? {} }), stderr: "" };
       observed.push(init.cwd);
       if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(args), stderr: '' };
       if (threadRead) {
@@ -1174,9 +1174,14 @@ test("a session moved to the background takes over its jobs; a branch copy does 
   const base = "/home/test/.claude/plugins/data/codex/state/main";
   const preset = [[`${base}/jobs/job-a.json`, { id: "job-a", sessionId: "old", workspaceRoot: "/other", status: "running" }]];
   for (const [latest, shown] of [["new", true], ["old", false]]) {
-    const pane = await paneHarness(new Map(), undefined, "new", { workspaceRoot: "/other", preset, continued: { old: latest } });
+    let asked = 0;
+    const pane = await paneHarness(new Map(), undefined, "new", { workspaceRoot: "/other", preset, continued: { old: latest }, asked: () => asked++ });
     await pane.tick();
     assert.equal(/Alpha task/.test(await pane.render()), shown, latest);
+    // Discovery runs every two seconds; another session is asked about once.
+    pane.timers.get(2000)();
+    await pane.tick();
+    assert.equal(asked, 1, latest);
   }
 });
 

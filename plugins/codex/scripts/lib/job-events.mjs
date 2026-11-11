@@ -97,9 +97,13 @@ export async function streamJobEvents(cwd, { pollMs = 2000, questionRemindMs = D
   let lastActiveAt = now();
   while (!signal?.aborted) {
     const report = snapshot(cwd, { all: true, threadRecords: false });
+    const continued = new Map();
+    const owner = (id) => {
+      if (!continued.has(id)) continued.set(id, continuedSession(deliveryRoot(directorStateDir), id));
+      return continued.get(id);
+    };
     const jobs = [...report.running, report.latestFinished, ...report.recent]
-      .filter((job) => job && (session === undefined || job.sessionId === session
-        || continuedSession(deliveryRoot(directorStateDir), job.sessionId) === session));
+      .filter((job) => job && (session === undefined || job.sessionId === session || owner(job.sessionId) === session));
     if (signal?.aborted) break;
     if (session !== undefined) {
       for (const event of pendingEvents(deliveryRoot(directorStateDir), session)) {
