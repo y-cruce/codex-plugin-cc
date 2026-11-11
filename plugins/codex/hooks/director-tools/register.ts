@@ -40,7 +40,7 @@ const TOOLS = [
         base: { type: 'string', description: 'BASE: the base ref for review modes.' },
         write: { type: 'boolean', description: 'WRITE: yes, letting a continue round write files.' },
         effort: { type: 'string', description: 'EFFORT: only when the skill says to escalate.' },
-        model: { type: 'string', description: 'MODEL: agy defaults to $CODEX_COMPANION_ANTIGRAVITY_MODEL, else gemini-4-carbon, with high thinking; set for an explicit override, or luna for bulk mechanical work.' },
+        model: { type: 'string', description: 'MODEL: agy defaults to $CODEX_COMPANION_ANTIGRAVITY_MODEL, else gemini-4-carbon, with high thinking; set for an explicit override.' },
         siblings: { type: 'string', description: 'SIBLINGS: one line naming the other running tasks.' },
         sandbox: { type: 'string', enum: ['full', 'network', 'default'], description: 'SANDBOX: only when the user asks.' },
         executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: agy for frontend work; otherwise only when the user asks. agy aliases antigravity.' },
