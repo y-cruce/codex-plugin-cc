@@ -38,17 +38,17 @@ const TOOLS = [
           + 'that the work is done; do not repeat it here.' },
         thread: { type: 'string', description: 'THREAD: the thread to continue (required for mode continue).' },
         base: { type: 'string', description: 'BASE: the base ref for review modes.' },
-        write: { type: 'boolean', description: 'WRITE: yes, letting a continue round write files.' },
+        write: { type: 'boolean', description: 'WRITE: continue write intent. Default full sandbox already permits writes; ACP permissions are controlled by the agent. State read-only intent in the brief.' },
         effort: { type: 'string', description: 'EFFORT: only when the skill says to escalate.' },
         model: { type: 'string', description: 'MODEL: agy defaults to $CODEX_COMPANION_ANTIGRAVITY_MODEL, else gemini-4-carbon, with high thinking; set for an explicit override.' },
         siblings: { type: 'string', description: 'SIBLINGS: one line naming the other running tasks.' },
         sandbox: { type: 'string', enum: ['full', 'network', 'default'], description: 'SANDBOX: only when the user asks.' },
-        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: agy for frontend work; otherwise only when the user asks. agy aliases antigravity.' },
+        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: omitted uses $CODEX_DIRECTOR_EXECUTOR, else codex. Use codex explicitly when required. Review stays Codex; continue restores its thread executor and ACP launch configuration, rejecting a mismatch. agy aliases antigravity.' },
         executor_command: { type: 'string', description: 'EXECUTOR_COMMAND: override the ACP executable.' },
         executor_args: { type: 'array', items: { type: 'string' }, description: 'EXECUTOR_ARGS: arguments for the ACP executable; dsh defaults to --profile acp.' },
-        executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP permission policy. dsh and antigravity default to allow-once; ask forwards offered choices to the director.' },
+        executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP tool permission policy. dsh/agy default allow-once; agy interaction questions always wait for the director. ask forwards actual permission requests; it does not undo Qoder bypass mode.' },
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor.' },
-        executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for a non-Codex executor; agy defaults to medium for Opus and high for Carbon.' },
+        executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for ACP. New agy sessions default to Opus medium / Carbon high in the driver; continue keeps the existing effort unless explicitly supplied.' },
       },
       required: ['mode', 'name', 'cwd', 'brief'],
     },
@@ -58,7 +58,8 @@ const TOOLS = [
     description: 'Send a correction to a job: dispatch.sh message. Defaults to Codex steer, an advertised ACP steering extension, '
       + 'or Qoder active-session input when its promptQueueing capability is supported by the plugin. A Qoder receipt confirms local submission, not model consumption. '
       + 'Set delivery to queue for an explicitly requested next turn or an ACP executor without steering support, '
-      + 'or interrupt to cancel the turn and run this now. Queue also starts a follow-up when the thread is idle, returning queuedJobId. '
+      + 'or interrupt to cancel the turn and run this now. Active ACP queue returns a separate queuedJobId; active Codex queue stays in the same job. Idle queue starts a new job for either. '
+      + 'Steer is refused while a question is pending; queue remains available. ACP interrupt retains files but reports no partialChanges. DSH steering requires its extension. '
       + 'Returns MESSAGED or MESSAGE_FAILED.',
     inputSchema: {
       type: 'object',

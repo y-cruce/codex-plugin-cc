@@ -5,13 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { ReadableStream, WritableStream } from "node:stream/web";
+import { fileURLToPath } from "node:url";
 
 import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclientprotocol/sdk";
 
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../broker-endpoint.mjs";
 import { ExecutorEventQueue } from "../executor-port.mjs";
 import { DirectorPublisher } from "../director-delivery.mjs";
+import { excludeGeneratedSkill } from "../git.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
+import { DEFAULT_INPUT_TIMEOUT_MS } from "../live-turn-control.mjs";
+import { ACP_COMPANION_ENV, ACP_CONTROL_ENV } from "../observation-client.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
 import { antigravityMcpServers, antigravitySkillDirectories } from "./antigravity-session.mjs";
 import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
@@ -22,7 +26,7 @@ const CAPABILITIES = Object.freeze({
   structuredQuestions: true,
   permissionRequests: true,
   midTurnSteer: false,
-  notifyDirector: false,
+  notifyDirector: true,
   commandOutputDelta: false,
   commandInteraction: false,
   turnDiff: false,
@@ -83,10 +87,11 @@ function findReasoningEffortOption(configOptions = []) {
 const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
 
 function permissionQuestion(entry) {
+  const message = entry.payload.interaction ? entry.payload.tool.title : `Permission requested: ${entry.payload.tool.title}`;
   return { requestId: entry.requestId, turnId: entry.turnId, kind: "permission",
-    message: `Permission requested: ${entry.payload.tool.title}`,
-    questions: [{ id: "optionId", question: `Permission requested: ${entry.payload.tool.title}`,
-      options: entry.payload.options.map((option) => ({ label: option.name, value: option.optionId })) }], expiresAt: null };
+    message, questions: [{ id: "optionId", question: message,
+      options: entry.payload.options.map((option) => ({ label: option.name, value: option.optionId })) }],
+    expiresAt: entry.payload.expiresAt ?? null };
 }
 
 function elicitationContent(values, fields) {
@@ -152,7 +157,9 @@ class AcpControlServer {
         case "broker/observe-status": result = { followers: this.runtime.followers.size }; break;
         case "broker/job-finish": result = await this.runtime.finish(p.cwd ?? this.cwd, p.jobId); break;
         case "executor/status": result = this.port.liveStatus(); break;
-        case "executor/ack-notifications": result = { remaining: 0 }; break;
+        case "executor/ack-notifications": result = this.port.ackNotifications(p.ids); break;
+        case "executor/notify-director": result = await this.port.notifyDirector(p.message); break;
+        case "executor/ask-director": result = await this.port.askDirector(p.question, p.options); break;
         case "executor/answer-question":
           await this.port.answerQuestion({ requestId: String(p.requestId), action: p.action, values: p.values });
           result = { answered: true, requestId: p.requestId };
@@ -184,8 +191,8 @@ class AcpControlServer {
     if (this.closed) return;
     this.closed = true;
     for (const socket of this.sockets) socket.destroy();
-    await new Promise((resolve) => this.server.close(resolve));
-    fs.rmSync(this.directory, { recursive: true, force: true });
+    if (this.server) await new Promise((resolve) => this.server.close(resolve));
+    if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true });
   }
 }
 
@@ -200,6 +207,7 @@ export class AcpExecutorJobPort {
     this.env = options.env ?? process.env;
     this.modeId = options.modeId ?? null;
     this.permissionPolicy = options.permissionPolicy ?? null;
+    this.inputTimeoutMs = options.inputTimeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS;
     this.modelId = options.modelId ?? null;
     this.effortId = options.effortId ?? null;
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
@@ -208,6 +216,7 @@ export class AcpExecutorJobPort {
     this.queue = new ExecutorEventQueue();
     this.permissions = new Map();
     this.questions = new Map();
+    this.notifications = [];
     this.queuedPrompts = [];
     this.activeTurn = null;
     this.replacementPrompt = null;
@@ -231,8 +240,10 @@ export class AcpExecutorJobPort {
     return new AcpEventAdapter(async (event) => {
       const owner = { ...job, executorSessionId: event.identity.sessionId, turnId: event.identity.turnId };
       const payload = { ...event.payload, threadId: event.identity.sessionId, turnId: event.identity.turnId };
-      if (event.type === "question.opened") this.director.publish(owner, event.type, payload);
-      else if (event.type === "permission.requested" && !this.autoApprovePermissions()) {
+      if (event.type === "question.opened") {
+        this.director.publish(owner, event.type, { ...payload, expiresAt: payload.expiresAt == null ? null : Date.parse(payload.expiresAt) });
+      } else if (event.type === "director.notified") this.director.publish(owner, event.type, payload);
+      else if (event.type === "permission.requested" && !payload.interaction && !this.autoApprovePermissions()) {
         this.director.publish(owner, "question.opened", { ...permissionQuestion({ requestId: payload.requestId,
           turnId: payload.turnId, payload }), threadId: payload.threadId });
       } else if (["question.resolved", "question.closed", "permission.resolved"].includes(event.type)) {
@@ -246,14 +257,20 @@ export class AcpExecutorJobPort {
   }
 
   async initialize() {
-    this.director = new DirectorPublisher();
+    this.director = new DirectorPublisher({ onDelivered: (event) => {
+      if (event.type === "director.notified") this.ackNotifications([event.payload.notificationId]);
+    } });
     this.runtime = new JobRuntime({ directorPush: true, publishDirectorEvent: (job, type) => this.director.publish(job, type), threadRecords: this.threadRecords,
       executorIdentity: { kind: "acp", command: this.command, args: this.args } });
     this.owner = {};
     await this.runtime.register(this.owner, this.cwd, this.job.id);
     this.job = this.runtime.jobForSocket(this.owner);
     this.adapter = this.createAdapter(this.job);
-    this.proc = spawn(this.command, this.args, { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"],
+    this.control = new AcpControlServer(this, this.runtime, this.cwd, this.job.id);
+    this.controlEndpoint = await this.control.start();
+    const env = { ...this.env, [ACP_CONTROL_ENV]: this.controlEndpoint,
+      [ACP_COMPANION_ENV]: fileURLToPath(new URL("../../codex-companion.mjs", import.meta.url)) };
+    this.proc = spawn(this.command, this.args, { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32", windowsHide: true });
     this.proc.stderr.setEncoding("utf8");
     this.proc.stderr.on("data", (chunk) => { this.stderr += chunk; });
@@ -284,8 +301,6 @@ export class AcpExecutorJobPort {
     this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true;
     this.capabilities.midTurnSteer = this.steeringExtension || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
       this.initializeResponse.agentCapabilities?._meta?.qoder?.promptQueueing === true);
-    this.control = new AcpControlServer(this, this.runtime, this.cwd, this.job.id);
-    this.controlEndpoint = await this.control.start();
   }
 
   events() { return this.queue; }
@@ -321,6 +336,7 @@ export class AcpExecutorJobPort {
     this.adapter = this.createAdapter(this.job);
     this.adapter.bindSession(this.sessionId);
     this.control.jobId = this.job.id;
+    this.notifications = [];
   }
 
   async applyMode(sessionId, response, modeId) {
@@ -409,7 +425,7 @@ export class AcpExecutorJobPort {
     const geminiHome = this.env.GEMINI_HOME?.replace(/^~(?=\/|$)/, home) || path.join(home, ".gemini");
     const codexHome = this.env.CODEX_HOME || path.join(home, ".codex");
     const directories = antigravitySkillDirectories(params.cwd, { home, geminiHome, codexHome });
-    params.additionalDirectories = [...new Set([...params.additionalDirectories, ...directories])];
+    params.additionalDirectories = [...new Set([...params.additionalDirectories, path.resolve(home), ...directories])];
     const { mcpServers, warnings } = antigravityMcpServers(geminiHome, this.initializeResponse.agentCapabilities?.mcpCapabilities,
       params.mcpServers);
     params.mcpServers = mcpServers;
@@ -418,9 +434,10 @@ export class AcpExecutorJobPort {
 
   async startSession(request) {
     const { params, warnings } = this.sessionRequest(request);
+    const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
+    if (antigravity) excludeGeneratedSkill(params.cwd);
     const response = await this.connection.newSession(params);
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
-    const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
     const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-4-carbon" : null);
     await this.applyModel(response.sessionId, response, modelId);
     const defaultEffort = antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null;
@@ -461,6 +478,7 @@ export class AcpExecutorJobPort {
     active.done = this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
       active.accepting = false;
       await this.updateTail;
+      await this.cancelPending();
       if (active.error) throw active.error;
       return this.adapter.completeTurn(value, { interrupting: active.interrupting && !active.cancelling });
     });
@@ -558,6 +576,69 @@ export class AcpExecutorJobPort {
     return this.permissionPolicy === "allow-once" || (this.permissionPolicy !== "ask" && this.modeId === "yolo");
   }
 
+  async notifyDirector(message) {
+    const active = this.activeTurn;
+    if (!active?.accepting || active.interrupting || active.cancelling) throw new Error("No active ACP turn.");
+    if (typeof message !== "string" || !message.trim() || [...message].length > 400) {
+      throw new Error("Provide a nonempty message of at most 400 characters.");
+    }
+    const id = crypto.randomBytes(6).toString("hex");
+    const pending = this.questions.keys().next().value ?? this.permissions.keys().next().value;
+    const note = { id, notificationId: id, message, turnId: active.turnId, receivedAt: new Date().toISOString(),
+      pendingRequestId: pending ?? null };
+    this.notifications.push(note);
+    await this.adapter.emit("director.notified", note, {}, null, "executor/notify-director");
+    return { notificationId: id };
+  }
+
+  ackNotifications(ids) {
+    this.notifications = this.notifications.filter((note) => !ids?.includes(note.id));
+    return { remaining: this.notifications.length };
+  }
+
+  async askDirector(question, options = []) {
+    if (!this.activeTurn?.accepting) throw new Error("No active ACP turn.");
+    if (typeof question !== "string" || !question.trim() || !Array.isArray(options) ||
+        options.some((option) => typeof option !== "string" || !option.trim())) {
+      throw new Error("Provide a question and an array of nonempty option strings.");
+    }
+    const response = await this.createElicitation({ message: question, requestedSchema: {
+      type: "object", properties: { answer: { type: "string", title: question,
+        ...(options.length ? { enum: options } : {}) } }, required: ["answer"] } }, "executor/ask-director");
+    if (response.action !== "accept") throw new Error(this.activeTurn?.error?.code === "INPUT_TIMEOUT"
+      ? "Waiting for director answer timed out after 10 minutes." : "Director question was cancelled.");
+    return { answer: response.content.answer };
+  }
+
+  waitForAnswer(requests, entry) {
+    return new Promise((resolve) => {
+      const pending = { ...entry, resolve };
+      pending.timer = setTimeout(() => {
+        if (requests.get(entry.requestId) !== pending) return;
+        this.settlePending(pending, "expired");
+        const active = this.activeTurn;
+        const sameTurn = active && active.turnId === pending.turnId;
+        if (sameTurn) active.error ??= Object.assign(new Error("Waiting for user answer timed out."), { code: "INPUT_TIMEOUT" });
+        void this.cancelPending().then(() => {
+          if (sameTurn && this.activeTurn === active) return this.connection.cancel({ sessionId: this.sessionId });
+        }).catch((error) => {
+          if (sameTurn) active.error.message += ` Interrupt failed: ${error.message}`;
+        });
+      }, this.inputTimeoutMs);
+      pending.timer.unref?.();
+      requests.set(entry.requestId, pending);
+    });
+  }
+
+  interactionEvent(entry) {
+    const question = permissionQuestion(entry);
+    const [field] = question.questions;
+    return { requestId: entry.requestId, message: question.message, mode: "form", url: null,
+      fields: [{ id: field.id, title: field.question, description: null, required: true, kind: "single_select", options: field.options }],
+      openedAt: new Date(entry.payload.expiresAt - this.inputTimeoutMs).toISOString(),
+      expiresAt: new Date(entry.payload.expiresAt).toISOString() };
+  }
+
   async requestPermission(params) {
     // The tool this asks about was announced by an earlier update, and the
     // adapter applies updates asynchronously while the protocol delivers this
@@ -567,9 +648,12 @@ export class AcpExecutorJobPort {
     const requestId = `permission:${crypto.randomUUID()}`;
     const remembered = this.adapter.tools?.get(String(params.toolCall?.toolCallId)) ?? null;
     const payload = normalizeAcpPermission(params, requestId, remembered);
+    const interaction = this.initializeResponse?.agentInfo?.name === "antigravity-acp" && payload.tool.toolCallId.startsWith("interaction_");
+    const automatic = !interaction && this.autoApprovePermissions();
+    Object.assign(payload, { interaction, expiresAt: automatic ? null : Date.now() + this.inputTimeoutMs });
     const emitted = this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,
       "session/request_permission");
-    if (this.autoApprovePermissions()) {
+    if (automatic) {
       const option = this.permissionPolicy === "allow-once"
         ? payload.options.find((item) => item.kind === "allow_once") ?? null
         : payload.options.find((item) => item.kind === "allow_always") ??
@@ -582,17 +666,22 @@ export class AcpExecutorJobPort {
         return { outcome };
       });
     }
-    return new Promise((resolve) => this.permissions.set(requestId, { requestId, turnId: this.activeTurn?.turnId ?? null,
-      payload, resolve }));
+    const entry = { requestId, turnId: this.activeTurn?.turnId ?? null, payload };
+    const reply = this.waitForAnswer(this.permissions, entry);
+    await emitted;
+    if (interaction) await this.adapter.emit("question.opened", this.interactionEvent(entry), { requestId }, null, "session/request_permission");
+    return reply;
   }
 
-  createElicitation(params) {
+  createElicitation(params, method = "elicitation/create") {
     const requestId = `question:${crypto.randomUUID()}`;
     const receivedAt = new Date().toISOString();
     const payload = normalizeAcpQuestion(params, requestId, receivedAt);
-    void this.adapter.emit("question.opened", payload, { requestId }, params, "elicitation/create");
-    return new Promise((resolve) => this.questions.set(requestId, { requestId, turnId: this.activeTurn?.turnId ?? null,
-      payload, resolve }));
+    const expiresAt = Date.parse(receivedAt) + this.inputTimeoutMs;
+    payload.expiresAt = new Date(expiresAt).toISOString();
+    const reply = this.waitForAnswer(this.questions, { requestId, turnId: this.activeTurn?.turnId ?? null, payload, expiresAt, method });
+    void this.adapter.emit("question.opened", payload, { requestId }, params, method);
+    return reply;
   }
 
   settlePending(pending, status) {
@@ -605,13 +694,14 @@ export class AcpExecutorJobPort {
     if (!pending) throw Object.assign(new Error("Question is not pending."), { code: "REQUEST_NOT_PENDING" });
     this.settlePending(pending, "resolved");
     this.questions.delete(String(request.requestId));
+    clearTimeout(pending.timer);
     const response = request.action === "accept"
       ? { action: "accept", content: elicitationContent(request.values, pending.payload.fields) } : { action: request.action };
     pending.resolve(response);
     await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: request.action,
-      values: request.values ?? null }, { requestId: pending.requestId }, response, "elicitation/create");
+      values: request.values ?? null }, { requestId: pending.requestId }, response, pending.method);
     await this.adapter.emit("question.closed", { requestId: pending.requestId, reason: request.action === "accept" ? "answered" : "cancelled" },
-      { requestId: pending.requestId }, response, "elicitation/create");
+      { requestId: pending.requestId }, response, pending.method);
   }
 
   async answerPermission(request) {
@@ -619,32 +709,46 @@ export class AcpExecutorJobPort {
     if (!pending) throw Object.assign(new Error("Permission request is not pending."), { code: "REQUEST_NOT_PENDING" });
     this.settlePending(pending, "resolved");
     this.permissions.delete(String(request.requestId));
+    clearTimeout(pending.timer);
     const outcome = request.outcome === "selected" ? { outcome: "selected", optionId: request.optionId } : { outcome: "cancelled" };
     pending.resolve({ outcome });
-    await this.adapter.emit("permission.resolved", { requestId: pending.requestId, outcome: request.outcome,
-      optionId: request.optionId ?? null }, { requestId: pending.requestId }, outcome, "session/request_permission");
+    await this.recordPermissionOutcome(pending, outcome);
+  }
+
+  async recordPermissionOutcome(pending, outcome) {
+    const { requestId } = pending;
+    await this.adapter.emit("permission.resolved", { requestId, outcome: outcome.outcome, optionId: outcome.optionId ?? null },
+      { requestId }, outcome, "session/request_permission");
+    if (pending.payload.interaction) {
+      const selected = outcome.outcome === "selected";
+      await this.adapter.emit("question.resolved", { requestId, action: selected ? "accept" : "cancel",
+        values: selected ? { optionId: outcome.optionId } : null }, { requestId }, outcome, "session/request_permission");
+      await this.adapter.emit("question.closed", { requestId, reason: selected ? "answered" : "cancelled" },
+        { requestId }, outcome, "session/request_permission");
+    }
   }
 
   async cancelPending() {
     const permissions = [...this.permissions.values()];
     this.permissions.clear();
     for (const pending of permissions) {
+      clearTimeout(pending.timer);
       this.settlePending(pending, "closed");
       const response = { outcome: { outcome: "cancelled" } };
       pending.resolve(response);
-      await this.adapter.emit("permission.resolved", { requestId: pending.requestId, outcome: "cancelled", optionId: null },
-        { requestId: pending.requestId }, response, "session/request_permission");
+      await this.recordPermissionOutcome(pending, response.outcome);
     }
     const questions = [...this.questions.values()];
     this.questions.clear();
     for (const pending of questions) {
+      clearTimeout(pending.timer);
       this.settlePending(pending, "closed");
       const response = { action: "cancel" };
       pending.resolve(response);
       await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: "cancel", values: null },
-        { requestId: pending.requestId }, response, "elicitation/create");
+        { requestId: pending.requestId }, response, pending.method);
       await this.adapter.emit("question.closed", { requestId: pending.requestId, reason: "cancelled" },
-        { requestId: pending.requestId }, response, "elicitation/create");
+        { requestId: pending.requestId }, response, pending.method);
     }
   }
 
@@ -693,9 +797,9 @@ export class AcpExecutorJobPort {
       undeliveredMessages: (this.activeTurn?.messages ?? []).filter(entry => entry.status === "rejected").map(entry => structuredClone(entry)),
       questions: [...this.questions.values()].map((entry) => ({ requestId: entry.requestId, turnId: entry.turnId,
         message: entry.payload.message, questions: entry.payload.fields.map((field) => ({ id: field.id,
-          question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: null })).concat(permissions),
-      permissions, notifications: [], interrupting: Boolean(this.activeTurn?.interrupting),
-      partialChanges: [], error: null, capabilities: { midTurnSteer: this.capabilities.midTurnSteer } };
+          question: field.description ?? field.title ?? field.id, options: field.options })), expiresAt: entry.expiresAt })).concat(permissions),
+      permissions, notifications: this.notifications, interrupting: Boolean(this.activeTurn?.interrupting),
+      partialChanges: [], error: null, capabilities: { midTurnSteer: this.capabilities.midTurnSteer, notifyDirector: true } };
   }
 
   async close() {

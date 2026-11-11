@@ -588,6 +588,10 @@ Expose the matching helper on PATH or set `ANTIGRAVITY_HARNESS_PATH` to its abso
 
 配套程序需要在 PATH 中，或通过 `ANTIGRAVITY_HARNESS_PATH` 指定绝对路径。运行时在 `session/new` 时会向工作区生成 `skills/system/run-workflow/SKILL.md`，此时尚未发送提示词。
 
+The plugin adds HOME to agy's additional directories for both new and resumed sessions, preserving other roots and cwd. File tools can read and write those roots; edit approval remains separate. In a Git repository, it idempotently adds only the untracked generated skill's exact path `/skills/system/run-workflow/SKILL.md` to Git's resolved local `info/exclude`. This writes local metadata even for a read-only investigation; linked worktrees share it. Tracked files and sibling skills remain visible.
+
+插件在 agy 新建及续接会话时把 HOME 合并进额外目录，保留已有来源和 cwd。文件工具的读写范围随之扩大，编辑批准仍独立。对于 Git 根目录中的未跟踪系统技能，插件只把精确规则 `/skills/system/run-workflow/SKILL.md` 幂等写入 Git 定位的本地 `info/exclude`；只读排查也会发生这项已约定的元数据写入，linked worktree 共用规则。
+
 ## DeepSeek Harness executor / DSH 执行器
 
 With the updated code-director skill, `mcp__codex__dispatch` accepts `executor: "dsh"`. It launches the existing ACP worker with `dsh --profile acp`; override the executable with `executor_command` or `CODEX_DIRECTOR_DSH_COMMAND`, and launch arguments with the `executor_args` string array. For direct companion calls:
@@ -596,8 +600,41 @@ With the updated code-director skill, `mcp__codex__dispatch` accepts `executor: 
 node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command dsh --executor-args '["--profile","acp"]' --executor-permissions allow-once --json "Inspect the project"
 ```
 
-Continue with the returned session id (`mode: "continue"`, `thread: "<session-id>"`, `executor: "dsh"`, or the companion's `--thread` with the same ACP configuration). DSH restores the model context with `session/resume`; the plugin's durable history supplies event replay. Queue messages for the next prompt, or interrupt before a replacement; mid-turn steering and session modes are unsupported. The default DSH dispatch policy selects only an offered `allow_once` permission. Use `executor_permissions: "ask"` to forward choices to the director. No model is forced when omitted. Thoughts and answers with a shared source message id remain separate in results and history.
+Continue with the returned session id (`mode: "continue"`, `thread: "<session-id>"`); the plugin restores its original executor, command and arguments. DSH restores model context through `session/resume`, with local event replay. DSH has no session modes; mid-turn steering requires its advertised extension. Otherwise choose queue for later input, interrupt to stop active work. Its default policy selects only an offered `allow_once` permission; `ask` forwards tool permission requests. No model is forced when omitted. Thoughts and answers sharing a source message id remain separate.
 
-更新 code-director 技能后，派单工具支持 `executor: "dsh"`，通过现有 ACP 后台进程运行 `dsh --profile acp`。可用 `executor_command` 或 `CODEX_DIRECTOR_DSH_COMMAND` 指定程序，用字符串数组 `executor_args` 指定启动参数。继续对话传返回的 session id，使用 `mode: "continue"`、`thread` 和同一执行器配置；直接使用 companion 时加 `--thread`。模型上下文由 `session/resume` 恢复，事件回放由插件历史提供。运行中使用 queue 或 interrupt；不发送 DSH 不支持的会话模式或在途 steering。默认只应答单次允许权限，`executor_permissions: "ask"` 可交给 Director 选择。省略模型时沿用 DSH 配置，推理与回复即使共用原始消息 id 也会分别保存。本功能不安装 DSH、不修改认证，也不改变已有退出清理策略。
+派单工具支持 `executor: "dsh"`，通过 ACP 后台进程运行 `dsh --profile acp`；可用 `executor_command` 或 `CODEX_DIRECTOR_DSH_COMMAND` 指定程序。用返回的 thread 续接时自动恢复原始执行器、命令和参数。DSH 无会话模式，运行中 steering 依赖已安装并声明支持的扩展，否则按意图选 queue 或 interrupt。默认只应答单次工具许可，`ask` 转交实际权限请求；省略模型时沿用 DSH 配置。
+
+## ACP director controls
+
+Omitting dispatch's executor uses `CODEX_DIRECTOR_EXECUTOR`, else Codex. Select `executor: "codex"` explicitly when needed. Review ignores this default; continue restores its thread and rejects an executor or launch-configuration mismatch. New agy effort defaults in the driver to Carbon high / Opus medium; continuation preserves the existing effort unless explicitly supplied.
+
+ACP workers inject `CODEX_ACP_CONTROL_ENDPOINT` and `CODEX_ACP_COMPANION_PATH` before spawning the agent. A shell sends a nonempty note of at most 400 characters with:
+
+```bash
+node "$CODEX_ACP_COMPANION_PATH" notify-director "Decision or blocker requiring director action"
+```
+
+It returns after publishing `director.notified` and continues work. Codex keeps its native `notify_director` tool. agy uses native questions even though its ACP server encodes them as `interaction_*` permission requests: these always wait for the director, including under allow-once. Qoder's native questions use elicitation and also wait under yolo. DSH or another ACP agent without a native question tool uses:
+
+```bash
+node "$CODEX_ACP_COMPANION_PATH" ask-director --question "Choose a source" --options '["First","Second"]'
+```
+
+The command blocks, prints the selected or free-text answer, and exits nonzero on cancellation or its ten-minute timeout. All ACP question/permission timeouts close the request and interrupt the active turn. For dsh bash set `timeoutMs:600000`: its default is 120000 ms and usual cap 600000 ms. If it promotes the command to a background job, use `job_output` on that job. Without jobs the shell may kill the command first; report that and check pending status rather than rerunning or inferring an answer.
+
+ACP and Codex refuse steer while a question is pending; queue is allowed. Active ACP queue returns a separate `queuedJobId` per instruction; active Codex queue uses the same job. Idle queue creates a new job for either. ACP interrupt keeps files but reports no partialChanges; inspect the assigned checkout. Default full access permits writes even without `write:true`; read-only is brief intent, and ACP permissions are controlled by the agent rather than Codex sandbox flags. Qoder `ask` does not remove its default bypass mode.
+
+The pane's existing poll detects confirmed-dead ACP owner PIDs and publishes a stable failure event to their owning session. Check `ownerAlive` and `lastProgressAt` after fifteen minutes of silence. Periodic question reminders exist only in Monitor mode. Cancellation reason wording, Monitor DONE summaries, missing-message-id assistant grouping, execution cwd normalization and missing partial file lists retain their current behavior. There is no ACP `session/load` fallback or numeric/boolean form conversion; transcript transfer remains Codex-only.
+
+省略执行器受 `CODEX_DIRECTOR_EXECUTOR` 控制；需要 Codex 时显式填写，review 与 continue 不受该默认值影响。ACP 用上述命令通知和提问；agy/Qoder 保留原生提问，dsh 使用阻塞命令。超时、取消均不能作为授权。只读意图、排队 job id、interrupt 信息范围和 Monitor 提醒规则以上述实际行为为准。
+
+Real-agent smoke is opt-in and excluded from `npm test`:
+
+```bash
+CODEX_REAL_ACP_SMOKE=1 CODEX_COMPANION="$PWD/plugins/codex/scripts/codex-companion.mjs" \
+  CODEX_SMOKE_MEMORY_INDEX=/absolute/path/to/memory/MEMORY.md node scripts/smoke-acp.mjs
+```
+
+It uses isolated Git/data/session directories, receives notifications before completion, answers the second option for all three agents, verifies final output and skill reads, and checks agy's local exclusion. `CODEX_SMOKE_OUTPUT` selects the evidence directory; missing capabilities are reported as SKIP.
 
 Protocol reference: [DSH ACP contract](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/acp/acp/README.md).

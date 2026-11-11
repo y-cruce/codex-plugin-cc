@@ -6,9 +6,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, readJobFile, resolveJobFile, resolveStateDir, writeJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 import { JobEventStore } from "../plugins/codex/scripts/lib/job-event-store.mjs";
 import { observationThreads } from "../plugins/codex/scripts/lib/observation-paths.mjs";
+import { deliveryRoot, pendingEvents } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { terminalReportsPath } from "../plugins/codex/scripts/lib/job-events.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
@@ -129,6 +130,23 @@ test("observation keeps a job's endpoint when broker.json and fallback options n
   const client = await ObservationClient.connect(cwd, { stateDir, fallback: true,
     job: { controlEndpoint: endpoint }, brokerEndpoint: "unix:/wrong/new-broker" });
   client.close();
+});
+
+test("pane polling publishes a dead ACP owner's failure once to its owning director session", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir(), stateDir = resolveStateDir(cwd);
+  const job = { id: "dead-acp", status: "running", executor: "acp", pid: 2147483647,
+    workspaceRoot: cwd, sessionId: "owner", directorPush: true };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  await observationThreads(stateDir, { sessionId: "someone-else" });
+  assert.equal(pendingEvents(deliveryRoot(stateDir), "owner").length, 0);
+  for (let i = 0; i < 2; i++) await observationThreads(stateDir, { sessionId: "owner" });
+  const events = pendingEvents(deliveryRoot(stateDir), "owner");
+  assert.equal(events.length, 1);
+  assert.match(events[0].text, /job.failed: owner process exited/);
+  assert.equal(readJobFile(resolveJobFile(cwd, job.id)).status, "failed");
+  assert.equal(listJobs(cwd).find(value => value.id === job.id).status, "failed");
 });
 
 test("pane listing and replay do not sweep unrelated workspace histories", async (t) => {

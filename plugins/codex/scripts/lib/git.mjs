@@ -91,6 +91,23 @@ export function getRepoRoot(cwd) {
   return gitChecked(cwd, ["rev-parse", "--show-toplevel"]).stdout.trim();
 }
 
+export function excludeGeneratedSkill(cwd) {
+  const generated = "skills/system/run-workflow/SKILL.md";
+  const root = git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (root.status !== 0) return;
+  const repository = root.stdout.trim();
+  const tracked = gitChecked(repository, ["ls-files", "--", generated]).stdout.trim();
+  if (tracked) return;
+  const file = path.resolve(repository, gitChecked(repository, ["rev-parse", "--git-path", "info/exclude"]).stdout.trim());
+  let content = "";
+  try { content = fs.readFileSync(file, "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  const rule = `/${generated}`;
+  if (content.split(/\r?\n/).includes(rule)) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${content && !content.endsWith("\n") ? "\n" : ""}${rule}\n`);
+}
+
 export function detectDefaultBranch(cwd) {
   const symbolic = git(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
   if (symbolic.status === 0) {

@@ -2,9 +2,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveJobHistoryAtStateDir } from "./history-resolver.mjs";
-import { resolveStateDir } from "./state.mjs";
+import { resolveStateDir, resolveStateDirAtWorkspaceRoot } from "./state.mjs";
 import { threadRecordPaths } from "./thread-records.mjs";
 import { checkJobLiveness } from "./job-control.mjs";
+import { DirectorPublisher } from "./director-delivery.mjs";
 
 export async function readObservationJson(file) {
   try { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -75,14 +76,27 @@ export async function observationJobs(stateDir, { concurrency = 1, since = 0 } =
   return [...jobs.values()];
 }
 
-export async function observationThreads(stateDir, { finishedAfter } = /** @type {{ finishedAfter?: number }} */ ({})) {
+export async function observationThreads(stateDir, { finishedAfter, sessionId = process.env.CODEX_COMPANION_SESSION_ID } =
+  /** @type {{ finishedAfter?: number, sessionId?: string }} */ ({})) {
   const threads = new Map();
   const jobs = await observationJobs(stateDir);
   const producers = new Map(jobs.map(({ job }) => [job.id, job.directorPush === true]));
+  const endedOwners = new Map();
+  const director = new DirectorPublisher();
+  const liveJobs = new Set(jobs.filter(entry => entry.hasJobFile === true &&
+    ["running", "queued"].includes(entry.job.status)).map(entry => entry.job.id));
   for (const entry of jobs) {
-    // A retained active record still needs owner-exit recovery from its Monitor.
-    const live = entry.hasJobFile === true && ["running", "queued"].includes(entry.job.status);
-    entry.job = checkJobLiveness(entry.job.workspaceRoot, entry.job, null, new Map(), { persist: false });
+    const ownedAcp = entry.hasJobFile && entry.job.executor === "acp" && sessionId && entry.job.sessionId === sessionId;
+    const ownStore = entry.job.workspaceRoot && path.resolve(stateDir) === path.resolve(resolveStateDirAtWorkspaceRoot(entry.job.workspaceRoot));
+    entry.job = checkJobLiveness(entry.job.workspaceRoot, entry.job, null, new Map(), { persist: Boolean(ownedAcp && ownStore) });
+    if (ownedAcp && entry.job.status === "failed" && entry.job.errorMessage === "owner process exited") {
+      director.publish(entry.job, "job.failed", {}, stateDir);
+      endedOwners.set(entry.job.id, entry.job);
+    }
+  }
+  for (const entry of jobs) {
+    // Retained records remain discoverable even if their owner exited.
+    const live = liveJobs.has(entry.job.id);
     let history = await resolveJobHistoryAtStateDir(stateDir, entry.job.id);
     const associatedQueued = history.layout === "legacy" && entry.job.status === "queued" &&
       typeof entry.job.recordId === "string" && entry.job.recordId;
@@ -131,17 +145,18 @@ export async function observationThreads(stateDir, { finishedAfter } = /** @type
     const manifest = await readObservationJson(history.manifest);
     if (!view || !manifest) continue;
     const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId;
+    const endedOwner = endedOwners.get(jobId);
     threads.set(history.recordId, { thread: {
       id: history.recordId,
       recordId: history.recordId,
       jobId,
       label: view.label ?? null,
-      status: associatedQueued && view.activeRoundId == null ? "queued" : view.status,
+      status: endedOwner?.status ?? (associatedQueued && view.activeRoundId == null ? "queued" : view.status),
       live,
       startedAt: view.startedAt ?? null,
-      endedAt: associatedQueued && view.activeRoundId == null ? null : view.endedAt ?? null,
+      endedAt: endedOwner?.completedAt ?? (associatedQueued && view.activeRoundId == null ? null : view.endedAt ?? null),
       threadId: view.threadId ?? manifest.threadId ?? null,
-      activeRoundId: view.activeRoundId ?? null,
+      activeRoundId: endedOwner ? null : view.activeRoundId ?? null,
       latestRoundId: view.latestRoundId ?? jobId,
       sessionIds: [...new Set([
         ...(view.rounds ?? []).map((round) => round.sessionId).filter(Boolean),

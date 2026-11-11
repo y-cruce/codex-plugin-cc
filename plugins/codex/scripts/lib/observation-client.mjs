@@ -6,6 +6,9 @@ import path from "node:path";
 import { readObservationJson } from "./observation-paths.mjs";
 import { readJobFile, resolveJobFile } from "./state.mjs";
 
+export const ACP_CONTROL_ENV = "CODEX_ACP_CONTROL_ENDPOINT";
+export const ACP_COMPANION_ENV = "CODEX_ACP_COMPANION_PATH";
+
 export class ObservationClient extends EventEmitter {
   constructor(socket, requestTimeoutMs = 10000) {
     super();
@@ -45,7 +48,7 @@ export class ObservationClient extends EventEmitter {
   }
 
   static async connect(cwd, { stateDir = undefined, fallback = false, job = null, endpoint = null, brokerEndpoint = null, brokerTimeoutMs = 10000 } = {}) {
-    const session = stateDir ? await readObservationJson(path.join(stateDir, "broker.json")) : loadBrokerSession(cwd);
+    const session = endpoint ? null : stateDir ? await readObservationJson(path.join(stateDir, "broker.json")) : loadBrokerSession(cwd);
     const resolvedEndpoint = endpoint ?? job?.controlEndpoint ?? brokerEndpoint ??
       ((!fallback && process.env.CODEX_COMPANION_APP_SERVER_ENDPOINT) || session?.endpoint);
     if (!resolvedEndpoint) throw Object.assign(new Error("No live executor endpoint"), { code: "BROKER_UNAVAILABLE" });

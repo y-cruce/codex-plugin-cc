@@ -57,6 +57,14 @@ test("channel messages keep job, event, stable id and owning session", () => {
   assert.equal(channelMessage({ text: " " }), null);
 });
 
+test("an ACP completion carries the final reply from its event payload", () => {
+  for (const result of [undefined, { terminal: { finalMessages: [] } }]) {
+    const event = directorEvent({ id: "task-acp", sessionId: "session-acp", result }, "job.completed",
+      { finalMessages: [{ role: "assistant", text: "final answer" }] }, "/tmp/state");
+    assert.equal(event.text, "job=task-acp · job.completed: final answer");
+  }
+});
+
 test("ingress routes director agents separately, accepts successful sends and falls back on refusal", async (t) => {
   const h = fixture(t);
   for (const [route, delivered] of [["channel", true], ["channel", false], ["monitor", true]]) {

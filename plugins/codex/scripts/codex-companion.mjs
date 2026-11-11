@@ -24,12 +24,13 @@ import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { runAcpTurn } from "./lib/acp.mjs";
 import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
+import { DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
 import { handleTasks } from "./lib/director-tasks.mjs";
 import { gcPluginState } from "./lib/state-gc.mjs";
 import { askPane, renderPaneReply } from "./lib/pane-channel.mjs";
 import { readRoundContext } from "./lib/history-resolver.mjs";
-import { finishObservedJob } from "./lib/observation-client.mjs";
+import { ACP_CONTROL_ENV, ObservationClient, finishObservedJob } from "./lib/observation-client.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -106,6 +107,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs observe follow <job-id> [--after <cursor>] [--until done] [--verbose] [--quiet] [--max-seconds <n>]",
       "  node scripts/codex-companion.mjs message <job-id> [--interrupt|--queue] [--prompt-file <path>] [text] [--json]",
       "  node scripts/codex-companion.mjs answer <job-id> --request-id <id> --answers-file <path> [--json]",
+      "  node scripts/codex-companion.mjs notify-director <message>  (inside an ACP task)",
+      '  node scripts/codex-companion.mjs ask-director --question <text> [--options \'["A","B"]\']  (inside an ACP task)',
       "  node scripts/codex-companion.mjs result [job-id] [--thread <thread-id>] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
       "  node scripts/codex-companion.mjs pane [list|refresh|forget <number|part of a task name|task id>] [--session <id>] [--timeout-ms <ms>] [--json]"
@@ -400,6 +403,40 @@ function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "c
   throw new Error(
     `Thread ${threadId} is not tracked for this repository; its local history may have been pruned. Pass --allow-other-repo to resume it using the executor's session history.`
   );
+}
+
+function executorPreset(value) {
+  if (value == null) return null;
+  if (!["codex", "acp", "qoder", "dsh", "antigravity", "agy"].includes(value)) throw new Error(`Unknown executor: ${value}`);
+  return value === "agy" ? "antigravity" : value;
+}
+
+function trackedPreset(job, request) {
+  if ((job.executor ?? "codex") === "codex") return "codex";
+  if (request.executorPreset) return request.executorPreset;
+  const command = request.executorCommand ?? "";
+  if (/^(?:agy(?:_acp_server(?:\.par)?)?|antigravity(?:-acp)?)$/.test(path.basename(command)) ||
+      command.includes("/agy-acp/acp-proxy.mjs")) return "antigravity";
+  if (/^dsh(?:-acp)?$/.test(path.basename(command))) return "dsh";
+  if (/^qoder(?:cli)?$/.test(path.basename(command))) return "qoder";
+  return "acp";
+}
+
+export function resolveTaskExecutor(workspaceRoot, threadId, options) {
+  const preset = executorPreset(options["executor-preset"]);
+  const match = threadId && sortJobsNewestFirst(listJobs(workspaceRoot)).find((job) =>
+    (job.executorSessionId ?? job.threadId) === threadId);
+  if (!match) return { preset, executor: options.executor ?? (preset ? (preset === "codex" ? "codex" : "acp")
+    : process.env.CODEX_COMPANION_EXECUTOR ?? "codex"), previous: null };
+
+  const job = readStoredJob(workspaceRoot, match.id) ?? match;
+  const executor = job.executor ?? "codex";
+  const previous = job.request ?? {};
+  const original = trackedPreset(job, previous);
+  if ((preset && preset !== original) || (options.executor && options.executor !== executor)) {
+    throw new Error(`Thread ${threadId} belongs to executor "${original}"; cannot continue with "${preset ?? options.executor}". Omit executor to reuse the original.`);
+  }
+  return { preset: original, executor, previous };
 }
 
 async function executeReviewRun(request) {
@@ -728,7 +765,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
 }
 
 function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId,
-  executor, executorCommand, executorArgs, executorMode, executorModel, executorEffort, executorPermissions }) {
+  executor, executorPreset, executorCommand, executorArgs, executorMode, executorModel, executorEffort, executorPermissions }) {
   return {
     cwd,
     model,
@@ -742,6 +779,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     allowOtherRepo,
     jobId,
     executor,
+    executorPreset,
     executorCommand,
     executorArgs,
     executorMode,
@@ -924,7 +962,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-preset", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -936,7 +974,8 @@ async function handleTask(argv) {
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
-  const executor = String(options.executor ?? process.env.CODEX_COMPANION_EXECUTOR ?? "codex").trim();
+  const resumeThreadId = options.thread == null ? null : String(options.thread).trim();
+  const { executor, preset, previous } = resolveTaskExecutor(workspaceRoot, resumeThreadId, options);
   if (!["codex", "acp"].includes(executor)) throw new Error("--executor must be codex or acp.");
   let executorCommand = null;
   let executorArgs = [];
@@ -945,17 +984,22 @@ async function handleTask(argv) {
   let executorEffort = null;
   let executorPermissions = null;
   if (executor === "acp") {
-    executorCommand = options["executor-command"] ?? process.env.CODEX_COMPANION_ACP_COMMAND ?? null;
-    const executorArgsText = options["executor-args"] ?? process.env.CODEX_COMPANION_ACP_ARGS ?? "[]";
+    executorCommand = previous ? previous.executorCommand : options["executor-command"] ?? process.env.CODEX_COMPANION_ACP_COMMAND ?? null;
+    const executorArgsText = options["executor-args"] ?? (previous ? JSON.stringify(previous.executorArgs ?? [])
+      : process.env.CODEX_COMPANION_ACP_ARGS ?? "[]");
     try { executorArgs = JSON.parse(executorArgsText); }
     catch { throw new Error("--executor-args must be a JSON array of strings."); }
     if (!Array.isArray(executorArgs) || executorArgs.some((value) => typeof value !== "string")) {
       throw new Error("--executor-args must be a JSON array of strings.");
     }
-    executorMode = options["executor-mode"] ?? process.env.CODEX_COMPANION_ACP_MODE ?? null;
-    executorModel = options["executor-model"] ?? process.env.CODEX_COMPANION_ACP_MODEL ?? null;
-    executorEffort = options["executor-effort"] ?? process.env.CODEX_COMPANION_ACP_EFFORT ?? null;
-    executorPermissions = options["executor-permissions"] ?? process.env.CODEX_COMPANION_ACP_PERMISSIONS ?? null;
+    if (previous && ((options["executor-command"] && options["executor-command"] !== executorCommand) ||
+        JSON.stringify(executorArgs) !== JSON.stringify(previous.executorArgs ?? []))) {
+      throw new Error(`Thread ${resumeThreadId} must be continued with its original ACP command and arguments.`);
+    }
+    executorMode = options["executor-mode"] ?? (previous ? previous.executorMode : process.env.CODEX_COMPANION_ACP_MODE) ?? null;
+    executorModel = options["executor-model"] ?? (previous ? model : process.env.CODEX_COMPANION_ACP_MODEL) ?? null;
+    executorEffort = options["executor-effort"] ?? (previous ? null : process.env.CODEX_COMPANION_ACP_EFFORT) ?? null;
+    executorPermissions = options["executor-permissions"] ?? (previous ? previous.executorPermissions : process.env.CODEX_COMPANION_ACP_PERMISSIONS) ?? null;
     if (executorPermissions !== null && !["ask", "allow-once"].includes(executorPermissions)) {
       throw new Error("--executor-permissions must be ask or allow-once.");
     }
@@ -963,7 +1007,6 @@ async function handleTask(argv) {
   }
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
-  const resumeThreadId = options.thread == null ? null : String(options.thread).trim();
   const allowOtherRepo = Boolean(options["allow-other-repo"]);
   if (options.thread != null && (!resumeThreadId || resumeThreadId.startsWith("-"))) {
     throw new Error("Provide a thread id with --thread.");
@@ -1002,6 +1045,7 @@ async function handleTask(argv) {
     allowOtherRepo,
     jobId: job.id,
     executor,
+    executorPreset: preset,
     executorCommand,
     executorArgs,
     executorMode,
@@ -1045,6 +1089,28 @@ async function handleTransfer(argv) {
     source: options.source
   });
   outputCommandResult(payload, rendered, options.json);
+}
+
+async function handleNotifyDirector(argv) {
+  const endpoint = process.env[ACP_CONTROL_ENV];
+  if (!endpoint) throw new Error("notify-director is available inside an ACP task.");
+  const client = await ObservationClient.connect(process.cwd(), { endpoint });
+  try {
+    await client.request("executor/notify-director", { message: argv.join(" ") });
+    console.log("Accepted for the director.");
+  } finally { client.close(); }
+}
+
+async function handleAskDirector(argv) {
+  const { options } = parseCommandInput(argv, { valueOptions: ["question", "options"], rejectUnknownOptions: true });
+  const endpoint = process.env[ACP_CONTROL_ENV];
+  if (!endpoint) throw new Error("ask-director is available inside an ACP task.");
+  const choices = JSON.parse(options.options ?? "[]");
+  const client = await ObservationClient.connect(process.cwd(), { endpoint, brokerTimeoutMs: DEFAULT_INPUT_TIMEOUT_MS + 10000 });
+  try {
+    const result = await client.request("executor/ask-director", { question: options.question, options: choices });
+    console.log(result.answer);
+  } finally { client.close(); }
 }
 
 async function handleTaskWorker(argv) {
@@ -1442,6 +1508,12 @@ async function main() {
     case "message":
     case "answer":
       await handleLiveCommand(subcommand, argv);
+      break;
+    case "notify-director":
+      await handleNotifyDirector(argv);
+      break;
+    case "ask-director":
+      await handleAskDirector(argv);
       break;
     case "result":
       await handleResult(argv);
