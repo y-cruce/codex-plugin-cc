@@ -171,12 +171,12 @@ class AcpControlServer {
         case "executor/steer": result = await this.port.steerPrompt({ sessionId: p.executorSessionId, turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/queue-turn": result = await this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/interrupt-turn":
-          result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000,
+          result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: this.port.cancelTimeoutMs,
             replacementPrompt: p.replacementPrompt ?? null });
           result = { interrupted: true, threadId: this.port.sessionId, turnId: p.turnId, partialChanges: [], terminal: result };
           break;
         case "executor/cancel-job":
-          result = await this.port.cancelJob({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: 15000 });
+          result = await this.port.cancelJob({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: this.port.cancelTimeoutMs });
           result = { interrupted: true, threadId: this.port.sessionId, turnId: p.turnId, partialChanges: [], terminal: result };
           break;
         default: throw new Error(`Unsupported executor request: ${message.method}`);
@@ -208,6 +208,7 @@ export class AcpExecutorJobPort {
     this.modeId = options.modeId ?? null;
     this.permissionPolicy = options.permissionPolicy ?? null;
     this.inputTimeoutMs = options.inputTimeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS;
+    this.cancelTimeoutMs = options.cancelTimeoutMs ?? 15000;
     this.modelId = options.modelId ?? null;
     this.effortId = options.effortId ?? null;
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
@@ -470,18 +471,20 @@ export class AcpExecutorJobPort {
   }
 
   async startTurn(request) {
+    if (this.failure) throw this.failure;
     if (this.activeTurn) throw Object.assign(new Error("A turn is already active."), { code: "INVALID_STATE" });
     const turnId = `turn:${crypto.randomUUID()}`;
     await this.adapter.startTurn(turnId, request.prompt);
     const active = { turnId, interrupting: false, cancelling: false, accepting: true, messages: [], error: null };
     this.activeTurn = active;
-    active.done = this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
+    const failed = new Promise((_, reject) => { active.fail = reject; });
+    active.done = Promise.race([this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
       active.accepting = false;
       await this.updateTail;
       await this.cancelPending();
       if (active.error) throw active.error;
       return this.adapter.completeTurn(value, { interrupting: active.interrupting && !active.cancelling });
-    });
+    }).catch((error) => { throw active.error ?? error; }), failed]);
     const settled = () => { active.accepting = false; if (this.activeTurn === active) this.activeTurn = null; };
     active.done.then(settled, settled);
     return { turnId, done: active.done };
@@ -550,6 +553,7 @@ export class AcpExecutorJobPort {
   }
 
   async queuePrompt(request) {
+    if (this.failure) throw this.failure;
     if (!this.activeTurn || this.activeTurn.turnId !== request.turnId) {
       throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
     }
@@ -618,11 +622,18 @@ export class AcpExecutorJobPort {
         this.settlePending(pending, "expired");
         const active = this.activeTurn;
         const sameTurn = active && active.turnId === pending.turnId;
-        if (sameTurn) active.error ??= Object.assign(new Error("Waiting for user answer timed out."), { code: "INPUT_TIMEOUT" });
-        void this.cancelPending().then(() => {
-          if (sameTurn && this.activeTurn === active) return this.connection.cancel({ sessionId: this.sessionId });
-        }).catch((error) => {
-          if (sameTurn) active.error.message += ` Interrupt failed: ${error.message}`;
+        if (sameTurn) {
+          active.error ??= Object.assign(new Error("Waiting for user answer timed out."), { code: "INPUT_TIMEOUT" });
+          this.failure = active.error;
+          active.accepting = false;
+        }
+        const stopped = sameTurn ? this.stopTurn({ sessionId: this.sessionId, turnId: active.turnId,
+          timeoutMs: this.cancelTimeoutMs }, true) : this.cancelPending();
+        void stopped.catch((error) => {
+          if (sameTurn && this.activeTurn === active) {
+            active.error.message += ` Interrupt failed: ${error.message}`;
+            active.fail(active.error);
+          }
         });
       }, this.inputTimeoutMs);
       pending.timer.unref?.();
@@ -640,6 +651,7 @@ export class AcpExecutorJobPort {
   }
 
   async requestPermission(params) {
+    if (this.failure) return { outcome: { outcome: "cancelled" } };
     // The tool this asks about was announced by an earlier update, and the
     // adapter applies updates asynchronously while the protocol delivers this
     // request independently of them. Reading its table too early would leave
@@ -674,6 +686,7 @@ export class AcpExecutorJobPort {
   }
 
   createElicitation(params, method = "elicitation/create") {
+    if (this.failure) return Promise.resolve({ action: "cancel" });
     const requestId = `question:${crypto.randomUUID()}`;
     const receivedAt = new Date().toISOString();
     const payload = normalizeAcpQuestion(params, requestId, receivedAt);

@@ -608,7 +608,11 @@ Continue with the returned session id (`mode: "continue"`, `thread: "<session-id
 
 Omitting dispatch's executor uses `CODEX_DIRECTOR_EXECUTOR`, else Codex. Select `executor: "codex"` explicitly when needed. Review ignores this default; continue restores its thread and rejects an executor or launch-configuration mismatch. New agy effort defaults in the driver to Carbon high / Opus medium; continuation preserves the existing effort unless explicitly supplied.
 
-ACP workers inject `CODEX_ACP_CONTROL_ENDPOINT` and `CODEX_ACP_COMPANION_PATH` before spawning the agent. A shell sends a nonempty note of at most 400 characters with:
+ACP workers inject `CODEX_ACP_CONTROL_ENDPOINT` and `CODEX_ACP_COMPANION_PATH` before spawning the agent.
+
+The endpoint exposes task controls, including answer and approval interfaces; it relies on the ACP executor not invoking those interfaces on its own.
+
+A shell sends a nonempty note of at most 400 characters with:
 
 ```bash
 node "$CODEX_ACP_COMPANION_PATH" notify-director "Decision or blocker requiring director action"

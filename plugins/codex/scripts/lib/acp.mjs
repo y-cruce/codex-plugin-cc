@@ -120,6 +120,7 @@ export async function runAcpTurn(cwd, options = {}) {
   const port = await openAcpExecutorJob({ cwd, job, onProgress: options.onProgress, command: options.command,
     args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId,
     permissionPolicy: options.permissionPolicy,
+    inputTimeoutMs: options.inputTimeoutMs, cancelTimeoutMs: options.cancelTimeoutMs,
     createQueuedRound: options.createQueuedRound });
   const eventPump = (async () => {
     for await (const event of port.events()) {

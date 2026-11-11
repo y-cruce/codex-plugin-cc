@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { resolveTaskExecutor } from "../plugins/codex/scripts/codex-companion.mjs";
+import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { excludeGeneratedSkill } from "../plugins/codex/scripts/lib/git.mjs";
-import { upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
+import { readJobFile, resolveJobFile, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 function portFixture(options = {}) {
   const job = { id: "round-one", executor: "acp", sessionId: "director", workspaceRoot: "/tmp" };
@@ -61,6 +64,34 @@ test("ACP question and permission expiration cancel pending requests and fail th
     assert.ok(pushes.some((event) => event.type === "question.expired"));
     assert.ok(events.some((event) => event.type === (kind === "question" ? "question.closed" : "permission.resolved")));
   }
+});
+
+test("an input timeout fails the job and closes an agent whose prompt ignores cancellation", { timeout: BROKER_READY_MS }, async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  const recording = path.join(cwd, "protocol.jsonl"), pidFile = path.join(cwd, "agent.pid");
+  const job = { id: "stuck-question", executor: "acp", workspaceRoot: cwd, sessionId: "director",
+    status: "running", pid: process.pid, createdAt: new Date().toISOString() };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  t.after(() => {
+    if (fs.existsSync(pidFile)) {
+      try { process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  });
+  const events = [];
+  await assert.rejects(runTrackedJob(job, () => runAcpTurn(cwd, { jobId: job.id, command: process.execPath,
+    args: [fileURLToPath(new URL("./fake-acp-agent.mjs", import.meta.url))],
+    env: { ...process.env, ACP_FAKE_RECORDING: recording, ACP_FAKE_PID_FILE: pidFile },
+    prompt: "question-cancel-hang", inputTimeoutMs: 10, cancelTimeoutMs: 20,
+    onExecutorEvent: event => events.push(event) })), error => error.code === "INPUT_TIMEOUT");
+  assert.equal(readJobFile(resolveJobFile(cwd, job.id)).status, "failed");
+  const failed = events.filter(event => event.type === "job.failed");
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].payload.reason.backendCode, "INPUT_TIMEOUT");
+  assert.match(fs.readFileSync(recording, "utf8"), /"method":"session\/cancel"/);
+  assert.throws(() => process.kill(Number(fs.readFileSync(pidFile, "utf8")), 0), { code: "ESRCH" });
 });
 
 test("ACP notifications retain unacknowledged notes and publish under the current queued job", async () => {
@@ -122,5 +153,29 @@ test("thread executor resolution preserves Codex and complete ACP launch identit
     assert.equal(resolved.executor, executor);
     assert.deepEqual(resolved.previous.executorArgs, request.executorArgs);
     assert.throws(() => resolveTaskExecutor(cwd, job.threadId, { "executor-preset": "agy" }), /belongs to executor/);
+  }
+});
+
+test("legacy custom ACP launchers have unknown presets, distinct from explicit generic ACP", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = makeTempDir();
+  for (const recorded of [undefined, "agy", "acp"]) {
+    const request = { executorCommand: "/custom/my-launcher", executorArgs: ["--custom"],
+      ...(recorded ? { executorPreset: recorded } : {}) };
+    const job = { id: `old-${recorded}`, executor: "acp", workspaceRoot: cwd,
+      threadId: `thread-${recorded}`, request };
+    upsertJob(cwd, job);
+    writeJobFile(cwd, job.id, job);
+    if (!recorded) assert.equal(resolveTaskExecutor(cwd, job.threadId, {}).preset, null);
+    for (const alias of ["agy", "antigravity"]) {
+      const options = { "executor-preset": alias, "executor-command": request.executorCommand,
+        "executor-args": JSON.stringify(request.executorArgs) };
+      if (recorded === "acp") assert.throws(() => resolveTaskExecutor(cwd, job.threadId, options), /belongs to executor "acp"/);
+      else {
+        const resolved = resolveTaskExecutor(cwd, job.threadId, options);
+        assert.equal(resolved.preset, "antigravity");
+        assert.deepEqual(resolved.previous, request);
+      }
+    }
   }
 });

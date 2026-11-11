@@ -199,13 +199,14 @@ class FakeAgent {
       await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(response.outcome) } });
       return { stopReason: response.outcome.outcome === "cancelled" ? "cancelled" : "end_turn" };
     }
-    if (text === "question") {
+    if (text === "question" || text === "question-cancel-hang") {
       const response = await this.connection.createElicitation({ mode: "form", sessionId: params.sessionId, message: "Choose values",
         requestedSchema: { type: "object", required: ["name", "choice"], properties: {
           name: { type: "string", title: "Name" }, choice: { type: "string", enum: ["a", "b"], title: "Choice" },
           tags: { type: "array", items: { type: "string", enum: ["x", "y"] }, title: "Tags" }, enabled: { type: "boolean", title: "Enabled" }
         } } });
       await this.update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(response) } });
+      if (text === "question-cancel-hang") return new Promise(() => {});
       return { stopReason: response.action === "cancel" ? "cancelled" : "end_turn" };
     }
     if (text === "terminal-tool-calls") {

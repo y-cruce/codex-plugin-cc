@@ -413,13 +413,13 @@ function executorPreset(value) {
 
 function trackedPreset(job, request) {
   if ((job.executor ?? "codex") === "codex") return "codex";
-  if (request.executorPreset) return request.executorPreset;
+  if (request.executorPreset) return executorPreset(request.executorPreset);
   const command = request.executorCommand ?? "";
   if (/^(?:agy(?:_acp_server(?:\.par)?)?|antigravity(?:-acp)?)$/.test(path.basename(command)) ||
       command.includes("/agy-acp/acp-proxy.mjs")) return "antigravity";
   if (/^dsh(?:-acp)?$/.test(path.basename(command))) return "dsh";
   if (/^qoder(?:cli)?$/.test(path.basename(command))) return "qoder";
-  return "acp";
+  return null;
 }
 
 export function resolveTaskExecutor(workspaceRoot, threadId, options) {
@@ -433,10 +433,11 @@ export function resolveTaskExecutor(workspaceRoot, threadId, options) {
   const executor = job.executor ?? "codex";
   const previous = job.request ?? {};
   const original = trackedPreset(job, previous);
-  if ((preset && preset !== original) || (options.executor && options.executor !== executor)) {
-    throw new Error(`Thread ${threadId} belongs to executor "${original}"; cannot continue with "${preset ?? options.executor}". Omit executor to reuse the original.`);
+  const requested = options.executor ?? (preset ? (preset === "codex" ? "codex" : "acp") : null);
+  if ((original && preset && preset !== original) || (requested && requested !== executor)) {
+    throw new Error(`Thread ${threadId} belongs to executor "${original ?? `${executor} (unknown preset)`}"; cannot continue with "${preset ?? options.executor}". Omit executor to reuse the original.`);
   }
-  return { preset: original, executor, previous };
+  return { preset: original ?? preset, executor, previous };
 }
 
 async function executeReviewRun(request) {
