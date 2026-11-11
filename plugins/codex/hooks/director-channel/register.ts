@@ -28,6 +28,12 @@ export function directorChannel(): DirectorChannel {
   return { pid: '', bound: '' }
 }
 
+// `scripts/director-channel.mjs` exits with this when a confirm did not happen:
+// no channel for this Claude process, or the channel answered without
+// confirming. Verified there; kept as a number here because the hooks module
+// may only import files Claude Code's load scan accepts.
+const UNCONFIRMED_EXIT = 3
+
 async function controlDirector($: EngineInterface, director: DirectorChannel, sessionId: string, nonce?: string) {
   if (!director.pid) {
     const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 2000 })
@@ -35,6 +41,7 @@ async function controlDirector($: EngineInterface, director: DirectorChannel, se
     director.pid = ran.stdout.trim()
   }
   const result = await $.process.run(['node', `${$.plugin.root}/scripts/director-channel.mjs`, nonce ? 'confirm' : 'bind', director.pid, sessionId, ...(nonce ? [nonce] : [])], { timeoutMs: 5000 })
+  if (result.exitCode === UNCONFIRMED_EXIT) throw new Error((result.stderr ?? '').trim() || 'The Codex director channel did not confirm')
   if (result.exitCode !== 0) throw new Error(result.stderr || 'Could not bind Codex director channel')
   director.bound = sessionId
 }
@@ -86,9 +93,17 @@ export async function admitDirector($: EngineInterface, director: DirectorChanne
   const attributes = channel ? /^\s*<channel\b([^>]*)>/.exec(e.text)?.[1] ?? '' : ''
   const nonce = /\bevent="probe"/.test(attributes) && new RegExp(`${PROBE} ([^\\s:<]+)`).exec(e.text)?.[1]
   if (nonce) {
-    try { await controlDirector($, director, sessionId, nonce) }
-    catch (error) { $.ui.log(String(error), { to: 'debug' }) }
-    return { drop: 'Codex director channel confirmed' }
+    try {
+      await controlDirector($, director, sessionId, nonce)
+      return { drop: 'Codex director channel confirmed' }
+    }
+    catch (error) {
+      // A probe the channel never confirmed is not a confirmation. Say so, and
+      // leave the reason in the debug log: the channel keeps re-probing.
+      const reason = error instanceof Error ? error.message : String(error)
+      $.ui.log(`Codex director channel probe failed: ${reason}`, { to: 'debug' })
+      return { drop: 'Codex director channel not confirmed' }
+    }
   }
   const owner = /\bsession="([^"]+)"/.exec(attributes)?.[1]
   if (owner && owner !== sessionId) return { drop: 'Codex event belongs to another session' }

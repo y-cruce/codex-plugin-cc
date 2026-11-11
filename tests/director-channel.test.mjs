@@ -466,17 +466,76 @@ test("the independent ingress hook binds lifecycle sessions, confirms probes and
   assert.equal(await submit(engine, { origin, text: '<channel session="cleared">note</channel>' }, async () => "passed"), "passed");
 });
 
-test("binding the session `claude -r` resumes probes again after the startup round ran out", async (t) => {
+test("binding the session `claude -r` starts the fast round over after the slow one has taken over", async (t) => {
   const h = fixture(t);
   const probes = [];
-  const channel = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 1234, probeMs: 1, send: async (message) => { probes.push(message); } });
+  const channel = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 1234, probeMs: 1, slowProbeMs: 3600000,
+    send: async (message) => { probes.push(message); } });
   await channel.start("picker");
   t.after(() => channel.close());
   channel.initialized = true;
   channel.startProbing();
-  await waitFor(() => probes.length === 6 && !fs.existsSync(channel.files.probing), "the startup round to run out");
+  await waitFor(() => probes.length === 6, "the startup round");
+  // Only the slow cadence is left, so nothing more arrives without a rebind.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(probes.length, 6, "an unconfirmed channel waits for its slow probe");
   await channel.handle({ action: "bind", sessionId: h.job.sessionId, instance: channel.instance });
   await waitFor(() => probes.length > 6, "a probe for the resumed session");
+});
+
+test("an unconfirmed channel keeps re-probing slowly and stops at confirmation", async (t) => {
+  const h = fixture(t);
+  const probes = [];
+  const channel = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 1234, probeMs: 1, slowProbeMs: 20,
+    send: async (message) => { probes.push(message); } });
+  await channel.start("session");
+  t.after(() => channel.close());
+  channel.initialized = true;
+  channel.startProbing();
+  await waitFor(() => probes.length === 6, "the startup round");
+  assert.equal(fs.existsSync(channel.files.probing), true, "a probe in flight keeps its hold marker");
+  // The startup round no longer runs out: probes continue past it.
+  await waitFor(() => probes.length > 8, "re-probing after the startup round");
+  assert.equal(channel.confirmed, false);
+  await channel.handle({ action: "confirm", sessionId: "session", instance: channel.instance, nonce: channel.nonce });
+  assert.equal(channel.confirmed, true);
+  const settled = probes.length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(probes.length, settled, "a confirmed channel never probes again");
+  assert.equal(fs.existsSync(channel.files.probing), false, "confirmation removes the hold marker");
+});
+
+test("the hold marker expires between slow probes so the pane falls back to the Monitor", async (t) => {
+  const h = fixture(t);
+  const channel = new DirectorChannel({ root: h.root, dir: h.dir, claudePid: 1234, holdMs: 1000,
+    send: async () => assert.fail("no probe without startProbing") });
+  await channel.start("session");
+  t.after(() => channel.close());
+  assert.equal(fs.existsSync(channel.files.probing), true, "the marker starts with the channel");
+  await waitFor(() => !fs.existsSync(channel.files.probing), "the hold marker to expire on its own");
+  assert.equal(channel.confirmed, false, "an expired hold leaves the channel unconfirmed");
+});
+
+test("a probe the channel did not confirm is never reported as confirmed", async (t) => {
+  const h = fixture(t);
+  const { directorChannel } = await import("../plugins/codex/hooks/director-channel/register.ts");
+  const origin = { kind: "channel", server: "plugin:codex:director" };
+  const text = '<channel event="probe">codex-director-channel-probe 1-nonce: check</channel>';
+  const logs = [];
+  const engine = (exitCode, stderr) => ({ plugin: { root: "/plugin" }, session: { id: async () => "session" },
+    process: { run: async (args) => args[0] === "sh" ? { exitCode: 0, stdout: "4242", stderr: "" } : { exitCode, stdout: "", stderr } },
+    env: { get: async () => undefined, set: async () => {} }, ui: { log: (message) => logs.push(message) } });
+  const failed = await admitDirector(engine(3, "No Codex director channel is running for Claude 4242.\n"), directorChannel(), { origin, text });
+  assert.equal(failed.drop, "Codex director channel not confirmed");
+  assert.ok(logs.some((line) => line.includes("probe failed") && line.includes("No Codex director channel is running")));
+  const confirmed = await admitDirector(engine(0, ""), directorChannel(), { origin, text });
+  assert.equal(confirmed.drop, "Codex director channel confirmed");
+  // The CLI contract the hook relies on: no channel for the process exits 3.
+  const { spawnSync } = await import("node:child_process");
+  const missing = spawnSync(process.execPath, [path.resolve("plugins/codex/scripts/director-channel.mjs"), "confirm", "999999", "session", "1-nonce"],
+    { encoding: "utf8", env: { ...process.env, TMPDIR: h.dir } });
+  assert.equal(missing.status, 3);
+  assert.match(missing.stderr, /No Codex director channel is running/);
 });
 
 test("the MCP stdio server probes, restarts over a stale lease and replays accepted items before ACK", async (t) => {

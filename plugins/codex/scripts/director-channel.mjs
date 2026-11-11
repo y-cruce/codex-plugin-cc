@@ -15,6 +15,16 @@ import { channelDirectory, channelRequest, deliveryRoot, deliverDirectorEvents, 
 
 export const PROBE = "codex-director-channel-probe";
 const HOLD_MS = 15000;
+// The startup round. A fresh connection can miss every probe in it: after a
+// plugin reload the host registers the channel only at the session's next
+// turn, and the round is over long before then. The round is therefore not the
+// last word -- an unconfirmed channel keeps asking, slowly, for the rest of its
+// life. Six probes span about a minute; the slow one repeats every minute after.
+const FAST_PROBES = 6;
+const SLOW_PROBE_MS = 60000;
+// `director-channel.mjs confirm` exits with this when the channel did not
+// confirm, so the probe hook can report the failure instead of a confirmation.
+export const UNCONFIRMED_EXIT = 3;
 const INSTRUCTIONS = "Each message reports an event of a Codex job this session dispatched: a job completed, failed or was cancelled, "
   + "asked a question (question.opened, with the request id and every question id and option), or sent a note (director.notified). "
   + "The job attribute is the job id for the codex result, status, answer and message tools. The id attribute is stable across "
@@ -39,7 +49,8 @@ export function paths(claudePid, dir = channelDirectory()) {
 }
 
 export class DirectorChannel {
-  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send, retryMs = 1000, rescanMs = 30000, probeMs = 2000 }) {
+  constructor({ claudePid = process.ppid, root = deliveryRoot(), dir = channelDirectory(), send, retryMs = 1000, rescanMs = 30000,
+    probeMs = 2000, slowProbeMs = SLOW_PROBE_MS, holdMs = HOLD_MS }) {
     this.root = root;
     this.files = paths(claudePid, dir);
     this.instance = randomUUID();
@@ -49,6 +60,8 @@ export class DirectorChannel {
     this.retryMs = retryMs;
     this.rescanMs = rescanMs;
     this.probeMs = probeMs;
+    this.slowProbeMs = slowProbeMs;
+    this.holdMs = holdMs;
     // Set once the host has initialized; only then may probes be sent.
     this.initialized = false;
     this.sessionId = null;
@@ -67,7 +80,7 @@ export class DirectorChannel {
     sweepDirectorSessions(this.root);
     fs.mkdirSync(path.dirname(this.files.server), { recursive: true });
     fs.rmSync(this.files.confirmed, { force: true });
-    durableJson(this.files.probing, { at: Date.now(), until: Date.now() + HOLD_MS, nonce: this.nonce });
+    this.holdProbe();
     this.server = net.createServer((socket) => {
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));
@@ -130,27 +143,45 @@ export class DirectorChannel {
     else if (this.initialized) this.startProbing();
   }
 
-  // Probes until a prompt.submit confirms one, 6 at most, each wait twice the
-  // last (about a minute in all). The host loses a probe sent before it
-  // registers the channel, but queues every later one while a picker or dialog
-  // is open, then shows each as a dropped prompt. A bind to a new session
-  // starts over: `claude -r` binds the session it resumes only after its
-  // picker, by when the first round may have run out unseen.
+  // Probes until a prompt.submit confirms one: six in the first minute, each
+  // wait twice the last, then one about every minute until the process exits.
+  // The host loses a probe sent before it registers the channel, but queues
+  // every later one while a picker or dialog is open, then shows each as a
+  // dropped prompt. Reload can leave a connection unregistered for longer than
+  // the first round, and a resumed session (`claude -r`) binds only after its
+  // picker, so running out of probes must not be final.
   startProbing() {
     clearTimeout(this.probing);
-    durableJson(this.files.probing, { at: Date.now(), until: Date.now() + HOLD_MS, nonce: this.nonce });
     let probes = 0;
     const probe = () => {
-      if (this.confirmed || ++probes > 6) {
-        fs.rmSync(this.files.probing, { force: true });
-        return;
-      }
+      if (this.closed || this.confirmed) { this.stopProbing(); return; }
+      this.holdProbe();
       this.send({ jsonrpc: "2.0", method: "notifications/claude/channel", params: {
         content: `${PROBE} ${this.nonce}: checking that this channel reaches the session. No action needed.`, meta: { event: "probe" },
       } }).catch(() => {});
-      this.probing = setTimeout(probe, this.probeMs * 2 ** (probes - 1));
+      probes += 1;
+      this.probing = setTimeout(probe, probes < FAST_PROBES ? this.probeMs * 2 ** (probes - 1) : this.slowProbeMs);
     };
     probe();
+  }
+
+  // The pane reads this marker as "a probe may be in flight: hold the Monitor".
+  // Each probe refreshes it and every refresh expires on its own, so a channel
+  // that cannot confirm still falls back to the Monitor between probes instead
+  // of holding the pane forever.
+  holdProbe() {
+    durableJson(this.files.probing, { at: Date.now(), until: Date.now() + this.holdMs, nonce: this.nonce });
+    clearTimeout(this.hold);
+    this.hold = setTimeout(() => {
+      if (this.closed || this.confirmed) return;
+      fs.rmSync(this.files.probing, { force: true });
+    }, this.holdMs);
+  }
+
+  stopProbing() {
+    clearTimeout(this.probing);
+    clearTimeout(this.hold);
+    fs.rmSync(this.files.probing, { force: true });
   }
 
   saveRoute() {
@@ -158,7 +189,7 @@ export class DirectorChannel {
     durableJson(path.join(sessionDirectory(this.root, this.sessionId), "route.json"), route);
     if (this.confirmed) {
       this.confirmation();
-      fs.rmSync(this.files.probing, { force: true });
+      this.stopProbing();
     }
   }
 
@@ -237,6 +268,7 @@ export class DirectorChannel {
     clearInterval(this.safety);
     clearInterval(this.retention);
     clearTimeout(this.probing);
+    clearTimeout(this.hold);
     this.watcher?.close();
     clearTimeout(this.retry);
     for (const socket of this.sockets) socket.destroy();
@@ -254,7 +286,20 @@ async function main() {
   const [action, pid, sessionId, nonce] = process.argv.slice(2);
   if (action === "bind" || action === "confirm") {
     const server = readJson(paths(pid).server);
-    if (server) await channelRequest(server.endpoint, { action, sessionId, nonce, instance: server.instance });
+    if (!server) {
+      // A bind with no channel running is simply nothing to do. A confirm must
+      // never look like one that happened, so it exits UNCONFIRMED_EXIT.
+      if (action === "confirm") {
+        process.stderr.write(`No Codex director channel is running for Claude ${pid}.\n`);
+        process.exitCode = UNCONFIRMED_EXIT;
+      }
+      return;
+    }
+    const result = await channelRequest(server.endpoint, { action, sessionId, nonce, instance: server.instance });
+    if (action === "confirm" && result?.confirmed !== true) {
+      process.stderr.write(`The Codex director channel did not confirm this probe: ${JSON.stringify(result ?? null)}\n`);
+      process.exitCode = UNCONFIRMED_EXIT;
+    }
     return;
   }
   const send = (message) => new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve()));
