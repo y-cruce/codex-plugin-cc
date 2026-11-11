@@ -68,9 +68,9 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("new Antigravity sessions default to Argon high or Opus medium, honor overrides and preserve resumed sessions", async () => {
+test("new Antigravity sessions default to Carbon high or Opus medium, honor overrides and preserve resumed sessions", async () => {
   for (const row of [
-    { agent: "antigravity-acp", model: "gemini-4-argon", effort: "high" },
+    { agent: "antigravity-acp", model: "gemini-4-carbon", effort: "high" },
     { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "antigravity-acp", request: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
@@ -80,7 +80,7 @@ test("new Antigravity sessions default to Argon high or Opus medium, honor overr
   ]) {
     const h = recordingPort([
       { type: "select", id: "model", currentValue: "gemini-3.8-flash",
-        options: ["claude-opus-5-5", "gemini-4-argon", "gemini-3.8-flash"].map(value => ({ value })) },
+        options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-3.8-flash"].map(value => ({ value })) },
       { type: "select", id: "thinking_level", currentValue: "low",
         options: ["low", "medium", "high"].map(value => ({ value })) }
     ], row.overrides);

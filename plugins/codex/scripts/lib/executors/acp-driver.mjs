@@ -401,7 +401,7 @@ export class AcpExecutorJobPort {
       additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
     const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
-    const modelId = request.modelId ?? this.modelId ?? (antigravity ? "gemini-4-argon" : null);
+    const modelId = request.modelId ?? this.modelId ?? (antigravity ? "gemini-4-carbon" : null);
     await this.applyModel(response.sessionId, response, modelId);
     const defaultEffort = antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null;
     const effortId = await this.applyReasoningEffort(response.sessionId, response,
