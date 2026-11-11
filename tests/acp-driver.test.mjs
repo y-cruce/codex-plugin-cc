@@ -69,6 +69,7 @@ function recordingPort(configOptions, options = {}) {
 }
 
 test("new Antigravity sessions default to Carbon high or Opus medium, honor overrides and preserve resumed sessions", async () => {
+  const home = makeTempDir();
   for (const row of [
     { agent: "antigravity-acp", model: "gemini-4-carbon", effort: "high" },
     { agent: "antigravity-acp", env: "claude-opus-5-5", model: "claude-opus-5-5", effort: "medium" },
@@ -84,7 +85,7 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
         options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-3.8-flash"].map(value => ({ value })) },
       { type: "select", id: "thinking_level", currentValue: "low",
         options: ["low", "medium", "high"].map(value => ({ value })) }
-    ], row.overrides);
+    ], { env: { HOME: home }, ...row.overrides });
     h.port.initializeResponse = { agentInfo: { name: row.agent } };
     h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });
     h.port.connection.resumeSession = async () => h.response;

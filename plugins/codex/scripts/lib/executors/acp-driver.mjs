@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { ReadableStream, WritableStream } from "node:stream/web";
@@ -12,6 +13,7 @@ import { ExecutorEventQueue } from "../executor-port.mjs";
 import { DirectorPublisher } from "../director-delivery.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
+import { antigravityMcpServers, antigravitySkillDirectories } from "./antigravity-session.mjs";
 import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
 
 const CAPABILITIES = Object.freeze({
@@ -288,7 +290,7 @@ export class AcpExecutorJobPort {
 
   events() { return this.queue; }
 
-  async sessionResult(sessionId, response) {
+  async sessionResult(sessionId, response, warnings = []) {
     this.sessionId = sessionId;
     const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
     this.recordId = binding.recordId ?? this.job.id;
@@ -296,6 +298,9 @@ export class AcpExecutorJobPort {
     this.modes = response.modes ?? null;
     this.capabilities.sessionModes = Boolean(this.modes);
     this.configOptions = response.configOptions ?? [];
+    for (const message of warnings) {
+      await this.adapter.emit("source.warning", { code: "ANTIGRAVITY_MCP_CONFIG", message });
+    }
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
   }
 
@@ -396,9 +401,24 @@ export class AcpExecutorJobPort {
     return selected;
   }
 
+  sessionRequest(request) {
+    const params = { cwd: request.cwd ?? this.cwd, additionalDirectories: request.additionalDirectories ?? [],
+      mcpServers: mapMcpServers(request.mcpServers ?? []) };
+    if (this.initializeResponse.agentInfo?.name !== "antigravity-acp") return { params };
+    const home = this.env.HOME || os.homedir();
+    const geminiHome = this.env.GEMINI_HOME?.replace(/^~(?=\/|$)/, home) || path.join(home, ".gemini");
+    const codexHome = this.env.CODEX_HOME || path.join(home, ".codex");
+    const directories = antigravitySkillDirectories(params.cwd, { home, geminiHome, codexHome });
+    params.additionalDirectories = [...new Set([...params.additionalDirectories, ...directories])];
+    const { mcpServers, warnings } = antigravityMcpServers(geminiHome, this.initializeResponse.agentCapabilities?.mcpCapabilities,
+      params.mcpServers);
+    params.mcpServers = mcpServers;
+    return { params, warnings };
+  }
+
   async startSession(request) {
-    const response = await this.connection.newSession({ cwd: request.cwd ?? this.cwd,
-      additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
+    const { params, warnings } = this.sessionRequest(request);
+    const response = await this.connection.newSession(params);
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
     const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
     const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-4-carbon" : null);
@@ -406,20 +426,20 @@ export class AcpExecutorJobPort {
     const defaultEffort = antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null;
     const effortId = await this.applyReasoningEffort(response.sessionId, response,
       request.effortId ?? this.effortId ?? defaultEffort);
-    return { ...await this.sessionResult(response.sessionId, response), effortId };
+    return { ...await this.sessionResult(response.sessionId, response, warnings), effortId };
   }
 
   async resumeSession(request) {
     if (!this.capabilities.resumeSession) throw Object.assign(new Error("ACP agent does not support session/resume."), { code: "UNSUPPORTED_CAPABILITY" });
-    const response = await this.connection.resumeSession({ sessionId: request.sessionId, cwd: request.cwd ?? this.cwd,
-      additionalDirectories: request.additionalDirectories ?? [], mcpServers: mapMcpServers(request.mcpServers ?? []) });
+    const { params, warnings } = this.sessionRequest(request);
+    const response = await this.connection.resumeSession({ sessionId: request.sessionId, ...params });
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
     // A resumed session keeps the model it was created on. The default is ours
     // to pick when a session is new; imposing it here would switch a thread
     // that a dispatch had deliberately started somewhere else.
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
-    return { ...await this.sessionResult(request.sessionId, response), effortId };
+    return { ...await this.sessionResult(request.sessionId, response, warnings), effortId };
   }
 
   async setMode(request) {
