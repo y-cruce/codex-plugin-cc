@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { ReadableStream, WritableStream } from "node:stream/web";
-import { AgentSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclientprotocol/sdk";
+import { AgentSideConnection, PROTOCOL_VERSION, RequestError, ndJsonStream } from "@agentclientprotocol/sdk";
 
 if (process.env.ACP_FAKE_PID_FILE) fs.writeFileSync(process.env.ACP_FAKE_PID_FILE, `${process.pid}\n`);
 
@@ -31,6 +31,12 @@ function record(value) {
 
 async function waitForRelease(file) {
   while (!fs.existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+async function startupFailure(phase) {
+  if (process.env.ACP_FAKE_STARTUP_ERROR !== phase) return;
+  await new Promise(resolve => process.stderr.write(`discarded startup prefix\n${"x".repeat(8192)}\nstartup stderr tail\n`, resolve));
+  throw new RequestError(-32603, "Internal error", { detail: "fake startup detail" });
 }
 
 const modes = { currentModeId: "default", availableModes: ["default", "acceptEdits", "auto", "dontAsk", "yolo"].map((id) => ({ id, name: id, description: null })) };
@@ -65,17 +71,19 @@ class FakeAgent {
     if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "unsupported") this.setSessionConfigOption = undefined;
   }
 
-  initialize(params) {
+  async initialize(params) {
     record({ method: "initialize", params });
+    await startupFailure("initialize");
     if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
-    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli", version: "test" },
+    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: process.env.ACP_FAKE_AGENT_NAME ?? (dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli"), version: "test" },
       agentCapabilities: { loadSession: !dsh,
       sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true },
       ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}) }, authMethods: [] };
   }
 
-  newSession(params) {
+  async newSession(params) {
     record({ method: "session/new", params });
+    await startupFailure("session/new");
     const sessionId = `fake-${crypto.randomUUID()}`;
     this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null, cancelCount: 0 });
@@ -86,8 +94,9 @@ class FakeAgent {
   loadSession() { throw new Error("session/load must not be used"); }
   authenticate() { return {}; }
 
-  resumeSession(params) {
+  async resumeSession(params) {
     record({ method: "session/resume", params });
+    await startupFailure("session/resume");
     if (dsh && !this.sessions.has(params.sessionId)) throw new Error("unknown persisted session");
     const session = this.sessions.get(params.sessionId) ?? { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null };
@@ -101,7 +110,8 @@ class FakeAgent {
     }
   }
 
-  setSessionMode(params) {
+  async setSessionMode(params) {
+    await startupFailure("ready");
     if (dsh) throw new Error("DSH does not support session/set_mode");
     record({ method: "session/set_mode", params });
     this.sessions.get(params.sessionId).mode = params.modeId;
@@ -159,6 +169,11 @@ class FakeAgent {
   async prompt(params) {
     const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     record({ method: "session/prompt", params });
+    if (text === "stderr") {
+      process.stderr.write(process.env.ACP_FAKE_STDERR);
+      await waitForRelease(process.env.ACP_FAKE_RELEASE_FILE);
+      return { stopReason: "end_turn" };
+    }
     if (qoderQueueing && text.startsWith("qoder-steer:")) {
       this.sessions.get(params.sessionId).steered = text.slice(12);
       // Installed Qoder consumes this input but leaves its prompt RPC pending.

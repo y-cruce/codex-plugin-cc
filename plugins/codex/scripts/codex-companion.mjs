@@ -1222,10 +1222,12 @@ async function handleStatus(argv) {
       snapshot.job.recordId = context.recordId;
       snapshot.job.activeRoundId = context.activeRoundId;
     }
-    if (context.layout === "legacy" || context.activeRoundId === snapshot.job.id) {
-      snapshot.job.live ??= await liveStatus(snapshot.workspaceRoot, snapshot.job);
-    } else {
-      snapshot.job.live = { unavailable: inactiveRoundMessage(snapshot.job.id, context.activeRoundId) };
+    if (isActiveJobStatus(snapshot.job.status)) {
+      if (context.layout === "legacy" || context.activeRoundId === snapshot.job.id) {
+        snapshot.job.live ??= await liveStatus(snapshot.workspaceRoot, snapshot.job);
+      } else {
+        snapshot.job.live = { unavailable: inactiveRoundMessage(snapshot.job.id, context.activeRoundId) };
+      }
     }
     if (isActiveJobStatus(snapshot.job.status) && snapshot.job.live?.questions?.length) snapshot.job.phase = "waiting-for-answer";
     const rendered = options.brief ? renderBriefJobStatus(snapshot.job) : renderJobStatusReport(snapshot.job);

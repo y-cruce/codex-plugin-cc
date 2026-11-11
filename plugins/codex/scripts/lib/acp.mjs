@@ -196,6 +196,7 @@ export async function runAcpTurn(cwd, options = {}) {
       executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId, controlEndpoint: port.controlEndpoint,
       executorEffort: session.effortId
     });
+    port.startupPhase = null;
     const prompt = options.prompt?.trim() || options.defaultPrompt || "";
     if (!prompt) throw new Error("A prompt is required for this ACP run.");
     const firstResult = await runRound(session.sessionId, [{ type: "text", text: prompt }], options.onProgress);
@@ -228,6 +229,7 @@ export async function runAcpTurn(cwd, options = {}) {
       }
     } };
   } catch (error) {
+    if (port.startupPhase) port.reportStartupFailure(error);
     await failQueuedRounds(error);
     await close();
     throw error;

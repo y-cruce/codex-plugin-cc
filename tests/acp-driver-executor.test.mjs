@@ -11,11 +11,91 @@ import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { createJobLogFile, createProgressReporter, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
+
+test("Antigravity harness fatal stderr fails the round before end_turn can publish completion", async (t) => {
+  isolateTestEnvironment(t);
+  const fatal = "I1111 local_connection.py:553] harness stderr: Agent run failed: no pending hook for ID hook_request_31\n";
+  const initialize = AcpExecutorJobPort.prototype.initialize;
+  let port;
+  t.mock.method(AcpExecutorJobPort.prototype, "initialize", function () {
+    port = this;
+    return initialize.call(this);
+  });
+  for (const [agent, stderr, fails] of [
+    ["antigravity-acp", fatal, true],
+    ["qoder-cli", fatal, false],
+    ["antigravity-acp", "ERROR ordinary tool error\nharness stderr: received model response error: context canceled\n", false]
+  ]) {
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: "acp-stderr", executor: "acp", workspaceRoot: cwd, status: "running" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const release = path.join(cwd, "release");
+    const events = [];
+    port = null;
+    const running = runAcpTurn(cwd, { jobId: job.id, prompt: "stderr", command: process.execPath, args: [AGENT], modelId: "efficient",
+      env: { ...process.env, HOME: cwd, GEMINI_HOME: cwd, CODEX_HOME: cwd, ACP_FAKE_AGENT_NAME: agent,
+        ACP_FAKE_STDERR: stderr, ACP_FAKE_RELEASE_FILE: release }, onExecutorEvent: event => events.push(event) })
+      .then(result => ({ result }), error => ({ error }));
+    await waitFor(() => port?.stderr.includes(stderr), "fake ACP stderr received");
+    fs.writeFileSync(release, "");
+    const { result, error } = await running;
+    if (result) await result.afterCompletion();
+    if (fails) {
+      assert.equal(error?.message, fatal.trimEnd());
+      assert.ok(events.some(event => event.type === "job.failed" && event.payload.error.message === fatal.trimEnd()));
+      assert.equal(events.some(event => ["turn.completed", "job.completed"].includes(event.type)), false);
+    } else {
+      assert.equal(error, undefined);
+      assert.equal(result.status, 0);
+    }
+  }
+});
+
+test("status skips live endpoints for finished ACP jobs including status --wait", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  for (const status of ["completed", "failed", "cancelled"]) {
+    const job = { id: `acp-${status}`, executor: "acp", workspaceRoot: cwd, status,
+      controlEndpoint: `unix:${path.join(cwd, "removed", "broker.sock")}` };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const result = run(process.execPath, [SCRIPT, "status", job.id, "--cwd", cwd, "--json", ...(status === "failed" ? ["--wait"] : [])], { cwd });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).job.live, undefined);
+  }
+});
+
+test("ACP startup failures log phase, RPC details and bounded stderr before cleanup", async (t) => {
+  isolateTestEnvironment(t);
+  for (const phase of ["initialize", "session/new", "session/resume", "ready"]) {
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: "acp-startup-evidence", executor: "acp", workspaceRoot: cwd, status: "queued" };
+    const logFile = createJobLogFile(cwd, job.id, "ACP test");
+    const progress = Object.assign(createProgressReporter({ logFile }), { jobId: job.id });
+    await assert.rejects(runTrackedJob({ ...job, logFile }, () => runAcpTurn(cwd, {
+      jobId: job.id, prompt: "basic", command: process.execPath, args: [AGENT], modeId: "default", onProgress: progress,
+      ...(phase === "session/resume" ? { resumeSessionId: "fake-session" } : {}),
+      env: { ...process.env, ACP_FAKE_STARTUP_ERROR: phase }
+    })), /Internal error/);
+    const log = fs.readFileSync(logFile, "utf8");
+    assert.match(log, new RegExp(`"phase": "${phase}"`));
+    assert.match(log, /"code": -32603/);
+    assert.match(log, /"detail": "fake startup detail"/);
+    assert.match(log, /startup stderr tail/);
+    assert.doesNotMatch(log, /discarded startup prefix/);
+    assert.ok(Buffer.byteLength(log) < 6000, `startup log too large: ${Buffer.byteLength(log)}`);
+    const stored = readJobFile(resolveJobFile(cwd, job.id));
+    assert.equal(stored.status, "failed");
+    assert.doesNotMatch(JSON.stringify(stored), /startup stderr tail/);
+  }
+});
 
 test("companion selects the ACP executor without changing the Codex default", (t) => {
   isolateTestEnvironment(t);

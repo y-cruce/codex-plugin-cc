@@ -222,6 +222,7 @@ export class AcpExecutorJobPort {
     this.activeTurn = null;
     this.replacementPrompt = null;
     this.stderr = "";
+    this.startupPhase = "initialize";
     this.updateTail = Promise.resolve();
   }
 
@@ -232,9 +233,17 @@ export class AcpExecutorJobPort {
       await port.initialize();
       return port;
     } catch (error) {
+      port.reportStartupFailure(error);
       await port.close().catch(() => {});
       throw error;
     }
+  }
+
+  reportStartupFailure(error) {
+    this.onProgress?.({ message: `ACP startup failed (${this.startupPhase}): ${error.message ?? error}`,
+      logTitle: "ACP startup failure", logBody: JSON.stringify({ phase: this.startupPhase,
+        message: error.message ?? String(error), code: error.code ?? null, data: error.data ?? error.cause?.data ?? null,
+        stderrTail: Buffer.from(this.stderr).subarray(-4096).toString("utf8") }, null, 2) });
   }
 
   createAdapter(job) {
@@ -274,7 +283,13 @@ export class AcpExecutorJobPort {
     this.proc = spawn(this.command, this.args, { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32", windowsHide: true });
     this.proc.stderr.setEncoding("utf8");
-    this.proc.stderr.on("data", (chunk) => { this.stderr += chunk; });
+    this.proc.stderr.on("data", (chunk) => {
+      this.stderr += chunk;
+      const turn = this.activeTurn;
+      if (this.initializeResponse?.agentInfo?.name !== "antigravity-acp" || !turn?.accepting) return;
+      const fatal = this.stderr.slice(turn.stderrOffset).match(/^[^\r\n]*harness stderr: Agent run failed:[^\r\n]*(?=\r?\n)/m)?.[0];
+      if (fatal) turn.error = new Error(fatal);
+    });
     this.exitPromise = new Promise((resolve) => {
       this.proc.once("exit", (code, signal) => {
         this.exit = { code, signal };
@@ -437,10 +452,12 @@ export class AcpExecutorJobPort {
   }
 
   async startSession(request) {
+    this.startupPhase = "session/new";
     const { params, warnings } = this.sessionRequest(request);
     const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
     if (antigravity) excludeGeneratedSkill(params.cwd);
     const response = await this.connection.newSession(params);
+    this.startupPhase = "ready";
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
     const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-4-carbon" : null);
     await this.applyModel(response.sessionId, response, modelId);
@@ -451,9 +468,11 @@ export class AcpExecutorJobPort {
   }
 
   async resumeSession(request) {
+    this.startupPhase = "session/resume";
     if (!this.capabilities.resumeSession) throw Object.assign(new Error("ACP agent does not support session/resume."), { code: "UNSUPPORTED_CAPABILITY" });
     const { params, warnings } = this.sessionRequest(request);
     const response = await this.connection.resumeSession({ sessionId: request.sessionId, ...params });
+    this.startupPhase = "ready";
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
     // A resumed session keeps the model it was created on. The default is ours
     // to pick when a session is new; imposing it here would switch a thread
@@ -478,7 +497,8 @@ export class AcpExecutorJobPort {
     if (this.activeTurn) throw Object.assign(new Error("A turn is already active."), { code: "INVALID_STATE" });
     const turnId = `turn:${crypto.randomUUID()}`;
     await this.adapter.startTurn(turnId, request.prompt);
-    const active = { turnId, interrupting: false, cancelling: false, accepting: true, messages: [], error: null };
+    const active = { turnId, interrupting: false, cancelling: false, accepting: true, messages: [], error: null,
+      stderrOffset: this.stderr.length };
     this.activeTurn = active;
     const failed = new Promise((_, reject) => { active.fail = reject; });
     active.done = Promise.race([this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
