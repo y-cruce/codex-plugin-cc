@@ -1,4 +1,4 @@
-import { directorEvent } from "./director-delivery.mjs";
+import { continuedSession, deliveryRoot, directorEvent } from "./director-delivery.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
@@ -282,7 +282,7 @@ export async function handleObserve(argv) {
     optionContext: "observe follow"
   } : {
     valueOptions: ["cwd", "after", "limit", "until", "max-seconds", ...(command === "threads" ? ["finished-after"] : []),
-      ...(command === "ack" ? ["ids"] : []), ...(command === "reported" ? ["session", "jobs"] : [])],
+      ...(command === "ack" ? ["ids"] : []), ...(command === "reported" ? ["session", "jobs"] : []), ...(command === "continued" ? ["sessions"] : [])],
     booleanOptions: ["json", "jsonl", "verbose", "quiet"],
     rejectUnknownOptions: true,
     optionContext: `observe ${command}`
@@ -291,7 +291,7 @@ export async function handleObserve(argv) {
   try {
     // Frequent pane reads must not sweep every workspace or race its writers.
     // The broker owns periodic and terminal-event history cleanup.
-    if (command !== "threads" && command !== "replay") await cleanupHistory(cwd);
+    if (!["threads", "replay", "continued"].includes(command)) await cleanupHistory(cwd);
     if (command === "list") {
       const roots = process.env.CLAUDE_PLUGIN_DATA ? [resolveStateDir(cwd)] : await observationRoots(cwd);
       const selected = new Map();
@@ -321,6 +321,12 @@ export async function handleObserve(argv) {
       let recorded = false;
       for (const stateDir of roots) recorded = await recordTerminalReports(stateDir, options.session, jobs) || recorded;
       await write(`${JSON.stringify({ recorded })}\n`);
+      return;
+    }
+    if (command === "continued") {
+      const sessions = Object.fromEntries(String(options.sessions ?? "").split(",").filter(Boolean)
+        .map((id) => [id, continuedSession(deliveryRoot(), id)]));
+      await write(`${JSON.stringify({ sessions })}\n`);
       return;
     }
     if (command === "threads") {

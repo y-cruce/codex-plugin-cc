@@ -71,6 +71,8 @@ type State = {
   unreadable: Map<string, number>
   owners: Map<string, string[]>
   rootIds: Map<string, Set<string>>
+  // Sessions moved to the background as this one: their jobs are this session's.
+  continued: Set<string>
   pending: { jobId: string; cwd: string; text: string; type?: string; notificationId?: string; delivery?: any; fallback?: boolean }[]
   worker: string
   toEnd: boolean
@@ -624,7 +626,8 @@ async function scanRoots($: EngineInterface, state: State) {
       if (workspace.kind === 'dir') workspaces.push(`${root}/${workspace.name}`)
     }
   }
-  await each(workspaces, async directory => {
+  const others = new Set<string>()
+  const visit = async (directory: string) => {
     for (const file of await $.fs.list(`${directory}/jobs`).catch(() => [])) {
       if (stale()) return
       if (!file.name.endsWith('.json')) continue
@@ -636,8 +639,12 @@ async function scanRoots($: EngineInterface, state: State) {
         const job = cached?.mtime === mtime ? cached.job : JSON.parse(await $.fs.read(path)) as Job
         if (stale()) return
         state.jobFiles.set(path, { mtime, job })
-        if (job.sessionId !== state.sessionId || !job.workspaceRoot) continue
+        if (!job.workspaceRoot) continue
         if (DONE.includes(job.status) && job.completedAt && Date.parse(job.completedAt) <= now - KEEP_MS) continue
+        if (job.sessionId !== state.sessionId && !state.continued.has(job.sessionId ?? '')) {
+          if (job.sessionId) others.add(job.sessionId)
+          continue
+        }
         roots.add(job.workspaceRoot)
         if (!job.id) continue
         const index = await $.fs.read(`${directory}/job-index/${job.id}.json`)
@@ -678,7 +685,19 @@ async function scanRoots($: EngineInterface, state: State) {
         }
       } catch { /* a half-written or foreign job file is retried next scan */ }
     }
-  })
+  }
+  await each(workspaces, visit)
+  // Another session's jobs may have been dispatched before this one took over
+  // its conversation; ask which of those sessions now continue here.
+  if (others.size && !stale()) {
+    const { sessions } = JSON.parse(await companion($, state, state.cwd, ['continued', '--sessions', [...others].join(',')])
+      .catch(() => '{}')) as { sessions?: Record<string, string> }
+    const found = Object.entries(sessions ?? {}).filter(([id, latest]) => latest === state.sessionId && !state.continued.has(id))
+    if (found.length && !stale()) {
+      for (const [id] of found) state.continued.add(id)
+      await each(workspaces, visit)
+    }
+  }
   if (!stale()) {
     state.roots = roots
     await refreshViews($, state, true)
@@ -766,6 +785,7 @@ function resetRows(state: State) {
   state.views.clear()
   state.owners.clear()
   state.rootIds.clear()
+  state.continued.clear()
   state.forgotten.clear()
   state.unreadable.clear()
   state.liveRoots.clear()
@@ -1421,7 +1441,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   const state: State = {
     cwd: '', home: '', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
-    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), forgotten: new Set<string>(), generation: 0,
+    owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), continued: new Set<string>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false, epoch: 0,
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),

@@ -56,7 +56,7 @@ export function directorEvent(job, type, payload = {}, stateDir = undefined) {
     ?? job.result?.terminal?.finalMessages?.findLast((message) => message.role === "assistant")?.text
     ?? payload.finalMessages?.findLast((message) => message.role === "assistant")?.text
     ?? job.result?.rawOutput ?? "";
-  return { eventId, sessionId: job.sessionId, cwd: job.request?.cwd ?? job.workspaceRoot,
+  return { eventId, sessionId: continuedSession(deliveryRoot(stateDir), job.sessionId), cwd: job.request?.cwd ?? job.workspaceRoot,
     ...(job.directorAgentId ? { directorAgentId: job.directorAgentId } : {}), stateDir, jobId: job.id, roundId: job.roundId ?? job.id, label: job.label ?? null, reportFile: job.reportFile ?? null, type,
     payload: terminal ? { status: job.status, errorMessage: job.errorMessage ?? job.result?.error?.message ?? null, ...payload } : payload,
     threadId: payload.threadId ?? job.executorSessionId ?? job.threadId ?? null, turnId: payload.turnId ?? job.turnId ?? null,
@@ -114,6 +114,45 @@ function directorTranscript(root, sessionId) {
     .filter(file => fs.existsSync(file)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   if (sources.length) registerDirectorTranscript(root, sessionId, sources[0]);
   return sources[0] ?? null;
+}
+
+// Moving a conversation to the background (left arrow) starts a new session
+// and ends the old transcript with a continued-in row naming it. Claude Code
+// reads it from the tail and stops at the first real turn after it, which a
+// resumed old session would have written. /branch and /fork write no such row.
+export function continuedIn(source) {
+  let fd;
+  try { fd = fs.openSync(source, "r"); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, 65536);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, size - length);
+    for (const line of buffer.toString("utf8").split("\n").slice(length < size ? 1 : 0).reverse()) {
+      if (!/"type":"(?:continued-in|user|assistant)"/.test(line)) continue;
+      let row;
+      try { row = JSON.parse(line); } catch { continue; }
+      if (row?.type === "continued-in" && typeof row.continuedInSessionId === "string") return row.continuedInSessionId;
+      if (row?.type === "user" || row?.type === "assistant") return null;
+    }
+    return null;
+  } finally { fs.closeSync(fd); }
+}
+
+// The session that now holds a job's conversation: its own, or the one it was
+// continued in, followed through repeated handoffs.
+export function continuedSession(root, sessionId) {
+  const seen = new Set();
+  let current = sessionId;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const source = directorTranscript(root, current);
+    const next = source ? continuedIn(source) : null;
+    if (!next) return current;
+    current = next;
+  }
+  return current;
 }
 
 export async function recoverConsumedDirectorEvents(root, sessionId) {

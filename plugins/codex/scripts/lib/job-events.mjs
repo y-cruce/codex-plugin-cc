@@ -1,4 +1,4 @@
-import { directorEvent, deliverDirectorEvents, confirmedRoute, deliveryRoot, pendingEvents, wasDelivered, deliveryTag, isDirectorEventPending } from "./director-delivery.mjs";
+import { continuedSession, directorEvent, deliverDirectorEvents, confirmedRoute, deliveryRoot, pendingEvents, wasDelivered, deliveryTag, isDirectorEventPending } from "./director-delivery.mjs";
 import { setTimeout } from "node:timers/promises";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -98,7 +98,8 @@ export async function streamJobEvents(cwd, { pollMs = 2000, questionRemindMs = D
   while (!signal?.aborted) {
     const report = snapshot(cwd, { all: true, threadRecords: false });
     const jobs = [...report.running, report.latestFinished, ...report.recent]
-      .filter((job) => job && (session === undefined || job.sessionId === session));
+      .filter((job) => job && (session === undefined || job.sessionId === session
+        || continuedSession(deliveryRoot(directorStateDir), job.sessionId) === session));
     if (signal?.aborted) break;
     if (session !== undefined) {
       for (const event of pendingEvents(deliveryRoot(directorStateDir), session)) {

@@ -139,6 +139,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (args[0] === "pgrep") return { exitCode: args[2].includes("the codex plugin stops this when they end")
         ? stored.get(`codex:tasks:${sessionId}:hold`)?.taskId ? 0 : 1 : options.watch === false ? 1 : 0, stdout: "123", stderr: "" };
       if (args.includes("ack") || args.includes("reported")) { acks.push(args); return { exitCode: 0, stdout: "{}", stderr: "" }; }
+      if (args.includes("continued")) return { exitCode: 0, stdout: JSON.stringify({ sessions: options.continued ?? {} }), stderr: "" };
       observed.push(init.cwd);
       if (args.includes('replay')) return { exitCode: 0, stdout: await options.replay(args), stderr: '' };
       if (threadRead) {
@@ -1141,6 +1142,41 @@ test("refresh or pruning discards an old concurrent view read", async () => {
     await pane.tick();
     await new Promise((resolve) => setImmediate(resolve));
     assert.doesNotMatch(await pane.render(), /Alpha task/, source);
+  }
+});
+
+test("a session moved to the background takes over its jobs; a branch copy does not", async (t) => {
+  isolateTestEnvironment(t);
+  const projects = path.join(makeTempDir(), "projects", "-work");
+  fs.mkdirSync(projects, { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = path.dirname(path.dirname(projects));
+  const [moved, background, original, branch] = ["1", "2", "3", "4"].map((digit) => `${digit.repeat(8)}-0000-4000-8000-000000000000`);
+  const row = (value) => `${JSON.stringify(value)}\n`;
+  // Left arrow: Claude Code ends the old transcript with continued-in (chunk-vr3fdvn1 zFe/dLi).
+  fs.writeFileSync(path.join(projects, `${moved}.jsonl`), [{ type: "user", sessionId: moved }, { type: "assistant", sessionId: moved },
+    { type: "continued-in", sessionId: moved, continuedInSessionId: background }, { type: "last-prompt", sessionId: moved }].map(row).join(""));
+  // /branch copies the conversation and leaves the original untouched.
+  for (const id of [background, original, branch]) fs.writeFileSync(path.join(projects, `${id}.jsonl`), row({ type: "user", sessionId: id }));
+  const cwd = makeTempDir();
+  for (const [id, sessionId] of [["job-moved", moved], ["job-original", original]]) {
+    writeJobFile(cwd, id, { id, workspaceRoot: cwd, sessionId, status: "running", pid: process.pid, directorPush: true });
+    const directory = path.join(resolveStateDir(cwd), "job-history", id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "live-view.json"), JSON.stringify({ schemaVersion: 1, jobId: id, status: "running", history: { continuity: "legacy" } }));
+  }
+  const owners = Object.fromEntries((await observationThreads(resolveStateDir(cwd))).map(({ thread }) => [thread.jobId, thread.sessionIds]));
+  assert.deepEqual(owners, { "job-moved": [moved, background], "job-original": [original] });
+  const stored = (id) => readStoredJob(cwd, id);
+  assert.equal(directorEvent(stored("job-moved"), "job.completed", {}, resolveStateDir(cwd)).sessionId, background);
+  assert.equal(directorEvent(stored("job-original"), "job.completed", {}, resolveStateDir(cwd)).sessionId, original);
+
+  // The pane finds the job's workspace from a job file that names the old session.
+  const base = "/home/test/.claude/plugins/data/codex/state/main";
+  const preset = [[`${base}/jobs/job-a.json`, { id: "job-a", sessionId: "old", workspaceRoot: "/other", status: "running" }]];
+  for (const [latest, shown] of [["new", true], ["old", false]]) {
+    const pane = await paneHarness(new Map(), undefined, "new", { workspaceRoot: "/other", preset, continued: { old: latest } });
+    await pane.tick();
+    assert.equal(/Alpha task/.test(await pane.render()), shown, latest);
   }
 });
 

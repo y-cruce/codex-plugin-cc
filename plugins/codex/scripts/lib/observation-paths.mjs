@@ -5,7 +5,7 @@ import { resolveJobHistoryAtStateDir } from "./history-resolver.mjs";
 import { resolveStateDir, resolveStateDirAtWorkspaceRoot } from "./state.mjs";
 import { threadRecordPaths } from "./thread-records.mjs";
 import { checkJobLiveness } from "./job-control.mjs";
-import { DirectorPublisher } from "./director-delivery.mjs";
+import { DirectorPublisher, continuedSession, deliveryRoot } from "./director-delivery.mjs";
 
 export async function readObservationJson(file) {
   try { return JSON.parse(await fs.readFile(file, "utf8")); }
@@ -168,8 +168,17 @@ export async function observationThreads(stateDir, { finishedAfter, sessionId = 
       layout: "thread-record"
     }, stateDir, mtime: Math.max(entry.mtime, await observationMtime(history.liveView)) });
   }
-  return [...threads.values()].filter(({ thread }) => finishedAfter === undefined || thread.activeRoundId !== null ||
+  const listed = [...threads.values()].filter(({ thread }) => finishedAfter === undefined || thread.activeRoundId !== null ||
     !validEndedAt(thread.endedAt) || Date.parse(thread.endedAt) > finishedAfter);
+  // A session moved to the background continues as a new one, which owns its jobs.
+  const continued = new Map();
+  for (const { thread } of listed) {
+    for (const id of thread.sessionIds) {
+      if (!continued.has(id)) continued.set(id, continuedSession(deliveryRoot(stateDir), id));
+    }
+    thread.sessionIds = [...new Set([...thread.sessionIds, ...thread.sessionIds.map(id => continued.get(id))])];
+  }
+  return listed;
 }
 
 const terminalStatus = (status) => ["completed", "failed", "cancelled"].includes(status);
