@@ -568,9 +568,9 @@ The updated code-director skill assigns frontend design, implementation, debuggi
 
 更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
 
-New Antigravity sessions default to `gemini-4-carbon` with `high` thinking. Selecting an Opus model defaults its thinking to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
+New Antigravity sessions default to `$CODEX_COMPANION_ANTIGRAVITY_MODEL`, else `gemini-4-carbon`, with `high` thinking. Selecting an Opus model defaults its thinking to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
 
-Antigravity 新会话默认使用 `gemini-4-carbon`、思考强度 `high`；选择 Opus 模型时，思考强度默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
+Antigravity 新会话默认使用 `$CODEX_COMPANION_ANTIGRAVITY_MODEL` 指定的模型，未设置时用 `gemini-4-carbon`，思考强度 `high`；选择 Opus 模型时，思考强度默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
 
 The local agy adapter reports `clientInfo.name: "zed"` on initialize. Official ACP 1.4.4 uses that client identity to include third-party models in the signed-in account's catalog. The catalog is returned and validated by the official server.
 
