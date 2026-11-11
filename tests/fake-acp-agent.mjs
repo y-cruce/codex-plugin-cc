@@ -2,10 +2,11 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { ReadableStream, WritableStream } from "node:stream/web";
+import { fileURLToPath } from "node:url";
 import { AgentSideConnection, PROTOCOL_VERSION, RequestError, ndJsonStream } from "@agentclientprotocol/sdk";
-
-if (process.env.ACP_FAKE_PID_FILE) fs.writeFileSync(process.env.ACP_FAKE_PID_FILE, `${process.pid}\n`);
 
 function nodeWritable(node) {
   return new WritableStream({
@@ -33,9 +34,9 @@ async function waitForRelease(file) {
   while (!fs.existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-async function startupFailure(phase) {
-  if (process.env.ACP_FAKE_STARTUP_ERROR !== phase) return;
-  await new Promise(resolve => process.stderr.write(`discarded startup prefix\n${"x".repeat(8192)}\nstartup stderr tail\n`, resolve));
+async function startupFailure(phase, { env, stderr }) {
+  if (env.ACP_FAKE_STARTUP_ERROR !== phase) return;
+  await new Promise(resolve => stderr.write(`discarded startup prefix\n${"x".repeat(8192)}\nstartup stderr tail\n`, resolve));
   throw new RequestError(-32603, "Internal error", { detail: "fake startup detail" });
 }
 
@@ -62,8 +63,10 @@ function configOptions(currentModel = modelValues()[0], currentEffort = null) {
 }
 
 class FakeAgent {
-  constructor(connection) {
+  constructor(connection, { env = process.env, stderr = process.stderr } = {}) {
     this.connection = connection;
+    this.env = env;
+    this.stderr = stderr;
     this.sessions = new Map();
     if (dsh && process.env.ACP_FAKE_SESSION_FILE && fs.existsSync(process.env.ACP_FAKE_SESSION_FILE)) {
       this.sessions = new Map(JSON.parse(fs.readFileSync(process.env.ACP_FAKE_SESSION_FILE, "utf8")));
@@ -73,9 +76,9 @@ class FakeAgent {
 
   async initialize(params) {
     record({ method: "initialize", params });
-    await startupFailure("initialize");
+    await startupFailure("initialize", this);
     if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
-    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: process.env.ACP_FAKE_AGENT_NAME ?? (dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli"), version: "test" },
+    return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: this.env.ACP_FAKE_AGENT_NAME ?? (dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli"), version: "test" },
       agentCapabilities: { loadSession: !dsh,
       sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true },
       ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}) }, authMethods: [] };
@@ -83,7 +86,7 @@ class FakeAgent {
 
   async newSession(params) {
     record({ method: "session/new", params });
-    await startupFailure("session/new");
+    await startupFailure("session/new", this);
     const sessionId = `fake-${crypto.randomUUID()}`;
     this.sessions.set(sessionId, { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null, cancelCount: 0 });
@@ -96,7 +99,7 @@ class FakeAgent {
 
   async resumeSession(params) {
     record({ method: "session/resume", params });
-    await startupFailure("session/resume");
+    await startupFailure("session/resume", this);
     if (dsh && !this.sessions.has(params.sessionId)) throw new Error("unknown persisted session");
     const session = this.sessions.get(params.sessionId) ?? { cwd: params.cwd, mode: "default", model: modelValues()[0],
       effort: reasoningEffortValues()?.[0] ?? null, cancelled: null };
@@ -111,7 +114,7 @@ class FakeAgent {
   }
 
   async setSessionMode(params) {
-    await startupFailure("ready");
+    await startupFailure("ready", this);
     if (dsh) throw new Error("DSH does not support session/set_mode");
     record({ method: "session/set_mode", params });
     this.sessions.get(params.sessionId).mode = params.modeId;
@@ -170,8 +173,8 @@ class FakeAgent {
     const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     record({ method: "session/prompt", params });
     if (text === "stderr") {
-      process.stderr.write(process.env.ACP_FAKE_STDERR);
-      await waitForRelease(process.env.ACP_FAKE_RELEASE_FILE);
+      this.stderr.write(this.env.ACP_FAKE_STDERR);
+      if (this.env.ACP_FAKE_RELEASE_FILE) await waitForRelease(this.env.ACP_FAKE_RELEASE_FILE);
       return { stopReason: "end_turn" };
     }
     if (qoderQueueing && text.startsWith("qoder-steer:")) {
@@ -262,5 +265,23 @@ class FakeAgent {
   }
 }
 
-const stream = ndJsonStream(nodeWritable(process.stdout), nodeReadable(process.stdin));
-new AgentSideConnection((connection) => new FakeAgent(connection), stream);
+export function createFakeAcpProcess(env) {
+  const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+    stderr: new PassThrough(), exitCode: null });
+  const stream = ndJsonStream(nodeWritable(child.stdout), nodeReadable(child.stdin));
+  new AgentSideConnection(connection => new FakeAgent(connection, { env, stderr: child.stderr }), stream);
+  child.stdin.once("finish", () => {
+    child.exitCode = 0;
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("exit", 0, null);
+  });
+  child.kill = () => { child.stdin.end(); return true; };
+  return child;
+}
+
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.env.ACP_FAKE_PID_FILE) fs.writeFileSync(process.env.ACP_FAKE_PID_FILE, `${process.pid}\n`);
+  const stream = ndJsonStream(nodeWritable(process.stdout), nodeReadable(process.stdin));
+  new AgentSideConnection((connection) => new FakeAgent(connection), stream);
+}

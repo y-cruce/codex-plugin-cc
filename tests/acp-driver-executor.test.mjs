@@ -1,32 +1,40 @@
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import os from "node:os";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
+import { handleStatus } from "../plugins/codex/scripts/codex-companion.mjs";
 import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { createJobLogFile, createProgressReporter, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
+import { createFakeAcpProcess } from "./fake-acp-agent.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 
+function useInProcessAgent(t) {
+  t.mock.method(childProcess, "spawn", (_command, _args, { env }) => createFakeAcpProcess(env));
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+}
+
 test("Antigravity harness fatal stderr fails the round before end_turn can publish completion", async (t) => {
   isolateTestEnvironment(t);
+  useInProcessAgent(t);
   const fatal = "I1111 local_connection.py:553] harness stderr: Agent run failed: no pending hook for ID hook_request_31\n";
-  const initialize = AcpExecutorJobPort.prototype.initialize;
-  let port;
-  t.mock.method(AcpExecutorJobPort.prototype, "initialize", function () {
-    port = this;
-    return initialize.call(this);
-  });
   for (const [agent, stderr, fails] of [
     ["antigravity-acp", fatal, true],
     ["qoder-cli", fatal, false],
@@ -36,16 +44,11 @@ test("Antigravity harness fatal stderr fails the round before end_turn can publi
     const job = { id: "acp-stderr", executor: "acp", workspaceRoot: cwd, status: "running" };
     writeJobFile(cwd, job.id, job);
     upsertJob(cwd, job);
-    const release = path.join(cwd, "release");
     const events = [];
-    port = null;
-    const running = runAcpTurn(cwd, { jobId: job.id, prompt: "stderr", command: process.execPath, args: [AGENT], modelId: "efficient",
+    const { result, error } = await runAcpTurn(cwd, { jobId: job.id, prompt: "stderr", command: process.execPath, args: [AGENT], modelId: "efficient",
       env: { ...process.env, HOME: cwd, GEMINI_HOME: cwd, CODEX_HOME: cwd, ACP_FAKE_AGENT_NAME: agent,
-        ACP_FAKE_STDERR: stderr, ACP_FAKE_RELEASE_FILE: release }, onExecutorEvent: event => events.push(event) })
+        ACP_FAKE_STDERR: stderr }, onExecutorEvent: event => events.push(event) })
       .then(result => ({ result }), error => ({ error }));
-    await waitFor(() => port?.stderr.includes(stderr), "fake ACP stderr received");
-    fs.writeFileSync(release, "");
-    const { result, error } = await running;
     if (result) await result.afterCompletion();
     if (fails) {
       assert.equal(error?.message, fatal.trimEnd());
@@ -58,22 +61,26 @@ test("Antigravity harness fatal stderr fails the round before end_turn can publi
   }
 });
 
-test("status skips live endpoints for finished ACP jobs including status --wait", (t) => {
+test("status skips live endpoints for finished ACP jobs including status --wait", async (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
+  let output;
+  t.mock.method(console, "log", text => { output = text; });
+  const connect = t.mock.method(ObservationClient, "connect", () => assert.fail("finished job connected to a live endpoint"));
   for (const status of ["completed", "failed", "cancelled"]) {
     const job = { id: `acp-${status}`, executor: "acp", workspaceRoot: cwd, status,
       controlEndpoint: `unix:${path.join(cwd, "removed", "broker.sock")}` };
     writeJobFile(cwd, job.id, job);
     upsertJob(cwd, job);
-    const result = run(process.execPath, [SCRIPT, "status", job.id, "--cwd", cwd, "--json", ...(status === "failed" ? ["--wait"] : [])], { cwd });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(result.stdout).job.live, undefined);
+    await handleStatus([job.id, "--cwd", cwd, "--json", ...(status === "failed" ? ["--wait"] : [])]);
+    assert.equal(JSON.parse(output).job.live, undefined);
   }
+  assert.equal(connect.mock.callCount(), 0);
 });
 
 test("ACP startup failures log phase, RPC details and bounded stderr before cleanup", async (t) => {
   isolateTestEnvironment(t);
+  useInProcessAgent(t);
   for (const phase of ["initialize", "session/new", "session/resume", "ready"]) {
     const cwd = fs.realpathSync(makeTempDir());
     const job = { id: "acp-startup-evidence", executor: "acp", workspaceRoot: cwd, status: "queued" };

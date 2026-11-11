@@ -1200,7 +1200,7 @@ async function handleEvents(argv) {
   }
 }
 
-async function handleStatus(argv) {
+export async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
     rejectUnknownOptions: true,
