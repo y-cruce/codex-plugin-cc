@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { createBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 
@@ -133,6 +134,64 @@ export function run(command, args, options = {}) {
   });
   if (result.error && !result.stderr) result.stderr = result.error.message;
   return result;
+}
+
+let inProcessCompanionSeq = 0;
+
+export async function runCompanionInProcess(scriptPath, args, options = {}) {
+  const realScript = fs.realpathSync(scriptPath);
+  const prevArgv = process.argv;
+  const prevExitCode = process.exitCode;
+  const prevCwd = process.cwd();
+  const prevEnv = { ...process.env };
+  const targetEnv = options.env ?? process.env;
+  if (targetEnv.CLAUDE_PLUGIN_DATA) testPluginDataDirs?.add(targetEnv.CLAUDE_PLUGIN_DATA);
+  let stdout = "";
+  let stderr = "";
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (chunk, encoding, cb) => {
+    if (typeof chunk !== "string") {
+      return origStdoutWrite(chunk, encoding, cb);
+    }
+    stdout += chunk;
+    const callback = typeof encoding === "function" ? encoding : cb;
+    if (typeof callback === "function") callback();
+    return true;
+  };
+  process.stderr.write = (chunk, encoding, cb) => {
+    if (typeof chunk !== "string") {
+      return origStderrWrite(chunk, encoding, cb);
+    }
+    stderr += chunk;
+    const callback = typeof encoding === "function" ? encoding : cb;
+    if (typeof callback === "function") callback();
+    return true;
+  };
+  for (const key of Object.keys(process.env)) {
+    if (!(key in targetEnv)) delete process.env[key];
+  }
+  Object.assign(process.env, targetEnv);
+  if (options.cwd) process.chdir(options.cwd);
+  process.exitCode = 0;
+  process.argv = [process.execPath, realScript, ...args];
+  try {
+    await import(`${pathToFileURL(realScript).href}?inproc=${++inProcessCompanionSeq}`);
+    const done = options.waitUntil ?? (() => stdout.length > 0 || (process.exitCode ?? 0) !== 0);
+    await waitFor(done, `in-process companion ${args[0] ?? ""}`, options.timeout ?? BROKER_READY_MS);
+    await new Promise(setImmediate);
+    return { status: process.exitCode || 0, stdout, stderr };
+  } finally {
+    process.stdout.write = origStdoutWrite;
+    process.stderr.write = origStderrWrite;
+    process.argv = prevArgv;
+    process.exitCode = prevExitCode;
+    process.chdir(prevCwd);
+    for (const key of Object.keys(process.env)) {
+      if (!(key in prevEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, prevEnv);
+  }
 }
 
 export function initGitRepo(cwd) {

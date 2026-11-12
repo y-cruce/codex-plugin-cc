@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, writeExecutable } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, runCompanionInProcess, writeExecutable } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { listJobs, readJobFile, resolveJobFile, resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { jobIndexPath, threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
@@ -157,7 +157,7 @@ test("task --thread resumes a thread tracked in the current workspace across Cla
   assert.equal(fakeState.lastTurnStart.prompt, "follow up by id");
 });
 
-test("task --fork-thread forks into an independent thread and leaves the source untouched", () => {
+test("task --fork-thread forks into an independent thread and leaves the source untouched", async () => {
   const repo = fs.realpathSync(makeTempDir());
   const binDir = makeTempDir();
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -173,7 +173,7 @@ test("task --fork-thread forks into an independent thread and leaves the source 
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const sourceRun = run("node", [SCRIPT, "task", "--label", "source investigation", "--effort", "high", "--json", "investigate source"], {
+  const sourceRun = await runCompanionInProcess(SCRIPT, ["task", "--label", "source investigation", "--effort", "high", "--json", "investigate source"], {
     cwd: repo,
     env
   });
@@ -195,7 +195,7 @@ test("task --fork-thread forks into an independent thread and leaves the source 
     fs.readFileSync(path.join(sourceRecord.segments, file), "utf8")
   ]);
 
-  const forkRun = run("node", [SCRIPT, "task", "--fork-thread", sourcePayload.threadId, "--label", "forked branch", "--json", "implement forked branch"], {
+  const forkRun = await runCompanionInProcess(SCRIPT, ["task", "--fork-thread", sourcePayload.threadId, "--label", "forked branch", "--json", "implement forked branch"], {
     cwd: repo,
     env
   });
@@ -217,7 +217,7 @@ test("task --fork-thread forks into an independent thread and leaves the source 
   const forkIndex = JSON.parse(fs.readFileSync(jobIndexPath(stateDir, forkJobSummary.id), "utf8"));
   assert.notEqual(forkIndex.recordId, sourceIndex.recordId);
 
-  const continueFork = run("node", [SCRIPT, "task", "--thread", forkPayload.threadId, "--json", "follow up forked branch"], {
+  const continueFork = await runCompanionInProcess(SCRIPT, ["task", "--thread", forkPayload.threadId, "--json", "follow up forked branch"], {
     cwd: repo,
     env
   });
@@ -235,9 +235,10 @@ test("task --fork-thread forks into an independent thread and leaves the source 
   );
 });
 
-test("task --thread and --fork-thread reject conflicting, invalid, and busy-source routing values", () => {
+test("task --thread and --fork-thread reject conflicting, invalid, and busy-source routing values", async () => {
   const repo = fs.realpathSync(makeTempDir());
   const otherRepo = fs.realpathSync(makeTempDir());
+  const configDir = makeTempDir();
   initGitRepo(repo);
   initGitRepo(otherRepo);
 
@@ -251,8 +252,9 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
     [["--fork-thread", "thr_specific", "--fresh"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
     [["--fork-thread", "thr_specific", "--allow-other-repo"], /--allow-other-repo cannot be used with --fork-thread/]
   ]) {
-    const result = run("node", [SCRIPT, "task", ...args, "follow up"], {
-      cwd: repo
+    const result = await runCompanionInProcess(SCRIPT, ["task", ...args, "follow up"], {
+      cwd: repo,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }
     });
     assert.equal(result.status > 0, true, args.join(" "));
     assert.match(result.stderr, pattern);
@@ -264,8 +266,9 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
     ["--fork-thread=", /Provide a thread id with --fork-thread/],
     ["--fork-thread=-bad", /Provide a thread id with --fork-thread/]
   ]) {
-    const result = run("node", [SCRIPT, "task", invalidOption, "follow up"], {
-      cwd: repo
+    const result = await runCompanionInProcess(SCRIPT, ["task", invalidOption, "follow up"], {
+      cwd: repo,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }
     });
     assert.equal(result.status > 0, true, invalidOption);
     assert.match(result.stderr, pattern);
@@ -273,7 +276,7 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
 
   for (const status of ["running", "queued"]) {
     const pluginDataDir = makeTempDir();
-    const env = { ...process.env, CLAUDE_PLUGIN_DATA: pluginDataDir };
+    const env = { ...process.env, CLAUDE_PLUGIN_DATA: pluginDataDir, CLAUDE_CONFIG_DIR: configDir };
     const previousData = process.env.CLAUDE_PLUGIN_DATA;
     process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
     try {
@@ -295,7 +298,7 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
       process.env.CLAUDE_PLUGIN_DATA = previousData;
     }
 
-    const busyResult = run("node", [SCRIPT, "task", "--fork-thread", "thr_busy", "--background", "branch while busy"], {
+    const busyResult = await runCompanionInProcess(SCRIPT, ["task", "--fork-thread", "thr_busy", "--background", "branch while busy"], {
       cwd: repo,
       env
     });
@@ -307,9 +310,9 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
 
   const wrongCwdData = makeTempDir();
   seedTrackedThread(repo, wrongCwdData, "thr_repo_only");
-  const wrongCwd = run("node", [SCRIPT, "task", "--fork-thread", "thr_repo_only", "branch from wrong cwd"], {
+  const wrongCwd = await runCompanionInProcess(SCRIPT, ["task", "--fork-thread", "thr_repo_only", "branch from wrong cwd"], {
     cwd: otherRepo,
-    env: { ...process.env, CLAUDE_PLUGIN_DATA: wrongCwdData }
+    env: { ...process.env, CLAUDE_PLUGIN_DATA: wrongCwdData, CLAUDE_CONFIG_DIR: configDir }
   });
   assert.equal(wrongCwd.status > 0, true);
   assert.match(wrongCwd.stderr, /is not tracked for this repository/);

@@ -666,13 +666,25 @@ rl.on("line", (line) => {
   }
 });
 `;
-  writeExecutable(scriptPath, source);
-
-  // On Windows, npm global binaries are invoked via .cmd wrappers.
-  // Create a codex.cmd so the fake binary is discoverable by spawn with shell: true.
   if (process.platform === "win32") {
+    writeExecutable(scriptPath, source);
+    // On Windows, npm global binaries are invoked via .cmd wrappers.
+    // Create a codex.cmd so the fake binary is discoverable by spawn with shell: true.
     const cmdWrapper = `@echo off\r\nnode "%~dp0codex" %*\r\n`;
     fs.writeFileSync(path.join(binDir, "codex.cmd"), cmdWrapper, { encoding: "utf8" });
+  } else {
+    const implPath = path.join(binDir, "codex-impl.cjs");
+    fs.writeFileSync(implPath, source, "utf8");
+    writeExecutable(
+      scriptPath,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo "codex-cli test"; exit 0; fi',
+        'if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then echo "fake app-server help"; exit 0; fi',
+        `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(implPath)} "$@"`,
+        ""
+      ].join("\n")
+    );
   }
 }
 

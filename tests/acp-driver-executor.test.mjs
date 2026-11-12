@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
@@ -15,7 +16,7 @@ import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { createJobLogFile, createProgressReporter, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
-import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, waitFor, within } from "./helpers.mjs";
+import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, runCompanionInProcess, waitFor, within } from "./helpers.mjs";
 import { createFakeAcpProcess } from "./fake-acp-agent.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -443,15 +444,39 @@ test("runAcpTurn publishes questions and permissions with the persisted owner on
   assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 2);
 });
 
-test("ACP fork branches session context and re-applies mode/model/effort when advertised, and rejects unsupported agents", (t) => {
+test("ACP fork branches session context and re-applies mode/model/effort when advertised, and rejects unsupported agents", async (t) => {
   isolateTestEnvironment(t);
   const cwd = fs.realpathSync(makeTempDir());
+  const configDir = makeTempDir();
   initGitRepo(cwd);
   const sessionFile = path.join(cwd, "acp-sessions.json");
-  const sourceRun = run(
-    process.execPath,
+  const pendingWorkers = [];
+  let activeAgentChild = null;
+  const origSpawn = childProcess.spawn;
+  t.mock.method(childProcess, "spawn", (command, args = [], opts = {}) => {
+    if (args.includes(AGENT)) {
+      activeAgentChild = createFakeAcpProcess(opts.env ?? process.env);
+      return activeAgentChild;
+    }
+    if (args[1] === "task-worker") {
+      pendingWorkers.push(args.slice(1));
+      const worker = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+      process.nextTick(() => worker.emit("spawn"));
+      return worker;
+    }
+    return origSpawn(command, args, opts);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  const baseEnv = { ...process.env, CLAUDE_CONFIG_DIR: configDir, ACP_FAKE_SESSION_FILE: sessionFile };
+  const sourceRun = await runCompanionInProcess(
+    SCRIPT,
     [
-      SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
+      "task", "--cwd", cwd, "--executor", "acp",
       "--executor-command", process.execPath,
       "--executor-args", JSON.stringify([AGENT]),
       "--executor-mode", "yolo",
@@ -459,7 +484,7 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
       "--executor-effort", "max",
       "--json", "memo:set:alpha"
     ],
-    { cwd, env: { ...process.env, ACP_FAKE_SESSION_FILE: sessionFile, ACP_FAKE_FORK: "1" } }
+    { cwd, env: { ...baseEnv, ACP_FAKE_FORK: "1" } }
   );
   assert.equal(sourceRun.status, 0, sourceRun.stderr);
   const sourcePayload = JSON.parse(sourceRun.stdout);
@@ -471,14 +496,13 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
     { name: "omits session/fork", fork: false }
   ]) {
     const recording = path.join(cwd, `acp-fork-${row.fork ? "yes" : "no"}.jsonl`);
-    const forkRun = run(
-      process.execPath,
-      [SCRIPT, "task", "--cwd", cwd, "--fork-thread", sourcePayload.threadId, "--json", "memo:set:beta"],
+    const forkRun = await runCompanionInProcess(
+      SCRIPT,
+      ["task", "--cwd", cwd, "--fork-thread", sourcePayload.threadId, "--json", "memo:set:beta"],
       {
         cwd,
         env: {
-          ...process.env,
-          ACP_FAKE_SESSION_FILE: sessionFile,
+          ...baseEnv,
           ACP_FAKE_FORK: row.fork ? "1" : "0",
           ACP_FAKE_RECORDING: recording
         }
@@ -518,21 +542,29 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
 
       const queuedRecording = path.join(cwd, "acp-fork-queued.jsonl");
       const queueEnv = {
-        ...process.env,
-        ACP_FAKE_SESSION_FILE: sessionFile,
+        ...baseEnv,
         ACP_FAKE_FORK: "1",
         ACP_FAKE_RECORDING: queuedRecording
       };
-      const queuedRun = run(
-        process.execPath,
-        [SCRIPT, "message", forkJobSummary.id, "--cwd", cwd, "--queue", "--json", "memo:set:gamma"],
+      const queuedRun = await runCompanionInProcess(
+        SCRIPT,
+        ["message", forkJobSummary.id, "--cwd", cwd, "--queue", "--json", "memo:set:gamma"],
         { cwd, env: queueEnv }
       );
       assert.equal(queuedRun.status, 0, `${row.name} queue: ${queuedRun.stderr}`);
       const { queuedJobId } = JSON.parse(queuedRun.stdout);
-      const waitedRun = run(
-        process.execPath,
-        [SCRIPT, "status", queuedJobId, "--cwd", cwd, "--wait", "--json"],
+      assert.equal(pendingWorkers.length, 1);
+      await runCompanionInProcess(SCRIPT, pendingWorkers.shift(), {
+        cwd,
+        env: queueEnv,
+        waitUntil: () => {
+          const job = readJobFile(resolveJobFile(cwd, queuedJobId));
+          return (job?.status === "completed" || job?.status === "failed") && activeAgentChild?.exitCode !== null;
+        }
+      });
+      const waitedRun = await runCompanionInProcess(
+        SCRIPT,
+        ["status", queuedJobId, "--cwd", cwd, "--wait", "--json"],
         { cwd, env: queueEnv }
       );
       assert.equal(waitedRun.status, 0, waitedRun.stderr);
@@ -540,9 +572,9 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
       assert.equal(queuedJob.status, "completed", queuedJob.errorMessage);
       assert.equal(queuedJob.threadId, forkPayload.threadId);
       assert.equal(queuedJob.request?.forkThreadId, undefined);
-      const resultRun = run(
-        process.execPath,
-        [SCRIPT, "result", queuedJobId, "--cwd", cwd],
+      const resultRun = await runCompanionInProcess(
+        SCRIPT,
+        ["result", queuedJobId, "--cwd", cwd],
         { cwd, env: queueEnv }
       );
       assert.equal(resultRun.status, 0, resultRun.stderr);
