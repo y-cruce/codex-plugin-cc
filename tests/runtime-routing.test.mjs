@@ -241,20 +241,21 @@ test("task --thread and --fork-thread reject conflicting, invalid, and busy-sour
   initGitRepo(repo);
   initGitRepo(otherRepo);
 
-  for (const args of [
-    ["--thread", "thr_specific", "--resume-last"],
-    ["--thread", "thr_specific", "--resume"],
-    ["--thread", "thr_specific", "--fresh"],
-    ["--fork-thread", "thr_specific", "--thread", "thr_other"],
-    ["--fork-thread", "thr_specific", "--resume-last"],
-    ["--fork-thread", "thr_specific", "--resume"],
-    ["--fork-thread", "thr_specific", "--fresh"]
+  for (const [args, pattern] of [
+    [["--thread", "thr_specific", "--resume-last"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--thread", "thr_specific", "--resume"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--thread", "thr_specific", "--fresh"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--fork-thread", "thr_specific", "--thread", "thr_other"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--fork-thread", "thr_specific", "--resume-last"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--fork-thread", "thr_specific", "--resume"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--fork-thread", "thr_specific", "--fresh"], /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/],
+    [["--fork-thread", "thr_specific", "--allow-other-repo"], /--allow-other-repo cannot be used with --fork-thread/]
   ]) {
     const result = run("node", [SCRIPT, "task", ...args, "follow up"], {
       cwd: repo
     });
     assert.equal(result.status > 0, true, args.join(" "));
-    assert.match(result.stderr, /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/);
+    assert.match(result.stderr, pattern);
   }
 
   for (const [invalidOption, pattern] of [

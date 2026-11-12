@@ -637,8 +637,8 @@ async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
   const availability = request.executor === "codex" ? ensureCodexAvailable(request.cwd) : undefined;
   const workspaceAvailability = request.cwd === workspaceRoot ? availability : undefined;
-  if ((request.resumeThreadId || request.forkThreadId) && !request.allowOtherRepo) {
-    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId || request.forkThreadId, request.executor);
+  if (request.forkThreadId || (request.resumeThreadId && !request.allowOtherRepo)) {
+    requireTrackedThreadForWorkspace(workspaceRoot, request.forkThreadId || request.resumeThreadId, request.executor);
   }
 
   const taskMetadata = buildTaskRunMetadata({
@@ -673,7 +673,7 @@ async function executeTaskRun(request) {
       const queuedJob = { ...buildTaskJob(workspaceRoot, metadata, request.write, request.sandbox, request.network, label, "acp"),
         ...(request.executorMode ? { executorMode: request.executorMode } : {}),
         ...(request.executorModel ? { executorModel: request.executorModel } : {}) };
-      const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, jobId: queuedJob.id });
+      const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, forkThreadId: null, jobId: queuedJob.id });
       const logFile = createJobLogFile(workspaceRoot, queuedJob.id, queuedJob.title);
       appendLogLine(logFile, `Queued behind ${sourceJobId}.`);
       const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", pid: process.pid, logFile, recordId,
@@ -1035,6 +1035,9 @@ async function handleTask(argv) {
   if ([Boolean(resumeThreadId), Boolean(forkThreadId), resumeLast, fresh].filter(Boolean).length > 1) {
     throw new Error("Choose only one of --thread, --fork-thread, --resume/--resume-last, or --fresh.");
   }
+  if (forkThreadId && allowOtherRepo) {
+    throw new Error("--allow-other-repo cannot be used with --fork-thread.");
+  }
 
   const sourceThreadId = resumeThreadId || forkThreadId;
   const { executor, preset, previous, sourceJob, inherited } = resolveTaskExecutor(workspaceRoot, sourceThreadId, options);
@@ -1082,7 +1085,7 @@ async function handleTask(argv) {
   const network = options.network ? true : Boolean(forkThreadId && !options.sandbox && !options.write && previous?.network);
   if (forkThreadId) {
     requireTaskRequest(prompt, false);
-    if (!allowOtherRepo) requireTrackedThreadForWorkspace(workspaceRoot, forkThreadId, executor);
+    requireTrackedThreadForWorkspace(workspaceRoot, forkThreadId, executor);
     ensureForkSourceIdle(workspaceRoot, forkThreadId);
   }
   const taskMetadata = buildTaskRunMetadata({
@@ -1340,7 +1343,7 @@ async function queueIdleTaskMessage(cwd, reference, text) {
   const metadata = buildTaskRunMetadata({ prompt, resumeLast: true, executor });
   const next = buildTaskJob(cwd, metadata, write, sandbox, network, job.label, executor);
   const request = buildTaskRequest({ ...previous, cwd: previous.cwd ?? cwd, executor, write, sandbox, network,
-    prompt, resumeLast: false, resumeThreadId: threadId, jobId: next.id });
+    prompt, resumeLast: false, resumeThreadId: threadId, forkThreadId: null, jobId: next.id });
   const { payload } = await enqueueBackgroundTask(request.cwd, next, request);
   return { jobId: job.id, queued: true, queuedJobId: payload.jobId };
 }

@@ -515,6 +515,44 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
       const sessions = new Map(JSON.parse(fs.readFileSync(sessionFile, "utf8")));
       assert.equal(sessions.get(sourcePayload.threadId)?.remembered, "alpha", row.name);
       assert.equal(sessions.get(forkPayload.threadId)?.remembered, "beta", row.name);
+
+      const queuedRecording = path.join(cwd, "acp-fork-queued.jsonl");
+      const queueEnv = {
+        ...process.env,
+        ACP_FAKE_SESSION_FILE: sessionFile,
+        ACP_FAKE_FORK: "1",
+        ACP_FAKE_RECORDING: queuedRecording
+      };
+      const queuedRun = run(
+        process.execPath,
+        [SCRIPT, "message", forkJobSummary.id, "--cwd", cwd, "--queue", "--json", "memo:set:gamma"],
+        { cwd, env: queueEnv }
+      );
+      assert.equal(queuedRun.status, 0, `${row.name} queue: ${queuedRun.stderr}`);
+      const { queuedJobId } = JSON.parse(queuedRun.stdout);
+      const waitedRun = run(
+        process.execPath,
+        [SCRIPT, "status", queuedJobId, "--cwd", cwd, "--wait", "--json"],
+        { cwd, env: queueEnv }
+      );
+      assert.equal(waitedRun.status, 0, waitedRun.stderr);
+      const queuedJob = JSON.parse(waitedRun.stdout).job;
+      assert.equal(queuedJob.status, "completed", queuedJob.errorMessage);
+      assert.equal(queuedJob.threadId, forkPayload.threadId);
+      assert.equal(queuedJob.request?.forkThreadId, undefined);
+      const resultRun = run(
+        process.execPath,
+        [SCRIPT, "result", queuedJobId, "--cwd", cwd],
+        { cwd, env: queueEnv }
+      );
+      assert.equal(resultRun.status, 0, resultRun.stderr);
+      assert.match(resultRun.stdout, /prev=beta now=gamma/);
+      const queuedCalls = fs.readFileSync(queuedRecording, "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(queuedCalls.some((call) => call.method === "session/fork"), false);
+      assert.equal(queuedCalls.find((call) => call.method === "session/resume")?.params.sessionId, forkPayload.threadId);
+      const afterQueueSessions = new Map(JSON.parse(fs.readFileSync(sessionFile, "utf8")));
+      assert.equal(afterQueueSessions.get(sourcePayload.threadId)?.remembered, "alpha");
+      assert.equal(afterQueueSessions.get(forkPayload.threadId)?.remembered, "gamma");
     } else {
       assert.notEqual(forkRun.status, 0, row.name);
       assert.match(forkRun.stderr, /does not support session\/fork/, row.name);
