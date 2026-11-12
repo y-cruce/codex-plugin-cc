@@ -21,6 +21,7 @@ import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
 
 const CAPABILITIES = Object.freeze({
   resumeSession: true,
+  forkSession: false,
   sessionModes: true,
   structuredQuestions: true,
   permissionRequests: true,
@@ -323,6 +324,7 @@ export class AcpExecutorJobPort {
       clientCapabilities: { elicitation: { form: {} }, plan: {} }, clientInfo: { name: "codex-companion", version: "1" } });
     const sessionCaps = this.initializeResponse.agentCapabilities?.sessionCapabilities ?? {};
     this.capabilities.resumeSession = Boolean(sessionCaps.resume);
+    this.capabilities.forkSession = Boolean(sessionCaps.fork);
     this.capabilities.sessionModes = false;
     this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true ||
       this.initializeResponse.agentCapabilities?._meta?.steering?.supported === true;
@@ -485,6 +487,23 @@ export class AcpExecutorJobPort {
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
     return { ...await this.sessionResult(request.sessionId, response), effortId };
+  }
+
+  async forkSession(request) {
+    this.startupPhase = "session/fork";
+    if (!this.capabilities.forkSession) {
+      const name = this.initializeResponse?.agentInfo?.name;
+      throw Object.assign(new Error(`ACP agent${name ? ` (${name})` : ""} does not support session/fork.`), {
+        code: "UNSUPPORTED_CAPABILITY"
+      });
+    }
+    const { params } = this.sessionRequest(request);
+    const response = await this.connection.unstable_forkSession({ sessionId: request.sessionId, ...params });
+    this.startupPhase = "ready";
+    await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
+    await this.applyModel(response.sessionId, response, request.modelId ?? this.modelId);
+    const effortId = await this.applyReasoningEffort(response.sessionId, response, request.effortId ?? this.effortId);
+    return { ...await this.sessionResult(response.sessionId, response), effortId };
   }
 
   async setMode(request) {

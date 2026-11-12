@@ -346,7 +346,9 @@ export async function main(runtimeOptions = {}) {
           } else activeRequestSocket = socket;
           if (message.method === "turn/start") controls.starting(message.params ?? {});
           const job = jobs.jobForSocket(socket);
-          if (message.params?.threadId && job) await codexEvents.bindSession(message.params.threadId, job);
+          if (message.method !== "thread/fork" && message.params?.threadId && job) {
+            await codexEvents.bindSession(message.params.threadId, job);
+          }
           try {
             // A resumed thread is known before its turn starts. Binding after the
             // response left the turn's first events in a 256-event buffer while the
@@ -358,12 +360,14 @@ export async function main(runtimeOptions = {}) {
             const responseThreadId = result.thread?.id ?? result.reviewThreadId ??
               (message.method === "turn/start" ? message.params?.threadId : null);
             if (job && jobs.threadRecords && responseThreadId &&
-              ["thread/start", "turn/start", "review/start"].includes(message.method)) {
+              ["thread/start", "thread/fork", "turn/start", "review/start"].includes(message.method)) {
               await jobs.bind(socket, job.workspaceRoot ?? cwd, job.id, responseThreadId, result.turn?.id ?? null);
             }
             if (result.thread?.id && job) await codexEvents.bindSession(result.thread.id, job);
             if (result.reviewThreadId && job) await codexEvents.bindSession(result.reviewThreadId, job);
-            if (message.method === "thread/start") pendingThreadStarts.delete(result.thread?.id);
+            if (message.method === "thread/start" || message.method === "thread/fork") {
+              pendingThreadStarts.delete(result.thread?.id);
+            }
             if (isStreaming && !socket.destroyed) {
               for (const id of buildStreamThreadIds(message.method, message.params, result)) {
                 if (!threadIds.has(id)) {

@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, writeExecutable } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, readJobFile, resolveJobFile, resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { jobIndexPath, threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -156,25 +157,161 @@ test("task --thread resumes a thread tracked in the current workspace across Cla
   assert.equal(fakeState.lastTurnStart.prompt, "follow up by id");
 });
 
-test("task --thread rejects conflicting and invalid routing values", () => {
-  const repo = makeTempDir();
+test("task --fork-thread forks into an independent thread and leaves the source untouched", () => {
+  const repo = fs.realpathSync(makeTempDir());
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  const pluginDataDir = makeTempDir();
+  const env = {
+    ...buildEnv(binDir),
+    CLAUDE_PLUGIN_DATA: pluginDataDir,
+    CODEX_COMPANION_SESSION_ID: "sess-fork"
+  };
+  installFakeCodex(binDir);
   initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  for (const conflictingFlag of ["--resume-last", "--resume", "--fresh"]) {
-    const result = run("node", [SCRIPT, "task", "--thread", "thr_specific", conflictingFlag, "follow up"], {
+  const sourceRun = run("node", [SCRIPT, "task", "--label", "source investigation", "--effort", "high", "--json", "investigate source"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(sourceRun.status, 0, sourceRun.stderr);
+  const sourcePayload = JSON.parse(sourceRun.stdout);
+  const stateDir = resolveStateDirWithPluginData(repo, pluginDataDir);
+  const findJobByThread = (threadId) =>
+    JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find((job) => job.threadId === threadId);
+  const sourceJobSummary = findJobByThread(sourcePayload.threadId);
+  assert.ok(sourceJobSummary);
+  const sourceJobPath = path.join(stateDir, "jobs", `${sourceJobSummary.id}.json`);
+  const sourceJobRaw = fs.readFileSync(sourceJobPath, "utf8");
+  const sourceIndex = JSON.parse(fs.readFileSync(jobIndexPath(stateDir, sourceJobSummary.id), "utf8"));
+  const sourceRecord = threadRecordPaths(stateDir, sourceIndex.recordId);
+  const sourceLiveViewRaw = fs.readFileSync(sourceRecord.liveView, "utf8");
+  const sourceRounds = fs.readdirSync(sourceRecord.rounds).sort();
+  const sourceSegments = fs.readdirSync(sourceRecord.segments).sort().map((file) => [
+    file,
+    fs.readFileSync(path.join(sourceRecord.segments, file), "utf8")
+  ]);
+
+  const forkRun = run("node", [SCRIPT, "task", "--fork-thread", sourcePayload.threadId, "--label", "forked branch", "--json", "implement forked branch"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(forkRun.status, 0, forkRun.stderr);
+  const forkPayload = JSON.parse(forkRun.stdout);
+  assert.notEqual(forkPayload.threadId, sourcePayload.threadId);
+
+  const fakeAfterFork = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeAfterFork.lastThreadFork.threadId, sourcePayload.threadId);
+  assert.equal(fakeAfterFork.lastThreadFork.forkedThreadId, forkPayload.threadId);
+  assert.equal(fakeAfterFork.lastThreadFork.excludeTurns, true);
+  assert.equal(fakeAfterFork.threads.find((thread) => thread.id === forkPayload.threadId)?.name, "Codex Companion Task: forked branch");
+  assert.equal(fakeAfterFork.lastTurnStart.effort, "high");
+
+  const forkJobSummary = findJobByThread(forkPayload.threadId);
+  assert.ok(forkJobSummary);
+  const forkJob = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${forkJobSummary.id}.json`), "utf8"));
+  assert.deepEqual(forkJob.forkedFrom, { threadId: sourcePayload.threadId, jobId: sourceJobSummary.id });
+  const forkIndex = JSON.parse(fs.readFileSync(jobIndexPath(stateDir, forkJobSummary.id), "utf8"));
+  assert.notEqual(forkIndex.recordId, sourceIndex.recordId);
+
+  const continueFork = run("node", [SCRIPT, "task", "--thread", forkPayload.threadId, "--json", "follow up forked branch"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(continueFork.status, 0, continueFork.stderr);
+  const continuePayload = JSON.parse(continueFork.stdout);
+  assert.equal(continuePayload.threadId, forkPayload.threadId);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.threadId, forkPayload.threadId);
+
+  assert.equal(fs.readFileSync(sourceJobPath, "utf8"), sourceJobRaw);
+  assert.equal(fs.readFileSync(sourceRecord.liveView, "utf8"), sourceLiveViewRaw);
+  assert.deepEqual(fs.readdirSync(sourceRecord.rounds).sort(), sourceRounds);
+  assert.deepEqual(
+    fs.readdirSync(sourceRecord.segments).sort().map((file) => [file, fs.readFileSync(path.join(sourceRecord.segments, file), "utf8")]),
+    sourceSegments
+  );
+});
+
+test("task --thread and --fork-thread reject conflicting, invalid, and busy-source routing values", () => {
+  const repo = fs.realpathSync(makeTempDir());
+  const otherRepo = fs.realpathSync(makeTempDir());
+  initGitRepo(repo);
+  initGitRepo(otherRepo);
+
+  for (const args of [
+    ["--thread", "thr_specific", "--resume-last"],
+    ["--thread", "thr_specific", "--resume"],
+    ["--thread", "thr_specific", "--fresh"],
+    ["--fork-thread", "thr_specific", "--thread", "thr_other"],
+    ["--fork-thread", "thr_specific", "--resume-last"],
+    ["--fork-thread", "thr_specific", "--resume"],
+    ["--fork-thread", "thr_specific", "--fresh"]
+  ]) {
+    const result = run("node", [SCRIPT, "task", ...args, "follow up"], {
       cwd: repo
     });
-    assert.equal(result.status > 0, true);
-    assert.match(result.stderr, /Choose only one of --thread, --resume\/--resume-last, or --fresh/);
+    assert.equal(result.status > 0, true, args.join(" "));
+    assert.match(result.stderr, /Choose only one of --thread, --fork-thread, --resume\/--resume-last, or --fresh/);
   }
 
-  for (const invalidThreadOption of ["--thread=", "--thread=-bad"]) {
-    const result = run("node", [SCRIPT, "task", invalidThreadOption, "follow up"], {
+  for (const [invalidOption, pattern] of [
+    ["--thread=", /Provide a thread id with --thread/],
+    ["--thread=-bad", /Provide a thread id with --thread/],
+    ["--fork-thread=", /Provide a thread id with --fork-thread/],
+    ["--fork-thread=-bad", /Provide a thread id with --fork-thread/]
+  ]) {
+    const result = run("node", [SCRIPT, "task", invalidOption, "follow up"], {
       cwd: repo
     });
-    assert.equal(result.status > 0, true);
-    assert.match(result.stderr, /Provide a thread id with --thread/);
+    assert.equal(result.status > 0, true, invalidOption);
+    assert.match(result.stderr, pattern);
   }
+
+  for (const status of ["running", "queued"]) {
+    const pluginDataDir = makeTempDir();
+    const env = { ...process.env, CLAUDE_PLUGIN_DATA: pluginDataDir };
+    const previousData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+    try {
+      const activeJob = {
+        id: `job-active-${status}`,
+        status,
+        title: "Codex Task",
+        jobClass: "task",
+        workspaceRoot: repo,
+        threadId: "thr_busy",
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      writeJobFile(repo, activeJob.id, activeJob);
+      upsertJob(repo, activeJob);
+    } finally {
+      process.env.CLAUDE_PLUGIN_DATA = previousData;
+    }
+
+    const busyResult = run("node", [SCRIPT, "task", "--fork-thread", "thr_busy", "--background", "branch while busy"], {
+      cwd: repo,
+      env
+    });
+    assert.equal(busyResult.status > 0, true, status);
+    assert.match(busyResult.stderr, new RegExp(`Thread thr_busy is still ${status} \\(job-active-${status}\\)`));
+    const stateDir = resolveStateDirWithPluginData(repo, pluginDataDir);
+    assert.deepEqual(fs.readdirSync(path.join(stateDir, "jobs")), [`job-active-${status}.json`]);
+  }
+
+  const wrongCwdData = makeTempDir();
+  seedTrackedThread(repo, wrongCwdData, "thr_repo_only");
+  const wrongCwd = run("node", [SCRIPT, "task", "--fork-thread", "thr_repo_only", "branch from wrong cwd"], {
+    cwd: otherRepo,
+    env: { ...process.env, CLAUDE_PLUGIN_DATA: wrongCwdData }
+  });
+  assert.equal(wrongCwd.status > 0, true);
+  assert.match(wrongCwd.stderr, /is not tracked for this repository/);
 });
 
 test("task --thread --allow-other-repo resumes an untracked thread", () => {

@@ -158,18 +158,22 @@ export async function listDirectorTasks({ sessionId, query = "", cwd, all = fals
       : `${workspaceRoot}\0${identity}\0${threadId ?? job.id}`;
     return { key, job, workspaceRoot, history };
   });
-  for (const { key, ...row } of rows) if (!threads.has(key)) threads.set(key, row);
+  for (const { key, ...row } of rows) {
+    if (!threads.has(key)) threads.set(key, { ...row, forkedFrom: row.job.forkedFrom ?? null });
+    else if (!threads.get(key).forkedFrom && row.job.forkedFrom) threads.get(key).forkedFrom = row.job.forkedFrom;
+  }
   const matches = [...threads.values()].filter(({ job }) =>
     String(job.label ?? job.title ?? job.id).toLowerCase().includes(query.toLowerCase()));
   const line = value => String(value).replace(/\s+/g, " ").trim();
-  const lines = await mapConcurrent(matches.slice(0, limit), async ({ job, workspaceRoot, history }) => {
+  const lines = await mapConcurrent(matches.slice(0, limit), async ({ job, workspaceRoot, history, forkedFrom }) => {
     const view = await viewOf(history);
     const threadId = job.executorSessionId || job.threadId || view?.threadId || job.request?.resumeThreadId || null;
     const executor = (view?.executor ?? createLiveView(job).executor).label.toLowerCase();
     const repo = workspaceRoot.startsWith(`${home}/`) ? `~${workspaceRoot.slice(home.length)}` : workspaceRoot;
     const status = checkJobLiveness(workspaceRoot, job, null, new Map(), { persist: false }).status;
+    const forked = forkedFrom?.threadId ? ` · forked from=${line(forkedFrom.threadId)}` : "";
     const foreign = job.sessionId !== sessionId ? ` · other session=${line(job.sessionId ?? "unknown")}` : "";
-    return `${line(job.label ?? job.title ?? job.id)} · thread=${line(threadId ?? "pending")} · ${executor} · ${line(status)} · job=${line(job.id)} · ${line(repo)}${foreign}`;
+    return `${line(job.label ?? job.title ?? job.id)} · thread=${line(threadId ?? "pending")} · ${executor} · ${line(status)} · job=${line(job.id)} · ${line(repo)}${forked}${foreign}`;
   });
   if (matches.length > limit) lines.push(`${matches.length - limit} older not shown`);
   return lines.join("\n") || "No matching tasks.";

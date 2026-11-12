@@ -442,3 +442,87 @@ test("runAcpTurn publishes questions and permissions with the persisted owner on
   assert.equal(messages.filter(message => message.meta.event === "question_opened").length, 2);
   assert.equal(messages.filter(message => message.meta.event === "job_completed").length, 2);
 });
+
+test("ACP fork branches session context and re-applies mode/model/effort when advertised, and rejects unsupported agents", (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const sessionFile = path.join(cwd, "acp-sessions.json");
+  const sourceRun = run(
+    process.execPath,
+    [
+      SCRIPT, "task", "--cwd", cwd, "--executor", "acp",
+      "--executor-command", process.execPath,
+      "--executor-args", JSON.stringify([AGENT]),
+      "--executor-mode", "yolo",
+      "--executor-model", "performance",
+      "--executor-effort", "max",
+      "--json", "memo:set:alpha"
+    ],
+    { cwd, env: { ...process.env, ACP_FAKE_SESSION_FILE: sessionFile, ACP_FAKE_FORK: "1" } }
+  );
+  assert.equal(sourceRun.status, 0, sourceRun.stderr);
+  const sourcePayload = JSON.parse(sourceRun.stdout);
+  const sourceJob = listJobs(cwd).find((job) => job.executorSessionId === sourcePayload.threadId);
+  assert.ok(sourceJob);
+
+  for (const row of [
+    { name: "advertises session/fork", fork: true },
+    { name: "omits session/fork", fork: false }
+  ]) {
+    const recording = path.join(cwd, `acp-fork-${row.fork ? "yes" : "no"}.jsonl`);
+    const forkRun = run(
+      process.execPath,
+      [SCRIPT, "task", "--cwd", cwd, "--fork-thread", sourcePayload.threadId, "--json", "memo:set:beta"],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          ACP_FAKE_SESSION_FILE: sessionFile,
+          ACP_FAKE_FORK: row.fork ? "1" : "0",
+          ACP_FAKE_RECORDING: recording
+        }
+      }
+    );
+
+    if (row.fork) {
+      assert.equal(forkRun.status, 0, `${row.name}: ${forkRun.stderr}`);
+      const forkPayload = JSON.parse(forkRun.stdout);
+      assert.notEqual(forkPayload.threadId, sourcePayload.threadId, row.name);
+      assert.match(forkPayload.rawOutput, /prev=alpha now=beta mode=yolo model=performance effort=max/, row.name);
+
+      const forkJobSummary = listJobs(cwd).find((job) => job.executorSessionId === forkPayload.threadId);
+      assert.ok(forkJobSummary, row.name);
+      const forkJob = readJobFile(resolveJobFile(cwd, forkJobSummary.id));
+      assert.deepEqual(forkJob.forkedFrom, { threadId: sourcePayload.threadId, jobId: sourceJob.id }, row.name);
+
+      const calls = fs.readFileSync(recording, "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(calls.find((call) => call.method === "session/fork")?.params.sessionId, sourcePayload.threadId, row.name);
+      assert.deepEqual(
+        calls.find((call) => call.method === "session/set_mode")?.params,
+        { sessionId: forkPayload.threadId, modeId: "yolo" },
+        row.name
+      );
+      assert.deepEqual(
+        calls.filter((call) => call.method === "session/set_config_option").map((call) => call.params),
+        [
+          { sessionId: forkPayload.threadId, configId: "model", value: "performance" },
+          { sessionId: forkPayload.threadId, configId: "reasoning_effort", value: "max" }
+        ],
+        row.name
+      );
+
+      const sessions = new Map(JSON.parse(fs.readFileSync(sessionFile, "utf8")));
+      assert.equal(sessions.get(sourcePayload.threadId)?.remembered, "alpha", row.name);
+      assert.equal(sessions.get(forkPayload.threadId)?.remembered, "beta", row.name);
+    } else {
+      assert.notEqual(forkRun.status, 0, row.name);
+      assert.match(forkRun.stderr, /does not support session\/fork/, row.name);
+      const failedJob = listJobs(cwd).find((job) => job.status === "failed");
+      assert.ok(failedJob, row.name);
+      const log = fs.readFileSync(failedJob.logFile, "utf8");
+      assert.match(log, /"phase": "session\/fork"/, row.name);
+      assert.match(log, /"code": "UNSUPPORTED_CAPABILITY"/, row.name);
+    }
+  }
+});

@@ -12,6 +12,7 @@ const TERMINAL_REASONS = {
 
 export const CODEX_EXECUTOR_CAPABILITIES = Object.freeze({
   resumeSession: true,
+  forkSession: true,
   sessionModes: false,
   structuredQuestions: true,
   permissionRequests: false,

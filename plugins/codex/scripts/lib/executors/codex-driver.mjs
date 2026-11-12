@@ -77,6 +77,40 @@ export async function resumeCodexSession(client, sessionId, cwd, options = {}) {
   });
 }
 
+export async function forkCodexSession(client, sessionId, cwd, options = {}) {
+  await reloadCodexSkills(client, cwd);
+  let response;
+  try {
+    response = await client.request("thread/fork", {
+      threadId: sessionId,
+      cwd,
+      model: options.model ?? null,
+      approvalPolicy: options.approvalPolicy ?? "never",
+      sandbox: options.sandbox ?? "read-only",
+      ephemeral: options.ephemeral ?? false,
+      excludeTurns: true
+    });
+  } catch (error) {
+    if (error?.rpcCode === -32601) {
+      throw new Error(
+        "This Codex version does not support thread/fork. Update Codex with `npm install -g @openai/codex@latest`, then retry.",
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+  const forkedId = response.thread.id;
+  if (options.threadName) {
+    try {
+      await client.request("thread/name/set", { threadId: forkedId, name: options.threadName });
+    } catch (error) {
+      const message = String(error?.message ?? error ?? "");
+      if (!message.includes("unknown variant") && !message.includes("unknown method")) throw error;
+    }
+  }
+  return response;
+}
+
 export class CodexExecutorJobPort {
   constructor({ client, cwd, job, onProgress, captureTurn }) {
     this.kind = "codex";
@@ -123,6 +157,12 @@ export class CodexExecutorJobPort {
 
   async resumeSession(request) {
     const response = await resumeCodexSession(this.client, request.sessionId, request.cwd ?? this.cwd, request);
+    await this.adapter.bindSession(response.thread.id, this.job);
+    return { sessionId: response.thread.id, modes: null, configOptions: [] };
+  }
+
+  async forkSession(request) {
+    const response = await forkCodexSession(this.client, request.sessionId, request.cwd ?? this.cwd, request);
     await this.adapter.bindSession(response.thread.id, this.job);
     return { sessionId: response.thread.id, modes: null, configOptions: [] };
   }

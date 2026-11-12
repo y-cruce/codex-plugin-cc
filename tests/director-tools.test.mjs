@@ -44,6 +44,10 @@ test("dispatchInput writes the headers dispatch.sh reads, then the brief", () =>
     dispatchInput({ brief: "Find it.", cwd: "/repo", name: "locate x", mode: "continue", thread: "t-1", write: true, executor: "codex" }),
     "MODE: continue\nNAME: locate x\nCWD: /repo\nTHREAD: t-1\nWRITE: yes\nEXECUTOR: codex\n\nFind it.\n",
   );
+  assert.equal(
+    dispatchInput({ brief: "Branch it.", cwd: "/repo", name: "fork x", mode: "fork", thread: "t-source", write: true }),
+    "MODE: fork\nNAME: fork x\nCWD: /repo\nTHREAD: t-source\nWRITE: yes\n\nBranch it.\n",
+  );
   assert.equal(dispatchInput({ mode: "investigate", name: "n", cwd: "/r", brief: "b\n", write: false, base: "" }), "MODE: investigate\nNAME: n\nCWD: /r\n\nb\n");
   const dsh = dispatchInput({ mode: "continue", name: "next", cwd: "/repo", brief: "Recall it.", thread: "session-1",
     executor: "dsh", executor_command: "/custom/dsh", executor_args: ["--profile", "acp", "line\nbreak"], executor_permissions: "ask" });
@@ -63,7 +67,9 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   await startDirectorTools(installed.$, installed.tools);
   assert.deepEqual(installed.registered.map((spec) => spec.name), ["dispatch", "message", "answer", "result", "status", "tasks", "cancel"]);
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
-  const executors = installed.registered.find(spec => spec.name === "dispatch").inputSchema.properties.executor.enum;
+  const dispatchSchema = installed.registered.find(spec => spec.name === "dispatch").inputSchema.properties;
+  assert.ok(dispatchSchema.mode.enum.includes("fork"));
+  const executors = dispatchSchema.executor.enum;
   assert.ok(["antigravity", "agy"].every(name => executors.includes(name)));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
@@ -195,8 +201,16 @@ test("tasks lists this session across stores, filters names and repositories, an
     updatedAt: "2026-10-22T05:00:00Z", request: { executorCommand: "dsh", executorArgs: ["--profile", "acp"] } };
   const queued = { ...original, id: "job-queued", status: "queued", recordId: "record-a", executorSessionId: null,
     pid: process.pid, createdAt: "2026-10-22T02:00:00Z" };
+  const forked = { id: "job-forked", label: "Forked experiment", sessionId: "session-1", workspaceRoot: repoA,
+    status: "completed", executor: "acp", executorSessionId: "thread-dsh-fork",
+    forkedFrom: { threadId: "thread-dsh", jobId: "job-original" }, createdAt: "2026-10-22T02:15:00Z",
+    updatedAt: "2026-10-22T02:20:00Z", request: { executorCommand: "dsh", executorArgs: ["--profile", "acp-fork"] } };
+  const forkedCont = { ...forked, id: "job-forked-cont", forkedFrom: null, createdAt: "2026-10-22T02:30:00Z",
+    updatedAt: "2026-10-22T02:40:00Z" };
   writeJobFile(repoA, original.id, original);
   writeJobFile(repoA, queued.id, queued);
+  writeJobFile(repoA, forked.id, forked);
+  writeJobFile(repoA, forkedCont.id, forkedCont);
   const stateDir = resolveStateDir(repoA);
   const history = threadRecordPaths(stateDir, "record-a");
   put(path.join(stateDir, "job-index", `${original.id}.json`),
@@ -214,15 +228,17 @@ test("tasks lists this session across stores, filters names and repositories, an
   });
   process.env.CLAUDE_PLUGIN_DATA = currentData;
   const pending = "Inspect pending thread · thread=pending · codex · running · job=job-pending · ~/projects/beta";
+  const forkedLine = "Forked experiment · thread=thread-dsh-fork · dsh · completed · job=job-forked-cont · ~/projects/alpha · forked from=thread-dsh";
   const resumed = "Fix queued receipts · thread=thread-dsh · dsh · queued · job=job-queued · ~/projects/alpha";
   const foreign = "Review export · thread=thread-qoder · qoder · completed · job=job-foreign · ~/projects/gamma · other session=session-2";
   for (const [name, input, expected, flags] of [
-    ["session only", {}, [pending, resumed], []],
+    ["session only", {}, [pending, forkedLine, resumed], []],
     ["name query", { query: "QUEUED" }, [resumed], ["--query", "QUEUED"]],
-    ["one repository", { cwd: repoA }, [resumed], ["--cwd", repoA]],
-    ["all sessions", { all: true }, [foreign, pending, resumed], ["--all"]],
-    ["wider history", { all: true, days: 14 }, [foreign, pending, resumed], ["--all", "--days", "14"]],
-    ["limit", { limit: 1 }, [pending, "1 older not shown"], ["--limit", "1"]],
+    ["fork query", { query: "forked" }, [forkedLine], ["--query", "forked"]],
+    ["one repository", { cwd: repoA }, [forkedLine, resumed], ["--cwd", repoA]],
+    ["all sessions", { all: true }, [foreign, pending, forkedLine, resumed], ["--all"]],
+    ["wider history", { all: true, days: 14 }, [foreign, pending, forkedLine, resumed], ["--all", "--days", "14"]],
+    ["limit", { limit: 1 }, [pending, "2 older not shown"], ["--limit", "1"]],
     ["no match", { query: "missing" }, ["No matching tasks."], ["--query", "missing"]],
   ]) {
     const result = await listDirectorTasks({ sessionId: "session-1", home, configDir, tmpDir, ...input });

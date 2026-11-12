@@ -1075,7 +1075,17 @@ export async function runAppServerTurn(cwd, options = {}) {
     })();
     try {
       let session;
-      if (options.resumeThreadId) {
+      if (options.forkThreadId) {
+        emitProgress(options.onProgress, `Forking thread ${options.forkThreadId}.`, "starting");
+        session = await port.forkSession({
+          sessionId: options.forkThreadId,
+          cwd,
+          model: options.model,
+          sandbox: options.sandbox,
+          ephemeral: options.ephemeral ?? (options.persistThread ? false : true),
+          threadName: options.persistThread ? options.threadName : options.threadName ?? null
+        });
+      } else if (options.resumeThreadId) {
         emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
         session = await port.resumeSession({
           sessionId: options.resumeThreadId,

@@ -30,20 +30,20 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        mode: { type: 'string', enum: ['investigate', 'implement', 'continue', 'review', 'adversarial-review'] },
+        mode: { type: 'string', enum: ['investigate', 'implement', 'continue', 'fork', 'review', 'adversarial-review'] },
         name: { type: 'string', description: 'Three to eight words saying what the task does; never a job id or a mode name.' },
         cwd: CWD,
         brief: { type: 'string', description: 'The brief body Codex reads (for review modes, the focus text). '
-          + 'For investigate, implement and continue, dispatch.sh appends a final-report block requiring evidence '
+          + 'For investigate, implement, continue and fork, dispatch.sh appends a final-report block requiring evidence '
           + 'that the work is done; do not repeat it here.' },
-        thread: { type: 'string', description: 'THREAD: the thread to continue (required for mode continue).' },
+        thread: { type: 'string', description: 'THREAD: the thread to continue or fork from (required for mode continue and mode fork).' },
         base: { type: 'string', description: 'BASE: the base ref for review modes.' },
-        write: { type: 'boolean', description: 'WRITE: continue write intent. Default full sandbox already permits writes; ACP permissions are controlled by the agent. State read-only intent in the brief.' },
+        write: { type: 'boolean', description: 'WRITE: continue or fork write intent. Default full sandbox already permits writes; ACP permissions are controlled by the agent. State read-only intent in the brief.' },
         effort: { type: 'string', description: 'EFFORT: only when the skill says to escalate.' },
         model: { type: 'string', description: 'MODEL: agy defaults to $CODEX_COMPANION_ANTIGRAVITY_MODEL, else gemini-4-carbon, with high thinking; set for an explicit override.' },
         siblings: { type: 'string', description: 'SIBLINGS: one line naming the other running tasks.' },
         sandbox: { type: 'string', enum: ['full', 'network', 'default'], description: 'SANDBOX: only when the user asks.' },
-        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: omitted uses $CODEX_DIRECTOR_EXECUTOR, else codex. Use codex explicitly when required. Review stays Codex; continue restores its thread executor and ACP launch configuration, rejecting a mismatch. agy aliases antigravity and launches the installed CLI with acp.' },
+        executor: { type: 'string', enum: ['codex', 'qoder', 'dsh', 'antigravity', 'agy', 'acp'], description: 'EXECUTOR: omitted uses $CODEX_DIRECTOR_EXECUTOR, else codex. Use codex explicitly when required. Review stays Codex; continue and fork restore their source thread executor and ACP launch configuration, rejecting a mismatch. agy aliases antigravity and launches the installed CLI with acp.' },
         executor_command: { type: 'string', description: 'EXECUTOR_COMMAND: override the ACP executable.' },
         executor_args: { type: 'array', items: { type: 'string' }, description: 'EXECUTOR_ARGS: arguments for the ACP executable; dsh defaults to --profile acp.' },
         executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP tool permission policy. dsh/agy default allow-once; agy native questions always wait for the director. ask forwards actual permission requests; it does not undo Qoder bypass mode.' },

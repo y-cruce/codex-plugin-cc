@@ -354,6 +354,30 @@ rl.on("line", (line) => {
         break;
       }
 
+      case "thread/fork": {
+        if (BEHAVIOR === "fork-unsupported") {
+          send({ id: message.id, error: { code: -32601, message: "Unsupported method: thread/fork" } });
+          break;
+        }
+        const source = ensureThread(state, message.params.threadId);
+        const forked = nextThread(state, message.params.cwd || source.cwd, message.params.ephemeral);
+        forked.sandbox = message.params.sandbox ?? source.sandbox ?? null;
+        forked.forkedFromThreadId = source.id;
+        state.lastThreadFork = {
+          threadId: message.params.threadId,
+          forkedThreadId: forked.id,
+          cwd: forked.cwd,
+          model: message.params.model ?? null,
+          sandbox: forked.sandbox,
+          ephemeral: Boolean(message.params.ephemeral),
+          excludeTurns: Boolean(message.params.excludeTurns)
+        };
+        saveState(state);
+        send({ id: message.id, result: { thread: buildThread(forked), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: forked.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ method: "thread/started", params: { thread: { id: forked.id } } });
+        break;
+      }
+
       case "externalAgentConfig/import": {
         if (BEHAVIOR === "external-import-unsupported") {
           send({ id: message.id, error: { code: -32601, message: "Unsupported method: externalAgentConfig/import" } });

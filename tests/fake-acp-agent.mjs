@@ -68,8 +68,8 @@ class FakeAgent {
     this.env = env;
     this.stderr = stderr;
     this.sessions = new Map();
-    if (dsh && process.env.ACP_FAKE_SESSION_FILE && fs.existsSync(process.env.ACP_FAKE_SESSION_FILE)) {
-      this.sessions = new Map(JSON.parse(fs.readFileSync(process.env.ACP_FAKE_SESSION_FILE, "utf8")));
+    if (this.env.ACP_FAKE_SESSION_FILE && fs.existsSync(this.env.ACP_FAKE_SESSION_FILE)) {
+      this.sessions = new Map(JSON.parse(fs.readFileSync(this.env.ACP_FAKE_SESSION_FILE, "utf8")));
     }
     if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "unsupported") this.setSessionConfigOption = undefined;
   }
@@ -80,7 +80,7 @@ class FakeAgent {
     if (process.env.ACP_FAKE_INITIALIZE_ERROR) throw new Error("fake initialize failure");
     return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: this.env.ACP_FAKE_AGENT_NAME ?? (dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli"), version: "test" },
       agentCapabilities: { loadSession: !dsh,
-      sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true },
+      sessionCapabilities: { resume: true, ...(this.env.ACP_FAKE_FORK === "1" ? { fork: {} } : {}) }, promptCapabilities: { image: true, embeddedContext: true },
       ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}),
       ...(this.env.ACP_FAKE_STEERING_LOCATION === "capabilities" ? { _meta: { steering: { supported: true } } } : {}) },
       ...(this.env.ACP_FAKE_STEERING_LOCATION === "top-level" ? { _meta: { steering: { supported: true } } } : {}), authMethods: [] };
@@ -109,9 +109,29 @@ class FakeAgent {
     return { ...(dsh ? {} : { modes }), configOptions: configOptions(session.model, session.effort) };
   }
 
+  async unstable_forkSession(params) {
+    record({ method: "session/fork", params });
+    await startupFailure("session/fork", this);
+    const source = this.sessions.get(params.sessionId);
+    if (!source) throw new Error(`unknown session: ${params.sessionId}`);
+    const sessionId = `fake-fork-${crypto.randomUUID()}`;
+    const forked = {
+      cwd: params.cwd,
+      mode: "default",
+      model: modelValues()[0],
+      effort: reasoningEffortValues()?.[0] ?? null,
+      remembered: source.remembered,
+      cancelled: null,
+      cancelCount: 0
+    };
+    this.sessions.set(sessionId, forked);
+    this.persist();
+    return { sessionId, ...(dsh ? {} : { modes }), configOptions: configOptions(forked.model, forked.effort) };
+  }
+
   persist() {
-    if (dsh && process.env.ACP_FAKE_SESSION_FILE) {
-      fs.writeFileSync(process.env.ACP_FAKE_SESSION_FILE, JSON.stringify([...this.sessions]));
+    if (this.env.ACP_FAKE_SESSION_FILE) {
+      fs.writeFileSync(this.env.ACP_FAKE_SESSION_FILE, JSON.stringify([...this.sessions]));
     }
   }
 
@@ -120,6 +140,7 @@ class FakeAgent {
     if (dsh) throw new Error("DSH does not support session/set_mode");
     record({ method: "session/set_mode", params });
     this.sessions.get(params.sessionId).mode = params.modeId;
+    this.persist();
     return {};
   }
 
@@ -129,6 +150,7 @@ class FakeAgent {
     if (params.configId === "model") {
       if (!modelValues().includes(params.value)) throw new Error(`invalid model: ${params.value}`);
       session.model = params.value;
+      this.persist();
       const selected = process.env.ACP_FAKE_CONFIG_BEHAVIOR === "mismatch" ? "dfmodel" : session.model;
       return { configOptions: configOptions(selected, session.effort) };
     }
@@ -136,6 +158,7 @@ class FakeAgent {
       if (process.env.ACP_FAKE_CONFIG_BEHAVIOR === "effort-error") throw new Error("reasoning effort rejected");
       if (!reasoningEffortValues()?.includes(params.value)) throw new Error(`invalid reasoning effort: ${params.value}`);
       session.effort = params.value;
+      this.persist();
       return { configOptions: configOptions(session.model, session.effort) };
     }
     throw new Error(`invalid config option: ${params.configId}`);
@@ -177,6 +200,20 @@ class FakeAgent {
     if (text === "stderr") {
       this.stderr.write(this.env.ACP_FAKE_STDERR);
       if (this.env.ACP_FAKE_RELEASE_FILE) await waitForRelease(this.env.ACP_FAKE_RELEASE_FILE);
+      return { stopReason: "end_turn" };
+    }
+    if (text.startsWith("memo:")) {
+      const session = this.sessions.get(params.sessionId);
+      const [action, value] = text.slice(5).split(":");
+      const prev = session.remembered ?? "none";
+      if (action === "set") {
+        session.remembered = value;
+        this.persist();
+      }
+      await this.update(params.sessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `prev=${prev} now=${session.remembered ?? "none"} mode=${session.mode} model=${session.model} effort=${session.effort}` }
+      });
       return { stopReason: "end_turn" };
     }
     if (qoderQueueing && text.startsWith("qoder-steer:")) {

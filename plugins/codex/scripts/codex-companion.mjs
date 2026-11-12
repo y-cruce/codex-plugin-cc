@@ -92,7 +92,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>]",
       "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--fork-thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--days <n>] [--limit <n>]",
@@ -397,13 +397,29 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 }
 
 function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "codex") {
-  if (listJobs(workspaceRoot).some((job) => job.threadId === threadId && (job.executor ?? "codex") === executor)) {
+  if (listJobs(workspaceRoot).some((job) => (job.executorSessionId === threadId || job.threadId === threadId) && (job.executor ?? "codex") === executor)) {
     return;
   }
 
   throw new Error(
     `Thread ${threadId} is not tracked for this repository; its local history may have been pruned. Pass --allow-other-repo to resume it using the executor's session history.`
   );
+}
+
+function ensureForkSourceIdle(workspaceRoot, forkThreadId) {
+  const brokerFailures = new Map();
+  for (const candidate of sortJobsNewestFirst(listJobs(workspaceRoot))) {
+    if (!isActiveJobStatus(candidate.status)) continue;
+    const stored = readStoredJob(workspaceRoot, candidate.id) ?? candidate;
+    const target = stored.executorSessionId ?? stored.threadId ?? stored.request?.resumeThreadId ?? null;
+    if (target !== forkThreadId) continue;
+    const checked = checkJobLiveness(workspaceRoot, stored, null, brokerFailures);
+    if (isActiveJobStatus(checked.status)) {
+      throw new Error(
+        `Thread ${forkThreadId} is still ${checked.status} (${checked.id}); wait for it to finish or cancel it before forking.`
+      );
+    }
+  }
 }
 
 function executorPreset(value) {
@@ -425,20 +441,38 @@ function trackedPreset(job, request) {
 
 export function resolveTaskExecutor(workspaceRoot, threadId, options) {
   const preset = executorPreset(options["executor-preset"]);
-  const match = threadId && sortJobsNewestFirst(listJobs(workspaceRoot)).find((job) =>
-    (job.executorSessionId ?? job.threadId) === threadId);
+  const threadJobs = threadId
+    ? sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => (job.executorSessionId ?? job.threadId) === threadId)
+    : [];
+  const match = threadJobs[0] ?? null;
   if (!match) return { preset, executor: options.executor ?? (preset ? (preset === "codex" ? "codex" : "acp")
-    : process.env.CODEX_COMPANION_EXECUTOR ?? "codex"), previous: null };
+    : process.env.CODEX_COMPANION_EXECUTOR ?? "codex"), previous: null, sourceJob: null, inherited: null };
 
-  const job = readStoredJob(workspaceRoot, match.id) ?? match;
+  const storedJobs = threadJobs.map((entry) => readStoredJob(workspaceRoot, entry.id) ?? entry);
+  const job = storedJobs[0];
   const executor = job.executor ?? "codex";
   const previous = job.request ?? {};
+  const pick = (getter) => {
+    for (const item of storedJobs) {
+      const value = getter(item);
+      if (value != null && value !== "") return value;
+    }
+    return null;
+  };
+  const inherited = {
+    model: pick((item) => item.request?.model),
+    effort: pick((item) => item.request?.effort),
+    executorMode: pick((item) => item.request?.executorMode ?? item.executorMode),
+    executorModel: pick((item) => item.request?.executorModel ?? item.executorModel),
+    executorEffort: pick((item) => item.executorEffort ?? item.request?.executorEffort),
+    executorPermissions: pick((item) => item.request?.executorPermissions)
+  };
   const original = trackedPreset(job, previous);
   const requested = options.executor ?? (preset ? (preset === "codex" ? "codex" : "acp") : null);
   if ((original && preset && preset !== original) || (requested && requested !== executor)) {
     throw new Error(`Thread ${threadId} belongs to executor "${original ?? `${executor} (unknown preset)`}"; cannot continue with "${preset ?? options.executor}". Omit executor to reuse the original.`);
   }
-  return { preset: original ?? preset, executor, previous };
+  return { preset: original ?? preset, executor, previous, sourceJob: job, inherited };
 }
 
 async function executeReviewRun(request) {
@@ -603,8 +637,8 @@ async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
   const availability = request.executor === "codex" ? ensureCodexAvailable(request.cwd) : undefined;
   const workspaceAvailability = request.cwd === workspaceRoot ? availability : undefined;
-  if (request.resumeThreadId && !request.allowOtherRepo) {
-    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId, request.executor);
+  if ((request.resumeThreadId || request.forkThreadId) && !request.allowOtherRepo) {
+    requireTrackedThreadForWorkspace(workspaceRoot, request.resumeThreadId || request.forkThreadId, request.executor);
   }
 
   const taskMetadata = buildTaskRunMetadata({
@@ -614,6 +648,7 @@ async function executeTaskRun(request) {
   });
 
   let resumeThreadId = request.resumeThreadId ?? null;
+  const forkThreadId = request.forkThreadId ?? null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId,
@@ -663,6 +698,7 @@ async function executeTaskRun(request) {
   const result = await (request.executor === "acp" ? runAcpTurn : runAppServerTurn)(workspaceRoot, {
     availability: workspaceAvailability,
     resumeThreadId,
+    forkThreadId,
     prompt: request.prompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
@@ -671,8 +707,11 @@ async function executeTaskRun(request) {
     network: Boolean(request.network),
     onProgress: request.onProgress,
     persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
+    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(
+      (forkThreadId ? request.label : null) || request.prompt || DEFAULT_CONTINUE_PROMPT
+    ),
     resumeSessionId: resumeThreadId,
+    forkSessionId: forkThreadId,
     command: request.executorCommand,
     args: request.executorArgs,
     modeId: request.executorMode,
@@ -766,8 +805,9 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
   }), executor, sandbox, network };
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, allowOtherRepo, jobId,
-  executor, executorPreset, executorCommand, executorArgs, executorMode, executorModel, executorEffort, executorPermissions }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, forkThreadId,
+  allowOtherRepo, jobId, label, executor, executorPreset, executorCommand, executorArgs, executorMode, executorModel,
+  executorEffort, executorPermissions }) {
   return {
     cwd,
     model,
@@ -778,8 +818,10 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     network,
     resumeLast,
     resumeThreadId,
+    ...(forkThreadId ? { forkThreadId } : {}),
     allowOtherRepo,
     jobId,
+    ...(label ? { label } : {}),
     executor,
     executorPreset,
     executorCommand,
@@ -964,7 +1006,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "sandbox", "label", "executor", "executor-preset", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "fork-thread", "sandbox", "label", "executor", "executor-preset", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -973,11 +1015,29 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
-  const effort = normalizeReasoningEffort(options.effort);
+  const requestedModel = normalizeRequestedModel(options.model);
+  const requestedEffort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
   const resumeThreadId = options.thread == null ? null : String(options.thread).trim();
-  const { executor, preset, previous } = resolveTaskExecutor(workspaceRoot, resumeThreadId, options);
+  const forkThreadId = options["fork-thread"] == null ? null : String(options["fork-thread"]).trim();
+  const resumeLast = Boolean(options["resume-last"] || options.resume);
+  const allowOtherRepo = Boolean(options["allow-other-repo"]);
+  const fresh = Boolean(options.fresh);
+  if (options.thread != null && (!resumeThreadId || resumeThreadId.startsWith("-"))) {
+    throw new Error("Provide a thread id with --thread.");
+  }
+  if (options["fork-thread"] != null && (!forkThreadId || forkThreadId.startsWith("-"))) {
+    throw new Error("Provide a thread id with --fork-thread.");
+  }
+  if (resumeLast && fresh && !resumeThreadId && !forkThreadId) {
+    throw new Error("Choose either --resume/--resume-last or --fresh.");
+  }
+  if ([Boolean(resumeThreadId), Boolean(forkThreadId), resumeLast, fresh].filter(Boolean).length > 1) {
+    throw new Error("Choose only one of --thread, --fork-thread, --resume/--resume-last, or --fresh.");
+  }
+
+  const sourceThreadId = resumeThreadId || forkThreadId;
+  const { executor, preset, previous, sourceJob, inherited } = resolveTaskExecutor(workspaceRoot, sourceThreadId, options);
   if (!["codex", "acp"].includes(executor)) throw new Error("--executor must be codex or acp.");
   let executorCommand = null;
   let executorArgs = [];
@@ -996,44 +1056,49 @@ async function handleTask(argv) {
     }
     if (previous && ((options["executor-command"] && options["executor-command"] !== executorCommand) ||
         JSON.stringify(executorArgs) !== JSON.stringify(previous.executorArgs ?? []))) {
-      throw new Error(`Thread ${resumeThreadId} must be continued with its original ACP command and arguments.`);
+      throw new Error(`Thread ${sourceThreadId} must be ${forkThreadId ? "forked" : "continued"} with its original ACP command and arguments.`);
     }
-    executorMode = options["executor-mode"] ?? (previous ? previous.executorMode : process.env.CODEX_COMPANION_ACP_MODE) ?? null;
-    executorModel = options["executor-model"] ?? (previous ? model : process.env.CODEX_COMPANION_ACP_MODEL) ?? null;
-    executorEffort = options["executor-effort"] ?? (previous ? null : process.env.CODEX_COMPANION_ACP_EFFORT) ?? null;
-    executorPermissions = options["executor-permissions"] ?? (previous ? previous.executorPermissions : process.env.CODEX_COMPANION_ACP_PERMISSIONS) ?? null;
+    executorMode = options["executor-mode"] ?? (previous ? inherited?.executorMode ?? previous.executorMode : process.env.CODEX_COMPANION_ACP_MODE) ?? null;
+    executorModel = options["executor-model"] ?? (forkThreadId
+      ? requestedModel ?? (previous ? inherited?.executorModel : process.env.CODEX_COMPANION_ACP_MODEL)
+      : previous ? requestedModel : process.env.CODEX_COMPANION_ACP_MODEL) ?? null;
+    executorEffort = options["executor-effort"] ?? (forkThreadId
+      ? requestedEffort ?? (previous ? inherited?.executorEffort : process.env.CODEX_COMPANION_ACP_EFFORT)
+      : previous ? null : process.env.CODEX_COMPANION_ACP_EFFORT) ?? null;
+    executorPermissions = options["executor-permissions"] ?? (previous ? inherited?.executorPermissions ?? previous.executorPermissions : process.env.CODEX_COMPANION_ACP_PERMISSIONS) ?? null;
     if (executorPermissions !== null && !["ask", "allow-once"].includes(executorPermissions)) {
       throw new Error("--executor-permissions must be ask or allow-once.");
     }
     if (!executorCommand) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
   }
 
-  const resumeLast = Boolean(options["resume-last"] || options.resume);
-  const allowOtherRepo = Boolean(options["allow-other-repo"]);
-  if (options.thread != null && (!resumeThreadId || resumeThreadId.startsWith("-"))) {
-    throw new Error("Provide a thread id with --thread.");
-  }
-  const fresh = Boolean(options.fresh);
-  if (resumeLast && fresh) {
-    throw new Error("Choose either --resume/--resume-last or --fresh.");
-  }
-  if (resumeThreadId && (resumeLast || fresh)) {
-    throw new Error("Choose only one of --thread, --resume/--resume-last, or --fresh.");
-  }
-  const sandbox = options.sandbox ?? (options.write ? "workspace-write" : "read-only");
+  const model = executor === "codex" ? (requestedModel ?? (forkThreadId ? inherited?.model ?? null : null)) : requestedModel;
+  const effort = executor === "codex" ? (requestedEffort ?? (forkThreadId ? inherited?.effort ?? null : null)) : requestedEffort;
+  const sandbox = options.sandbox ?? (options.write ? "workspace-write" : (forkThreadId && previous?.sandbox ? previous.sandbox : "read-only"));
   if (!["read-only", "workspace-write", "danger-full-access"].includes(sandbox)) {
     throw new Error("--sandbox must be read-only, workspace-write, or danger-full-access.");
   }
   const write = sandbox !== "read-only";
-  const network = Boolean(options.network);
+  const network = options.network ? true : Boolean(forkThreadId && !options.sandbox && !options.write && previous?.network);
+  if (forkThreadId) {
+    requireTaskRequest(prompt, false);
+    if (!allowOtherRepo) requireTrackedThreadForWorkspace(workspaceRoot, forkThreadId, executor);
+    ensureForkSourceIdle(workspaceRoot, forkThreadId);
+  }
   const taskMetadata = buildTaskRunMetadata({
     prompt,
     resumeLast: Boolean(resumeLast || resumeThreadId),
     executor
   });
 
-  const job = { ...buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, options.label, executor),
-    ...(executorMode ? { executorMode } : {}), ...(executorModel ? { executorModel } : {}) };
+  const forkedFrom = forkThreadId ? { threadId: forkThreadId, jobId: sourceJob?.id ?? null } : null;
+  const baseJob = buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, options.label, executor);
+  const job = {
+    ...baseJob,
+    ...(executorMode ? { executorMode } : {}),
+    ...(executorModel ? { executorModel } : {}),
+    ...(forkedFrom ? { forkedFrom } : {})
+  };
   const request = buildTaskRequest({
     cwd,
     model,
@@ -1044,8 +1109,10 @@ async function handleTask(argv) {
     network,
     resumeLast,
     resumeThreadId,
+    forkThreadId,
     allowOtherRepo,
     jobId: job.id,
+    label: baseJob.label ?? null,
     executor,
     executorPreset: preset,
     executorCommand,

@@ -185,13 +185,21 @@ export async function runAcpTurn(cwd, options = {}) {
       stderr: port.stderr.trim(), fileChanges: [], touchedFiles: [], interruptedTurns, commandExecutions: [] };
   };
   try {
-    emitProgress(options.onProgress, options.resumeSessionId ? `Resuming ACP session ${options.resumeSessionId}.` : "Starting ACP session.", "starting",
+    const startMessage = options.forkSessionId
+      ? `Forking ACP session ${options.forkSessionId}.`
+      : options.resumeSessionId
+        ? `Resuming ACP session ${options.resumeSessionId}.`
+        : "Starting ACP session.";
+    emitProgress(options.onProgress, startMessage, "starting",
       { executor: "acp", controlEndpoint: port.controlEndpoint });
-    const session = options.resumeSessionId
-      ? await port.resumeSession({ sessionId: options.resumeSessionId, cwd, additionalDirectories: options.additionalDirectories ?? [],
+    const session = options.forkSessionId
+      ? await port.forkSession({ sessionId: options.forkSessionId, cwd, additionalDirectories: options.additionalDirectories ?? [],
           mcpServers: options.mcpServers ?? [], modeId: options.modeId, modelId: options.modelId, effortId: options.effortId })
-      : await port.startSession({ cwd, additionalDirectories: options.additionalDirectories ?? [], mcpServers: options.mcpServers ?? [],
-          modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
+      : options.resumeSessionId
+        ? await port.resumeSession({ sessionId: options.resumeSessionId, cwd, additionalDirectories: options.additionalDirectories ?? [],
+            mcpServers: options.mcpServers ?? [], modeId: options.modeId, modelId: options.modelId, effortId: options.effortId })
+        : await port.startSession({ cwd, additionalDirectories: options.additionalDirectories ?? [], mcpServers: options.mcpServers ?? [],
+            modeId: options.modeId, modelId: options.modelId, effortId: options.effortId });
     emitProgress(options.onProgress, `ACP session ready (${session.sessionId}).`, "starting", {
       executor: "acp", executorSessionId: session.sessionId, threadId: session.sessionId, controlEndpoint: port.controlEndpoint,
       executorEffort: session.effortId
