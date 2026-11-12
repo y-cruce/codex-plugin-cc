@@ -114,13 +114,13 @@ Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求�
 
 任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。
 
-ACP agents can also advertise top-level `_meta.steering.supported: true`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. Local DSH and Antigravity extensions can expose their runtime's mid-turn input through this route. Unmodified servers that do not advertise it keep queue/interrupt behavior.
+ACP agents can advertise `_meta.steering.supported: true` at the initialize response's top level or under `agentCapabilities`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. DSH's community adapter and Antigravity's extension expose mid-turn input through this route. Servers that do not advertise it keep queue/interrupt behavior.
 
-ACP 服务也可通过握手顶层 `_meta.steering.supported: true` 声明引导扩展。插件调用 `_session/steering` 并要求 `idleBehavior: "promptRequired"`，只有 `injected` 结果才记为已插入（`accepted: true`，模型消费仍未知）；`promptRequired` 表示消息未送入，需要调用方决定后续操作。DSH 和 Antigravity 的本地扩展可通过此入口连接运行时的追加输入能力，未声明能力的原始服务继续使用 queue/interrupt。
+ACP 服务可通过握手顶层或 `agentCapabilities` 下的 `_meta.steering.supported: true` 声明引导扩展。插件调用 `_session/steering` 并要求 `idleBehavior: "promptRequired"`，只有 `injected` 结果才记为已插入（`accepted: true`，模型消费仍未知）；`promptRequired` 表示消息未送入，需要调用方决定后续操作。DSH 社区适配器和 Antigravity 扩展通过此入口连接运行时的追加输入能力，未声明能力的服务继续使用 queue/interrupt。
 
-Plugin 1.4.103 includes the [Antigravity proxy and setup instructions](plugins/codex/scripts/agy-acp/README.md). It uses the installed official ACP 1.4.4 runtime. DSH's adapter patch is maintained in [dsh-plugins/acp-steering](https://github.com/y-cruce/dsh-plugins/tree/main/acp-steering).
+Plugin 1.4.103 includes the [Antigravity proxy and setup instructions](plugins/codex/scripts/agy-acp/README.md). It uses the installed official ACP 1.4.4 runtime. DSH uses [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp) in its isolated profile; its built-in steering replaces the local DSH adapter patch for new tasks.
 
-插件 1.4.103 包含 [Antigravity 引导代理及接入说明](plugins/codex/scripts/agy-acp/README.md)，复用已安装的官方 ACP 1.4.4 运行时；DSH 补丁见 [dsh-plugins/acp-steering](https://github.com/y-cruce/dsh-plugins/tree/main/acp-steering)。
+插件 1.4.103 包含 [Antigravity 引导代理及接入说明](plugins/codex/scripts/agy-acp/README.md)，复用已安装的官方 ACP 1.4.4 运行时；DSH 使用独立 profile 中的 [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp)，新任务直接使用其内置 steering。
 
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 
@@ -596,15 +596,19 @@ agy sorts the workspace list shown to its model, so changing the order of additi
 
 ## DeepSeek Harness executor / DSH 执行器
 
-With the updated code-director skill, `mcp__codex__dispatch` accepts `executor: "dsh"`. It launches the existing ACP worker with `dsh --profile acp`; override the executable with `executor_command` or `CODEX_DIRECTOR_DSH_COMMAND`, and launch arguments with the `executor_args` string array. For direct companion calls:
+With the updated code-director skill, `mcp__codex__dispatch` accepts `executor: "dsh"`. It launches `$HOME/.local/share/dsh-fork/dsh --profile acp-fork`. This launcher sets `DSH_HOME=$HOME/.local/share/dsh-fork/home` and uses the isolated runtime in `runtime/`: dsh `0.2.2-rc.1`, Cordis `4.1.0`, and `@8kugames/dsh-zed-acp` `0.3.10`. Override the executable with `executor_command` or `CODEX_DIRECTOR_DSH_COMMAND`, and launch arguments with the `executor_args` string array. For direct companion calls:
 
 ```sh
-node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command dsh --executor-args '["--profile","acp"]' --executor-permissions allow-once --json "Inspect the project"
+node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command "$HOME/.local/share/dsh-fork/dsh" --executor-args '["--profile","acp-fork"]' --executor-permissions allow-once --json "Inspect the project"
 ```
 
-Continue with the returned session id (`mode: "continue"`, `thread: "<session-id>"`); the plugin restores its original executor, command and arguments. DSH restores model context through `session/resume`, with local event replay. DSH has no session modes; mid-turn steering requires its advertised extension. Otherwise choose queue for later input, interrupt to stop active work. Its default policy selects only an offered `allow_once` permission; `ask` forwards tool permission requests. No model is forced when omitted. Thoughts and answers sharing a source message id remain separate.
+Continue with the returned session id (`mode: "continue"`, `thread: "<session-id>"`); the plugin restores its original executor, command and arguments, including the old launch configuration for existing DSH threads. DSH restores model context through `session/resume`, with local event replay. The community adapter supports `default`/`plan` modes, `session/load`, `session/fork` and mid-turn steering; task forking is not exposed by this plugin. Steering keeps the original prompt open until the turn ends. Its default permission policy selects only an offered `allow_once`; `ask` forwards tool permission requests. No model is forced when omitted. Thoughts and answers sharing a source message id remain separate.
 
-派单工具支持 `executor: "dsh"`，通过 ACP 后台进程运行 `dsh --profile acp`；可用 `executor_command` 或 `CODEX_DIRECTOR_DSH_COMMAND` 指定程序。用返回的 thread 续接时自动恢复原始执行器、命令和参数。DSH 无会话模式，运行中 steering 依赖已安装并声明支持的扩展，否则按意图选 queue 或 interrupt。默认只应答单次工具许可，`ask` 转交实际权限请求；省略模型时沿用 DSH 配置。
+派单工具支持 `executor: "dsh"`，默认运行 `$HOME/.local/share/dsh-fork/dsh --profile acp-fork`。启动器设置独立的 `DSH_HOME=$HOME/.local/share/dsh-fork/home`，运行时位于同目录的 `runtime/`，固定 dsh `0.2.2-rc.1`、Cordis `4.1.0`、社区插件 `0.3.10`。可用 `executor_command` 或 `CODEX_DIRECTOR_DSH_COMMAND` 指定程序。续接时恢复原始命令和参数，已有 DSH 线程沿用旧启动配置。社区适配器提供 `default`/`plan` 模式、load、fork 和 steering；本插件尚未提供任务分叉入口。steering 仍由原 prompt 响应结束回合。默认只应答单次工具许可，`ask` 转交权限请求；省略模型时沿用 DSH 配置。
+
+Keep the new runtime's credentials and sessions in its own home. Credentials can be copied from the existing installation; its session store must stay separate. To roll back new dispatches, set `executor_command` to the original `dsh` path and `executor_args` to `["--profile","acp"]`. Continue each existing thread with its recorded launcher; sessions in the two homes are separate.
+
+新版凭据和会话保存在独立 home；凭据可从现有安装拷贝，会话存储单独使用。回退新派单时，将程序指定为原 `dsh` 路径，参数设为 `["--profile","acp"]`。已有线程继续使用记录的启动器，两套 home 的会话分别管理。
 
 ## ACP director controls
 

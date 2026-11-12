@@ -314,7 +314,8 @@ export class AcpExecutorJobPort {
     const sessionCaps = this.initializeResponse.agentCapabilities?.sessionCapabilities ?? {};
     this.capabilities.resumeSession = Boolean(sessionCaps.resume);
     this.capabilities.sessionModes = false;
-    this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true;
+    this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true ||
+      this.initializeResponse.agentCapabilities?._meta?.steering?.supported === true;
     this.capabilities.midTurnSteer = this.steeringExtension || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
       this.initializeResponse.agentCapabilities?._meta?.qoder?.promptQueueing === true);
   }

@@ -31,6 +31,25 @@ function useInProcessAgent(t) {
   });
 }
 
+test("ACP detects steering in both initialize metadata locations", async (t) => {
+  isolateTestEnvironment(t);
+  useInProcessAgent(t);
+  for (const location of ["top-level", "capabilities", "none"]) {
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: "steering-metadata", executor: "acp", workspaceRoot: cwd, status: "running" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const port = await AcpExecutorJobPort.open({ cwd, job, command: process.execPath, args: [AGENT],
+      env: { ...process.env, ACP_FAKE_STEERING_LOCATION: location } });
+    try {
+      assert.equal(port.steeringExtension, location !== "none", location);
+      assert.equal(port.capabilities.midTurnSteer, location !== "none", location);
+    } finally {
+      await port.close();
+    }
+  }
+});
+
 test("Antigravity harness fatal stderr fails the round before end_turn can publish completion", async (t) => {
   isolateTestEnvironment(t);
   useInProcessAgent(t);

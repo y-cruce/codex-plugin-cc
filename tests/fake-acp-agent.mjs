@@ -81,7 +81,9 @@ class FakeAgent {
     return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: this.env.ACP_FAKE_AGENT_NAME ?? (dsh ? "deepseek-harness" : qoderQueueing ? "qoder-cli" : "qodercli"), version: "test" },
       agentCapabilities: { loadSession: !dsh,
       sessionCapabilities: { resume: true }, promptCapabilities: { image: true, embeddedContext: true },
-      ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}) }, authMethods: [] };
+      ...(qoderQueueing ? { _meta: { qoder: { promptQueueing: true } } } : {}),
+      ...(this.env.ACP_FAKE_STEERING_LOCATION === "capabilities" ? { _meta: { steering: { supported: true } } } : {}) },
+      ...(this.env.ACP_FAKE_STEERING_LOCATION === "top-level" ? { _meta: { steering: { supported: true } } } : {}), authMethods: [] };
   }
 
   async newSession(params) {

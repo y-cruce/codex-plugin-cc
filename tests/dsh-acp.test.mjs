@@ -30,13 +30,18 @@ test("DSH-shaped ACP sessions resume across processes and keep thoughts out of t
   assert.equal(first.status, 0, first.stderr);
   const sessionId = JSON.parse(first.stdout).threadId;
   const firstJob = listJobs(cwd)[0];
-  const second = cli("recall", ["--thread", sessionId]);
+  const second = run(process.execPath, [SCRIPT, "task", "--cwd", cwd, "--thread", sessionId, "--json", "recall"], {
+    cwd, env: { ...env, CODEX_COMPANION_ACP_COMMAND: "/new-default/dsh",
+      CODEX_COMPANION_ACP_ARGS: '["--profile","acp-fork"]' }
+  });
   assert.equal(second.status, 0, second.stderr);
   const result = JSON.parse(second.stdout);
   assert.equal(result.threadId, sessionId);
   assert.equal(result.rawOutput, "context-survives");
   assert.deepEqual(result.reasoningSummary, ["private reasoning"]);
   const secondJob = listJobs(cwd).find(job => job.id !== firstJob.id);
+  assert.equal(secondJob.request.executorCommand, process.execPath);
+  assert.deepEqual(secondJob.request.executorArgs, [AGENT]);
   assert.equal(secondJob.request.executorPermissions, "allow-once");
   assert.equal((await readRoundContext(cwd, firstJob.id)).recordId, (await readRoundContext(cwd, secondJob.id)).recordId);
 
