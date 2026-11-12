@@ -1498,19 +1498,21 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     if (!e.agentId) {
       state.busy = false
       $.clock.after(0, () => { void poll($, state) })
-    }
-    return next(e)
-  })
-  on('classic.Stop', ($, e, next) => {
-    // Reload can lose a Monitor's launch reply and its stored ID. The host
-    // lists script Monitors as shell tasks here, including their commands.
-    // Once the channel needs no fallback, retire those exact session watches.
-    if (state.channelOn) {
-      const commands = new Set([...state.roots].filter(root => !state.monitors.has(root) && !state.unreadable.has(root))
-        .map(root => `bash ${state.worker} events --cwd ${root} --session ${state.sessionId}`))
-      for (const task of e.background_tasks ?? []) {
-        if (task.type === 'shell' && task.command && commands.has(task.command) && !state.retiredMonitors.has(task.id)) {
-          stopMonitor($, state, task.id)
+      // Reload can lose a Monitor's launch reply and its stored ID. The host
+      // keeps the exact command in a detached shell's eval before exec'ing node.
+      // Stop only that shell's own group, including its children.
+      if (state.channelOn) {
+        for (const root of state.roots) {
+          if (state.monitors.has(root) || state.unreadable.has(root)) continue
+          const command = `bash ${state.worker} events --cwd ${root} --session ${state.sessionId}`
+          const quoted = `'${command.replaceAll("'", `'"'"'`)}'`
+          const pattern = `eval ${quoted} < /dev/null && pwd -P >| `.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          $.clock.after(0, () => {
+            void $.process.run(['sh', '-c', 'for pid in $(pgrep -f "$1"); do pgid=$(ps -o pgid= -p "$pid"); if [ "$pid" -eq "${pgid:-0}" ]; then kill -TERM -- "-$pid"; fi; done',
+              'codex-monitor-stop', pattern], { cwd: state.cwd, timeoutMs: 2000 }).catch((error: unknown) => {
+              $.ui.log(`Codex tasks stop monitor ${root}: ${String(error)}`, { to: 'debug' })
+            })
+          })
         }
       }
     }

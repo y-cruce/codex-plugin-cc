@@ -131,6 +131,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       const routed = await ingressRun(args);
       if (routed) return routed;
       if (args[1] === "/plugin/scripts/activity-summary.mjs") return options.activityRun(init);
+      if (args[3] === "codex-monitor-stop") return options.stopProcess ? options.stopProcess(args) : { exitCode: 0, stdout: "", stderr: "" };
       if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
@@ -209,7 +210,6 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     },
     goal: async (args, text) => { await hooks.get("command.run:")(engine, { command: "goal", args }, async () => ({ text })); await settle(writes); },
     turn: async (reason = "answer") => hooks.get("turn.complete:")(engine, { reason }, async () => ({ text: "" })),
-    stop: async (tasks) => hooks.get("classic.Stop:")(engine, { background_tasks: tasks }, async () => ({})),
     focus: async (element) => hooks.get("ui.focus:")(engine, { requestId: "codex_tasks", element }, async (event) => event),
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
@@ -1354,34 +1354,46 @@ test("channel confirmation stops an ACP Monitor whose launch reply arrives after
   assert.equal(calls.filter(request => request.tool === "Monitor").length, 1, "the confirmed ACP repository does not rearm its Monitor");
 });
 
-test("a reloaded pane retires its orphaned Monitor from the host's background tasks", async () => {
-  const calls = [];
-  const now = Date.now();
-  const stored = new Map([["codex:tasks:session:ownedMonitors", ["orphan", "hold"]]]);
-  const base = "/home/test/.claude/plugins/data/codex/state/main";
-  const pane = await paneHarness(stored, undefined, "session", { ppid: "4242", now, dirs: ["/fallback"], watch: false,
-    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }],
-      [`${base}/jobs/job-b.json`, { id: "job-b", sessionId: "session", workspaceRoot: "/fallback", status: "running" }]],
-    fsList: directory => directory.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
-      : directory.endsWith("/state") ? [{ kind: "dir", name: "main" }]
-      : directory.endsWith("/jobs") ? ["job-a.json", "job-b.json"].map(name => ({ kind: "file", name, mtimeMs: now })) : [],
-    listThreads: (cwd, threads) => cwd === "/work" ? threads : [{ id: "record-b", recordId: "record-b", jobId: "job-b",
-      status: "running", live: true, directorPush: false, sessionIds: ["session"], viewPath: "/view-b", historyAvailable: false }],
-    toolCall: async request => { calls.push(request); return { result: { taskId: "fallback" } }; } });
-  const command = "bash /home/test/.claude/skills/code-director/scripts/dispatch.sh events --cwd /work --session session";
-  // The host reports script Monitors as shell tasks. Reload can lose both the
-  // per-root record and the launch reply that would have recorded the ID.
-  const tasks = [{ id: "orphan", type: "shell", command }, { id: "unrecorded", type: "shell", command },
-    { id: "hold", type: "shell", command: "Codex jobs running" },
-    { id: "fallback", type: "shell", command: command.replace("--cwd /work", "--cwd /fallback") },
-    { id: "other", type: "shell", command: command.replace("--session session", "--session other") }];
-  await pane.stop(tasks);
-  await new Promise(resolve => setImmediate(resolve));
-  await pane.stop(tasks);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls.filter(request => request.tool === "Monitor").length, 1, "the other root keeps its fallback");
-  assert.deepEqual(calls.filter(request => request.tool === "TaskStop"),
-    ["orphan", "unrecorded"].map(task_id => ({ tool: "TaskStop", task_id })));
+test("a reloaded pane stops only its exact orphaned Monitor commands after channel confirmation", async () => {
+  for (const confirmed of [false, true]) {
+    const calls = [];
+    const probes = [];
+    const stopped = [];
+    const now = Date.now();
+    const stored = new Map([["codex:tasks:session:ownedMonitors", ["orphan", "hold"]]]);
+    const base = "/home/test/.claude/plugins/data/codex/state/main";
+    const command = "bash /home/test/.claude/skills/code-director/scripts/dispatch.sh events --cwd /work --session session";
+    const processes = new Map([["orphan", command], ["unrecorded", command],
+      ["hold", "Codex jobs running"],
+      ["fallback", command.replace("--cwd /work", "--cwd /fallback")],
+      ["other", command.replace("--session session", "--session other")],
+      ["extra", `${command} --extra`], ["similar", command.replace("dispatch.sh", "dispatchXsh")]]);
+    const pane = await paneHarness(stored, undefined, "session", { ppid: "4242", now, dirs: ["/fallback"], watch: false,
+      preset: [...confirmed ? [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]] : [],
+        [`${base}/jobs/job-b.json`, { id: "job-b", sessionId: "session", workspaceRoot: "/fallback", status: "running" }]],
+      fsList: directory => directory.endsWith("plugins/data") ? [{ kind: "dir", name: "codex" }]
+        : directory.endsWith("/state") ? [{ kind: "dir", name: "main" }]
+        : directory.endsWith("/jobs") ? ["job-a.json", "job-b.json"].map(name => ({ kind: "file", name, mtimeMs: now })) : [],
+      listThreads: (cwd, threads) => cwd === "/work" ? threads : [{ id: "record-b", recordId: "record-b", jobId: "job-b",
+        status: "running", live: true, directorPush: false, sessionIds: ["session"], viewPath: "/view-b", historyAvailable: false }],
+      stopProcess: async args => {
+        probes.push(args);
+        const pattern = new RegExp(args[4]);
+        for (const [id, command] of processes) if (pattern.test(`/bin/zsh -c eval '${command}' < /dev/null && pwd -P >| /tmp/cwd`)) {
+          stopped.push(id);
+          processes.delete(id);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      toolCall: async request => { calls.push(request); return { result: { taskId: "fallback" } }; } });
+    await pane.turn();
+    await new Promise(resolve => setImmediate(resolve));
+    await pane.turn();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.filter(request => request.tool === "Monitor").length, confirmed ? 1 : 2, "roots needing fallback keep their Monitors");
+    assert.equal(probes.length, confirmed ? 2 : 0, "one process call per eligible root per completed turn");
+    assert.deepEqual(stopped, confirmed ? ["orphan", "unrecorded"] : []);
+  }
 });
 
 test("Monitors require a live job record with and without a confirmed channel", async () => {
