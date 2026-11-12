@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-plugin-cc",
-  "version": "1.4.133",
+  "version": "1.4.134",
   "private": true,
   "type": "module",
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
