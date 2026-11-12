@@ -1,12 +1,9 @@
 # agy CLI ACP
 
-Migration is blocked on background-command completion. In the verified 1.5.6
-run, a concurrent prompt returned `end_turn` while a 25-second command was
-still running, and the ACP stream stopped before its later result. The same
-command on 1.4.4 stayed in the original job until completion. `session/list`
-and `session/load` expose no running/idle field. Do not treat the migration
-as qualified for asynchronous builds/tests until a reliable completion signal
-is available. The director must decide whether to accept this regression.
+The CLI can return `end_turn` while a background command is running, including
+without steering. In the isolated wakeup probe, it sent no `session/update`
+for 84 seconds after the command's final output was written. Keeping the ACP
+connection open alone is insufficient to collect the completed result.
 
 Dispatch uses the installed `agy acp` server (verified with 1.5.6). It reuses
 the CLI login, settings and MCP configuration. No separate ACP installation,
@@ -33,6 +30,22 @@ server settles the previous prompt when steering arrives; the driver waits
 for the newest response before completing the original job and turn. Sending
 a message confirms submission, without a separate model-consumption receipt.
 Queue, interrupt, cancel and continue retain the usual director controls.
+
+While an execute tool is unfinished, agy steering is refused with instructions
+to choose queue or interrupt; no second prompt is sent. When agy returns
+`end_turn` with unfinished commands, the job stays running. The driver reads
+their native tool statuses with `session/load`, filters out history replay,
+and sends a continuation prompt in the same job and turn once they finish.
+Repeated waits share a 30-minute limit. On timeout the task fails with the
+explicit warning `agy 结束本轮时仍有后台命令在运行` and the remaining commands.
+Queue, interrupt and cancel remain available during waiting. Commands marked
+with the native `run_command` field `IsDaemon: true` are not waited on.
+
+This is recovery from the observed premature response, not a guarantee that
+every native agent task finishes correctly. A three-run comparison per model
+found no improvement from adding a wait instruction to dispatch: Carbon high
+was 0/3 early before and after; Opus medium was 1/3 before and 2/3 after. That
+instruction is therefore not included in the preset.
 
 The subprocess inherits the companion's network environment. This machine's
 tested environment uses `HTTP_PROXY` / `HTTPS_PROXY` at `127.0.0.1:20809`;

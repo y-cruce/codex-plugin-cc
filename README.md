@@ -578,7 +578,7 @@ CLI 服务直接向 `codex-companion` 返回账号可用的完整模型列表。
 
 Dispatch with `executor: "antigravity"` to run the installed CLI's `agy acp` (verified with 1.5.6), reusing its login and MCP configuration. The preset prefers `~/.local/bin/agy`, then PATH, avoiding terminal wrappers when the local binary exists. Override it with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; `executor_args` defaults to `["acp"]`, permissions to `allow-once`. Continue with the returned session id. For direct companion calls:
 
-Qualification remains blocked by 1.5.6 returning `end_turn` before some background commands finish; see the [migration blocker and rollback](plugins/codex/scripts/agy-acp/README.md).
+When agy ends a prompt with unfinished commands, the job waits for their native statuses and automatically continues in the same job, sharing a 30-minute limit; native `IsDaemon: true` commands are excluded. Steering is refused while a command runs: choose queue or interrupt. See [background recovery and rollback](plugins/codex/scripts/agy-acp/README.md).
 
 ```bash
 node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command "$HOME/.local/bin/agy" --executor-args '["acp"]' --executor-permissions allow-once --json "Inspect the project"

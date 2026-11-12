@@ -121,6 +121,96 @@ test("agy native steering keeps the turn active until the latest prompt complete
   assert.equal(events.filter(event => event.type === "turn.completed").length, 1);
 });
 
+
+test("agy refuses steering during a running command without sending another prompt", async () => {
+  for (const [agy, status, rejected] of [[true, "in_progress", true], [true, "completed", false],
+    [true, "failed", false], [false, "in_progress", false]]) {
+    const port = new AcpExecutorJobPort({ job: { id: "command-steering" } });
+    port.sessionId = "session";
+    port.capabilities.midTurnSteer = true;
+    port.antigravityPromptSteering = agy;
+    port.activeTurn = { turnId: "turn", accepting: true, messages: [] };
+    port.adapter = new AcpEventAdapter(() => {}, { job: port.job });
+    port.adapter.tools.set("command-1", { kind: "execute", status });
+    let prompts = 0;
+    port.promptResponse = async () => { prompts++; return { stopReason: "end_turn" }; };
+    const sent = port.steerPrompt({ sessionId: "session", turnId: "turn", prompt: [{ type: "text", text: "correct" }] });
+    if (rejected) {
+      await assert.rejects(sent, error => error.code === "INVALID_STATE" && /queue.*interrupt/.test(error.message));
+      assert.equal(prompts, 0);
+      assert.equal(port.activeTurn.messages.length, 0);
+    } else {
+      await sent;
+      assert.equal(prompts, 1);
+    }
+  }
+});
+
+function backgroundPort(options = {}) {
+  const events = [], prompts = [];
+  const port = new AcpExecutorJobPort({ cwd: "/tmp", job: { id: "background" } });
+  port.sessionId = "session";
+  port.antigravityPromptSteering = true;
+  port.backgroundPollMs = 1;
+  port.adapter = new AcpEventAdapter(event => events.push(event), { job: port.job });
+  port.adapter.bindSession(port.sessionId);
+  port.exitPromise = new Promise(() => {});
+  let loads = 0;
+  port.connection = {
+    prompt: async ({ prompt }) => {
+      prompts.push(prompt);
+      if (prompts.length <= (options.rounds ?? 1)) await port.adapter.accept({ sessionId: port.sessionId, update: {
+        sessionUpdate: "tool_call", toolCallId: `command-${prompts.length}`, title: "npm test", kind: "execute",
+        status: "in_progress", rawInput: { IsDaemon: Boolean(options.daemon) }
+      } });
+      else await port.adapter.accept({ sessionId: port.sessionId, update: {
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Full result" }
+      } });
+      return { stopReason: "end_turn" };
+    },
+    loadSession: async () => {
+      loads++;
+      if (!options.hold) await port.adapter.accept({ sessionId: port.sessionId, update: {
+        sessionUpdate: "tool_call_update", toolCallId: `command-${prompts.length}`, status: "completed"
+      } });
+    },
+    cancel: async () => {}
+  };
+  return { port, events, prompts, loads: () => loads };
+}
+
+test("agy waits for command snapshots and resumes the same turn; daemon commands finish immediately", async () => {
+  for (const daemon of [false, true]) {
+    const h = backgroundPort({ daemon, rounds: 2 });
+    const turn = await h.port.startTurn({ sessionId: "session", prompt: [{ type: "text", text: "task" }] });
+    const terminal = await turn.done;
+    assert.equal(terminal.status, "completed");
+    assert.equal(h.prompts.length, daemon ? 1 : 3);
+    assert.equal(h.loads(), daemon ? 0 : 2);
+    assert.equal(h.events.filter(event => event.type === "turn.started").length, 1);
+    if (!daemon) assert.equal(terminal.finalMessages.at(-1).text, "Full result");
+  }
+});
+
+test("agy command waiting times out explicitly and can be cancelled or interrupted", async () => {
+  const timed = backgroundPort({ hold: true });
+  timed.port.backgroundTimeoutMs = 5;
+  const expired = await timed.port.startTurn({ sessionId: "session", prompt: [{ type: "text", text: "task" }] });
+  await assert.rejects(expired.done, error => error.code === "AGY_BACKGROUND_COMMANDS_TIMEOUT" &&
+    /agy 结束本轮时仍有后台命令在运行[\s\S]*command-1: npm test/.test(error.message));
+  for (const method of ["cancelJob", "interruptTurn"]) {
+    const h = backgroundPort({ hold: true });
+    const turn = await h.port.startTurn({ sessionId: "session", prompt: [{ type: "text", text: "task" }] });
+    await waitFor(() => h.port.activeTurn?.waitingForCommands);
+    const replacementPrompt = [{ type: "text", text: "new direction" }];
+    const replacement = turn.done.then(() => h.port.takeReplacementPrompt());
+    const stopped = await h.port[method]({ sessionId: "session", turnId: turn.turnId, timeoutMs: 1000, replacementPrompt });
+    assert.equal(stopped.status, method === "cancelJob" ? "cancelled" : "interrupted");
+    assert.deepEqual(await replacement, method === "cancelJob" ? null : replacementPrompt);
+    assert.equal(h.prompts.length, 1);
+  }
+});
+
 test("Qoder validates steering, fails on rejection before root completion and ignores later cleanup errors", async () => {
   const events = [];
   const responses = [];

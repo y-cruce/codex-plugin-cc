@@ -227,6 +227,8 @@ export class AcpExecutorJobPort {
     this.stderr = "";
     this.startupPhase = "initialize";
     this.updateTail = Promise.resolve();
+    this.backgroundTimeoutMs = 30 * 60 * 1000;
+    this.backgroundPollMs = 1000;
   }
 
   static async open(options) {
@@ -307,6 +309,11 @@ export class AcpExecutorJobPort {
     this.connection = new ClientSideConnection(() => ({
       requestPermission: (params) => this.requestPermission(params),
       sessionUpdate: (params) => {
+        if (this.backgroundSnapshot) {
+          if (!["tool_call", "tool_call_update"].includes(params.update.sessionUpdate) ||
+              !this.backgroundSnapshot.has(String(params.update.toolCallId))) return Promise.resolve();
+          params = { ...params, update: { ...params.update, sessionUpdate: "tool_call_update" } };
+        }
         this.updateTail = this.updateTail.then(() => this.adapter.accept(params));
         return this.updateTail;
       },
@@ -500,14 +507,24 @@ export class AcpExecutorJobPort {
     this.activeTurn = active;
     const failed = new Promise((_, reject) => { active.fail = reject; });
     active.response = this.promptResponse(request.prompt, request.sessionId);
+    active.backgroundStopped = new Promise(resolve => { active.stopBackgroundWait = () => resolve("stopped"); });
     active.done = Promise.race([(async () => {
-      let response = active.response;
-      let value = await response;
-      // agy acp settles the previous prompt on steering. The newest prompt
-      // owns completion, so keep the job alive until that response settles.
-      while (response !== active.response) {
-        response = active.response;
+      let value;
+      while (true) {
+        const response = active.response;
         value = await response;
+        // Only agy transfers completion to the latest steering prompt.
+        if (response !== active.response) continue;
+        await this.updateTail;
+        if (active.error) throw active.error;
+        if (!this.antigravityPromptSteering || value.stopReason !== "end_turn" ||
+            active.interrupting || active.cancelling) break;
+        const commands = this.runningCommands().filter(tool => tool.rawInput?.IsDaemon !== true);
+        if (!commands.length) break;
+        const waited = await this.waitForBackgroundCommands(active);
+        if (waited === "stopped") { value = { stopReason: "cancelled" }; break; }
+        active.response = this.promptResponse([{ type: "text", text:
+          `你启动的后台命令已结束：\n${commands.map(tool => tool.title).join("\n")}\n根据命令结果继续完成原任务，不要重新执行这些命令。` }]);
       }
       active.accepting = false;
       await this.updateTail;
@@ -515,9 +532,58 @@ export class AcpExecutorJobPort {
       if (active.error) throw active.error;
       return this.adapter.completeTurn(value, { interrupting: active.interrupting && !active.cancelling });
     })().catch((error) => { throw active.error ?? error; }), failed]);
-    const settled = () => { active.accepting = false; if (this.activeTurn === active) this.activeTurn = null; };
+    const settled = () => {
+      clearTimeout(active.backgroundTimer);
+      active.accepting = false;
+      if (this.activeTurn === active) this.activeTurn = null;
+    };
     active.done.then(settled, settled);
     return { turnId, done: active.done };
+  }
+
+  runningCommands() {
+    return [...this.adapter.tools.values()].filter(tool => tool.kind === "execute" &&
+      !["completed", "failed"].includes(tool.status));
+  }
+
+  async waitForBackgroundCommands(active) {
+    if (!active.backgroundExpired) active.backgroundExpired = new Promise(resolve => {
+      active.backgroundTimer = setTimeout(() => resolve("timeout"), this.backgroundTimeoutMs);
+    });
+    active.waitingForCommands = true;
+    this.onProgress?.({ message: "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
+    const stopped = () => active.interrupting || active.cancelling;
+    try {
+      while (!stopped()) {
+        const running = this.runningCommands().filter(tool => tool.rawInput?.IsDaemon !== true);
+        if (!running.length) return "completed";
+        this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+        let outcome;
+        try {
+          outcome = await Promise.race([
+            this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
+              if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
+              throw error;
+            }),
+            active.backgroundStopped, active.backgroundExpired
+          ]);
+          await this.updateTail;
+        } finally { this.backgroundSnapshot = null; }
+        if (outcome === "stopped" || stopped()) return "stopped";
+        if (outcome !== "timeout" && !this.runningCommands().some(tool => tool.rawInput?.IsDaemon !== true)) return "completed";
+        if (outcome !== "timeout") {
+          let timer;
+          outcome = await Promise.race([new Promise(resolve => { timer = setTimeout(resolve, this.backgroundPollMs); }),
+            active.backgroundStopped, active.backgroundExpired]);
+          clearTimeout(timer);
+        }
+        if (outcome === "timeout") throw Object.assign(new Error(
+          "agy 结束本轮时仍有后台命令在运行，等待已达到 30 分钟上限。请 continue 此会话核对结果。\n" +
+          this.runningCommands().map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")),
+        { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
+      }
+      return "stopped";
+    } finally { active.waitingForCommands = false; }
   }
 
   promptResponse(prompt, sessionId = this.sessionId) {
@@ -538,6 +604,10 @@ export class AcpExecutorJobPort {
       throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
     }
     if (this.questions.size || this.permissions.size) throw Object.assign(new Error("Answer the pending question with answer, or use message --interrupt."), { code: "INVALID_STATE" });
+    if (this.antigravityPromptSteering && this.runningCommands().length) {
+      throw Object.assign(new Error("agy 有命令仍在运行，当前不能 steer；请用 queue 留到下一轮，或用 interrupt 停止当前轮后纠偏。"),
+        { code: "INVALID_STATE" });
+    }
     if (!Array.isArray(request.prompt) || !request.prompt.length ||
         request.prompt.some((item) => item.type !== "text" || !item.text?.trim())) {
       throw Object.assign(new Error("A nonempty text message is required."), { code: "INVALID_ARGUMENT" });
@@ -802,8 +872,12 @@ export class AcpExecutorJobPort {
   async stopTurn(request, cancelling) {
     const active = this.activeTurn;
     if (!active || active.turnId !== request.turnId) throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
+    // Waking a background wait can settle the turn immediately. Keep the
+    // replacement before either that wakeup or closing a pending question.
+    if (!cancelling && request.replacementPrompt) this.replacementPrompt = request.replacementPrompt;
     active.interrupting = !cancelling;
     active.cancelling = cancelling;
+    active.stopBackgroundWait?.();
     await this.cancelPending();
     // Stored before the cancel is sent, not after the turn has ended. The
     // cancel cannot be taken back, so a replacement kept only on the one path
@@ -813,7 +887,6 @@ export class AcpExecutorJobPort {
     // the same promise this method does, and it was there first -- so a write
     // made after that race resolves comes too late even when nothing failed.
     // Cleared again only when the cancel itself never left.
-    if (!cancelling && request.replacementPrompt) this.replacementPrompt = request.replacementPrompt;
     try {
       await this.connection.cancel({ sessionId: request.sessionId });
     } catch (error) {
