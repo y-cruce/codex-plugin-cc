@@ -30,30 +30,3 @@ export function antigravitySkillDirectories(cwd, { home = os.homedir(), geminiHo
   if (executor) directories.add(executor);
   return [...directories];
 }
-
-export function antigravityMcpServers(geminiHome, capabilities, explicit = []) {
-  const mcpServers = [...explicit];
-  const warnings = [];
-  let config;
-  try { config = JSON.parse(fs.readFileSync(path.join(geminiHome, "config/mcp_config.json"), "utf8")); }
-  catch (error) {
-    if (error.code !== "ENOENT") warnings.push("Antigravity could not read or parse config/mcp_config.json.");
-    return { mcpServers, warnings };
-  }
-  const names = new Set(explicit.map(({ name }) => name));
-  for (const [name, server] of Object.entries(config?.mcpServers ?? config ?? {})) {
-    // The official ACP server already reads command (stdio) and url (HTTP)
-    // entries itself. It silently ignores the CLI's serverUrl spelling.
-    if (names.has(name) || server?.disabled === true || server?.command || server?.url) continue;
-    const prefix = `Antigravity MCP ${JSON.stringify(name)} skipped: `;
-    if (!server?.serverUrl || typeof server.serverUrl !== "string" || (server.type && server.type !== "http")) {
-      warnings.push(prefix + "unsupported server configuration.");
-    } else if (capabilities?.http !== true) {
-      warnings.push(prefix + "the ACP server does not advertise HTTP MCP support.");
-    } else {
-      mcpServers.push({ name, type: "http", url: server.serverUrl,
-        headers: Object.entries(server.headers ?? {}).map(([name, value]) => ({ name, value: String(value) })) });
-    }
-  }
-  return { mcpServers, warnings };
-}

@@ -1,89 +1,57 @@
-# Official agy ACP steering extension
+# agy CLI ACP
 
-This local extension runs the installed official `agy_acp_server.par` and
-`localharness_external` from `~/.local/share/antigravity-acp/1.4.4/`.
-It adds `_session/steering` to the ACP connection using the official SDK's
-`send_trigger_notification` transport: an `automatedTrigger` JSON message on
-the existing harness WebSocket.
+Migration is blocked on background-command completion. In the verified 1.5.6
+run, a concurrent prompt returned `end_turn` while a 25-second command was
+still running, and the ACP stream stopped before its later result. The same
+command on 1.4.4 stayed in the original job until completion. `session/list`
+and `session/load` expose no running/idle field. Do not treat the migration
+as qualified for asynchronous builds/tests until a reliable completion signal
+is available. The director must decide whether to accept this regression.
 
-```sh
-# Run from the plugin repository root.
-npm ci --ignore-scripts
-node plugins/codex/scripts/agy-acp/acp-proxy.mjs
-# Or select it for director dispatches from this checkout:
-export CODEX_DIRECTOR_ANTIGRAVITY_COMMAND="$PWD/plugins/codex/scripts/agy-acp/acp-proxy.mjs"
-```
+Dispatch uses the installed `agy acp` server (verified with 1.5.6). It reuses
+the CLI login, settings and MCP configuration. No separate ACP installation,
+helper executable, client-name override or harness proxy is needed.
 
-The default is `gemini-4-carbon` with high thinking (`gemini-4-carbon-high` in
-the official runtime's combined model form). New Opus sessions started through
-the plugin default to medium thinking; an explicit effort overrides the default.
-The proxy passes the launcher's proxy
-environment to the official ACP server and its helper. OAuth, account, quota,
-settings and the official binaries are used in place. No global installation or
-launcher modification is performed by these commands.
-
-For this machine's mihomo mixed port, set these in the ACP launcher before its
-`exec` line. Set both casings so an inherited value cannot select a different
-proxy; bypass only loopback traffic used by the local ACP harness and OAuth
-callback:
+The preset prefers `~/.local/bin/agy` to avoid terminal wrappers, then searches
+PATH. `EXECUTOR_COMMAND` / `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND` override the
+binary; `EXECUTOR_ARGS` defaults to `["acp"]`.
 
 ```sh
-export HTTP_PROXY="http://127.0.0.1:7890" HTTPS_PROXY="http://127.0.0.1:7890"
-export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
-export ALL_PROXY="$HTTP_PROXY" all_proxy="$HTTP_PROXY"
-export NO_PROXY="localhost,127.0.0.1,::1,[::1]"
-export no_proxy="$NO_PROXY"
+node plugins/codex/scripts/codex-companion.mjs task \
+  --executor acp --executor-command "$HOME/.local/bin/agy" \
+  --executor-args '["acp"]' --executor-permissions allow-once \
+  --json "Inspect the project"
 ```
 
-The local `~/.local/share/antigravity-acp/1.4.4/launch.sh` uses this configuration.
-The official personal-account ACP client uses Python `urllib` for CCPA requests,
-which reads these proxy variables. `sandboxProxy` configures sandboxed terminal
-commands in the CLI; it is not the ACP server's outbound proxy setting.
+New sessions default to `gemini-4-carbon` with high thinking. Explicit Opus
+models default to medium; explicit model/effort options take priority. The
+server exposes effort as `thought_level`. Continued sessions retain their
+existing settings unless explicitly overridden.
 
-This adapter reports lowercase `clientInfo.name: "zed"` to the official server
-on initialize, preserving the client's other fields and capabilities. Official
-ACP 1.4.4 filters third-party models by client surface; `zed` is on that list.
-This is an explicit compatibility identity choice, not a separate Zed process.
-The model catalog and selection are still validated by the official server for
-the signed-in account. The default model is Gemini 4 Carbon with high thinking.
+Running corrections use another `session/prompt` on the same session. The
+server settles the previous prompt when steering arrives; the driver waits
+for the newest response before completing the original job and turn. Sending
+a message confirms submission, without a separate model-consumption receipt.
+Queue, interrupt, cancel and continue retain the usual director controls.
 
-Plugin 1.4.103 includes both proxy scripts under `scripts/agy-acp/` and their
-runtime dependency. An installed plugin's `scripts/agy-acp/acp-proxy.mjs` can
-also be used as the executor command. Selecting the proxy requires the existing
-official 1.4.4 runtime; the stock server alone does not advertise steering.
+The subprocess inherits the companion's network environment. This machine's
+tested environment uses `HTTP_PROXY` / `HTTPS_PROXY` at `127.0.0.1:20809`;
+the former launcher's fixed mihomo port `7890` is not required. The plugin
+does not choose a machine-specific proxy.
 
-On the development machine, `~/.local/bin/agy_acp_server.par` resolves to the
-existing 1.4.4 `launch.sh`, which starts this checkout's proxy. Keep the checkout
-in place while that launcher is installed. To restore direct official-server
-launch after this local installation:
+The CLI reads `~/.gemini/config/mcp_config.json`, including `serverUrl` HTTP
+entries, itself. The former alias conversion and generated workflow skill
+exclusion are no longer needed. Linked skill directories and HOME remain in
+the file-tool scope; an appended system prompt names the task directory for
+shell commands.
 
-```sh
-cp "$HOME/.local/share/antigravity-acp/1.4.4/launch.sh.before-steering" \
-   "$HOME/.local/share/antigravity-acp/1.4.4/launch.sh"
-```
+For rollback, revert the plugin and director migration commits together. This
+restores the previous proxy files and the `agy_acp_server.par` preset. The
+existing `~/.local/share/antigravity-acp/1.4.4/launch.sh` and old installation
+are left in place. Existing jobs keep their recorded command and arguments;
+continue uses those instead of the new preset.
 
-The extension advertises top-level `_meta.steering.supported:true` for the
-verified official 1.4.4 server. `_session/steering` accepts nonempty text content
-blocks. It returns `{outcome:"injected",accepted:true}` after a same-session
-active harness WebSocket write succeeds. This confirms the injection write;
-there is no separate per-message model-consumption acknowledgment. When no ACP
-prompt is running, it returns `{outcome:"promptRequired",reason:"noRunningTurn"}`
-without sending a trigger.
-
-The helper proxy passes the length-prefixed InputConfig through unchanged and
-changes only the OutputConfig port. Its API key remains opaque in memory. It
-passes existing WebSocket frames through and inserts steering on that same
-connection. It does not send a second ACP prompt or a halt/cancel for steering.
-The proxy completes its WebSocket handshake after the original helper connects,
-so the official SDK's startup connection retry window remains effective.
-
-Validation: one isolated official Argon High prompt ran `sleep 7`; an automated
-trigger sent during execution changed the answer to its unique marker before
-the original ACP prompt returned `end_turn`. The helper exited normally.
-Offline tests cover config preservation, framing, the root-response idle
-boundary observed in that run, capability advertisement, and a helper that
-starts listening 400 milliseconds after publishing its configuration.
-
-`AGY_OFFICIAL_RUNTIME_DIR` may specify the existing runtime directory.
-`AGY_STEERING_EVIDENCE` optionally records selected transport events for a local
-test; it is off by default. The helper script must be executable.
+派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 Carbon high，
+显式 Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的
+新 prompt，等待最新响应后结束原任务。回退时一起撤销插件和调度规则的迁移
+提交，恢复旧代理和预设；旧安装及启动器保留在原处。

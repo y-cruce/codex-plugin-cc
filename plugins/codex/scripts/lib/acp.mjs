@@ -231,7 +231,9 @@ export async function runAcpTurn(cwd, options = {}) {
   } catch (error) {
     if (port.startupPhase) port.reportStartupFailure(error);
     await failQueuedRounds(error);
-    await close();
+    // A broken transport can also reject SDK cleanup. Preserve the failure
+    // already recorded for the round instead of replacing it with that error.
+    await close().catch(() => {});
     throw error;
   }
 }

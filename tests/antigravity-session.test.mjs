@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { antigravityMcpServers, antigravitySkillDirectories } from "../plugins/codex/scripts/lib/executors/antigravity-session.mjs";
+import { antigravitySkillDirectories } from "../plugins/codex/scripts/lib/executors/antigravity-session.mjs";
 
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-session-")));
@@ -28,25 +28,4 @@ test("Antigravity grants the distinct real directories of registered skills and 
   fs.symlinkSync(path.join(home, "missing"), path.join(cliSkills, "broken"), "dir");
   fs.writeFileSync(path.join(configSkills, "not-a-directory"), "");
   assert.deepEqual(antigravitySkillDirectories(cwd, { home }), [shared, local, executor]);
-});
-
-test("Antigravity forwards the CLI HTTP alias only when supported, leaving native and explicit entries alone", (t) => {
-  const geminiHome = fixture(t);
-  const serverUrl = "https://example.test/mcp";
-  const explicit = [{ name: "override", command: "/bin/echo", args: [], env: [] }];
-  fs.mkdirSync(path.join(geminiHome, "config"));
-  fs.writeFileSync(path.join(geminiHome, "config/mcp_config.json"), JSON.stringify({ mcpServers: {
-    stdio: { command: "/bin/echo" }, native: { url: serverUrl },
-    stitch: { serverUrl, headers: { "X-Test": "fixture" } },
-    disabled: { serverUrl, disabled: true }, override: { serverUrl }, unknown: { serverUrl, type: "other" }
-  } }));
-  assert.deepEqual(antigravityMcpServers(geminiHome, { http: true }, explicit), {
-    mcpServers: [...explicit, { name: "stitch", type: "http", url: serverUrl, headers: [{ name: "X-Test", value: "fixture" }] }],
-    warnings: ['Antigravity MCP "unknown" skipped: unsupported server configuration.']
-  });
-  assert.deepEqual(antigravityMcpServers(geminiHome, { http: false }, explicit), {
-    mcpServers: explicit,
-    warnings: ['Antigravity MCP "stitch" skipped: the ACP server does not advertise HTTP MCP support.',
-      'Antigravity MCP "unknown" skipped: unsupported server configuration.']
-  });
 });

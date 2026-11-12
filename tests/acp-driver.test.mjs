@@ -72,6 +72,9 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
   const home = makeTempDir();
   for (const row of [
     { agent: "antigravity-acp", model: "gemini-4-carbon", effort: "high" },
+    { agent: "Antigravity ACP Server", model: "gemini-4-carbon", effort: "high" },
+    { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
+    { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
     { agent: "antigravity-acp", env: "claude-opus-5-5", model: "claude-opus-5-5", effort: "medium" },
     { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "antigravity-acp", request: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
@@ -80,10 +83,11 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
     { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low" },
     { agent: "other-acp", model: "gemini-3.8-flash", effort: "low" }
   ]) {
+    const effortOption = row.agent === "Antigravity ACP Server" ? "thought_level" : "thinking_level";
     const h = recordingPort([
       { type: "select", id: "model", currentValue: "gemini-3.8-flash",
         options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-3.8-flash"].map(value => ({ value })) },
-      { type: "select", id: "thinking_level", currentValue: "low",
+      { type: "select", id: effortOption, currentValue: "low",
         options: ["low", "medium", "high"].map(value => ({ value })) }
     ], { env: { HOME: home }, ...row.overrides });
     h.port.initializeResponse = { agentInfo: { name: row.agent } };
@@ -94,9 +98,9 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
     else delete process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL;
     const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession(row.request ?? {});
     delete process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL;
-    const configured = Boolean(row.overrides) || row.agent === "antigravity-acp" && !row.resume;
+    const configured = Boolean(row.overrides) || ["antigravity-acp", "Antigravity ACP Server"].includes(row.agent) && !row.resume;
     assert.equal(result.configOptions.find(option => option.id === "model").currentValue, row.model);
-    assert.equal(result.configOptions.find(option => option.id === "thinking_level").currentValue, row.effort);
+    assert.equal(result.configOptions.find(option => option.id === effortOption).currentValue, row.effort);
     assert.equal(result.effortId, configured ? row.effort : null);
     assert.equal(h.requests.length, configured ? 2 : 0);
   }

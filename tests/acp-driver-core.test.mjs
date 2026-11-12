@@ -99,6 +99,28 @@ test("ACP steering extensions require confirmed injection and leave idle input w
   }
 });
 
+test("agy native steering keeps the turn active until the latest prompt completes", async () => {
+  const events = [], responses = [];
+  const port = new AcpExecutorJobPort({ job: { id: "agy-native" } });
+  port.sessionId = "session";
+  port.capabilities.midTurnSteer = true;
+  port.antigravityPromptSteering = true;
+  port.adapter = new AcpEventAdapter(event => events.push(event), { job: port.job });
+  port.adapter.bindSession(port.sessionId);
+  port.exitPromise = new Promise(() => {});
+  port.connection = { prompt: () => new Promise(resolve => responses.push(resolve)) };
+  const prompt = [{ type: "text", text: "correction" }];
+  const turn = await port.startTurn({ sessionId: port.sessionId, prompt });
+  await port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt });
+  responses[0]({ stopReason: "end_turn" });
+  await new Promise(setImmediate);
+  assert.equal(port.activeTurn.turnId, turn.turnId);
+  assert.equal(events.some(event => event.type === "turn.completed"), false);
+  responses[1]({ stopReason: "end_turn" });
+  assert.equal((await turn.done).status, "completed");
+  assert.equal(events.filter(event => event.type === "turn.completed").length, 1);
+});
+
 test("Qoder validates steering, fails on rejection before root completion and ignores later cleanup errors", async () => {
   const events = [];
   const responses = [];

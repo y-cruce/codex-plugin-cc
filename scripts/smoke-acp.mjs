@@ -13,7 +13,7 @@ import { listJobs, resolveStateDir } from "../plugins/codex/scripts/lib/state.mj
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const companion = process.env.CODEX_COMPANION ?? path.join(repo, "plugins/codex/scripts/codex-companion.mjs");
-const director = path.resolve(repo, "../code-director");
+const director = process.env.CODEX_SMOKE_DIRECTOR ?? path.resolve(repo, "../code-director");
 const dispatch = path.join(director, "skills/code-director/scripts/dispatch.sh");
 const skill = path.join(director, "skills/codex-executor/SKILL.md");
 const memory = process.env.CODEX_SMOKE_MEMORY_INDEX;
@@ -44,7 +44,7 @@ async function command(argv, env, cwd) {
 }
 
 async function smoke(agent) {
-  const launcher = agent === "agy" ? process.env.CODEX_DIRECTOR_ANTIGRAVITY_COMMAND ?? path.join(os.homedir(), ".local/bin/agy_acp_server.par")
+  const launcher = agent === "agy" ? process.env.CODEX_DIRECTOR_ANTIGRAVITY_COMMAND ?? path.join(os.homedir(), ".local/bin/agy")
     : agent === "dsh" ? process.env.CODEX_DIRECTOR_DSH_COMMAND ?? path.join(os.homedir(), ".dsh/bin/dsh-acp")
       : process.env.CODEX_DIRECTOR_QODER_COMMAND ?? "qoder";
   const available = launcher.includes(path.sep) ? fs.existsSync(launcher)
@@ -131,7 +131,7 @@ If your agent lacks shell or a native question tool, report SMOKE_SKIP plus the 
           await pause(2000);
           const answerFile = path.join(directory, "answers.json");
           const answers = Object.fromEntries(pending.questions.map(field =>
-            [field.id, { answers: [field.options[1].value ?? field.options[1].label] }]));
+            [field.id, { answers: [field.options?.[1]?.value ?? field.options?.[1]?.label ?? "SECOND"] }]));
           fs.writeFileSync(answerFile, JSON.stringify(answers));
           record("answer", { requestId: pending.requestId, answers });
           await command(["bash", dispatch, "answer", id, String(pending.requestId), answerFile, "--cwd", cwd], env, cwd);

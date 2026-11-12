@@ -12,12 +12,11 @@ import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclie
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../broker-endpoint.mjs";
 import { ExecutorEventQueue } from "../executor-port.mjs";
 import { DirectorPublisher } from "../director-delivery.mjs";
-import { excludeGeneratedSkill } from "../git.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../live-turn-control.mjs";
 import { ACP_COMPANION_ENV, ACP_CONTROL_ENV } from "../observation-client.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
-import { antigravityMcpServers, antigravitySkillDirectories } from "./antigravity-session.mjs";
+import { antigravitySkillDirectories } from "./antigravity-session.mjs";
 import { THREAD_RECORDS_ENABLED } from "../thread-records.mjs";
 
 const CAPABILITIES = Object.freeze({
@@ -32,6 +31,10 @@ const CAPABILITIES = Object.freeze({
   turnDiff: false,
   subAgents: false
 });
+
+function isAntigravity(response) {
+  return ["antigravity-acp", "Antigravity ACP Server"].includes(response?.agentInfo?.name);
+}
 
 function nodeWritable(node) {
   return new WritableStream({
@@ -81,7 +84,7 @@ function findModelOption(configOptions = []) {
 
 function findReasoningEffortOption(configOptions = []) {
   return configOptions.find((option) => option.type === "select" && option.id === "reasoning_effort") ??
-    configOptions.find((option) => option.type === "select" && option.id === "thinking_level") ?? null;
+    configOptions.find((option) => option.type === "select" && ["thinking_level", "thought_level"].includes(option.id)) ?? null;
 }
 
 const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
@@ -286,7 +289,7 @@ export class AcpExecutorJobPort {
     this.proc.stderr.on("data", (chunk) => {
       this.stderr += chunk;
       const turn = this.activeTurn;
-      if (this.initializeResponse?.agentInfo?.name !== "antigravity-acp" || !turn?.accepting) return;
+      if (!isAntigravity(this.initializeResponse) || !turn?.accepting) return;
       const fatal = this.stderr.slice(turn.stderrOffset).match(/^[^\r\n]*harness stderr: Agent run failed:[^\r\n]*(?=\r?\n)/m)?.[0];
       if (fatal) turn.error = new Error(fatal);
     });
@@ -316,13 +319,14 @@ export class AcpExecutorJobPort {
     this.capabilities.sessionModes = false;
     this.steeringExtension = this.initializeResponse._meta?.steering?.supported === true ||
       this.initializeResponse.agentCapabilities?._meta?.steering?.supported === true;
-    this.capabilities.midTurnSteer = this.steeringExtension || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
+    this.antigravityPromptSteering = this.initializeResponse.agentInfo?.name === "Antigravity ACP Server";
+    this.capabilities.midTurnSteer = this.steeringExtension || this.antigravityPromptSteering || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
       this.initializeResponse.agentCapabilities?._meta?.qoder?.promptQueueing === true);
   }
 
   events() { return this.queue; }
 
-  async sessionResult(sessionId, response, warnings = []) {
+  async sessionResult(sessionId, response) {
     this.sessionId = sessionId;
     const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
     this.recordId = binding.recordId ?? this.job.id;
@@ -330,9 +334,6 @@ export class AcpExecutorJobPort {
     this.modes = response.modes ?? null;
     this.capabilities.sessionModes = Boolean(this.modes);
     this.configOptions = response.configOptions ?? [];
-    for (const message of warnings) {
-      await this.adapter.emit("source.warning", { code: "ANTIGRAVITY_MCP_CONFIG", message });
-    }
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
   }
 
@@ -437,7 +438,7 @@ export class AcpExecutorJobPort {
   sessionRequest(request) {
     const params = { cwd: request.cwd ?? this.cwd, additionalDirectories: request.additionalDirectories ?? [],
       mcpServers: mapMcpServers(request.mcpServers ?? []) };
-    if (this.initializeResponse.agentInfo?.name !== "antigravity-acp") return { params };
+    if (!isAntigravity(this.initializeResponse)) return { params };
     const home = this.env.HOME || os.homedir();
     const geminiHome = this.env.GEMINI_HOME?.replace(/^~(?=\/|$)/, home) || path.join(home, ".gemini");
     const codexHome = this.env.CODEX_HOME || path.join(home, ".codex");
@@ -445,18 +446,14 @@ export class AcpExecutorJobPort {
     params.additionalDirectories = [...new Set([...params.additionalDirectories, path.resolve(home), ...directories])];
     // agy's workspace prompt sorts all roots, losing cwd's primary position.
     params._meta = { antigravity: { systemPrompt: { append:
-      `The task's primary working directory is ${params.cwd}. Use it as Cwd for run_command unless the task explicitly requests another directory. Other workspace roots grant file access; their listed order does not select the task directory.` } } };
-    const { mcpServers, warnings } = antigravityMcpServers(geminiHome, this.initializeResponse.agentCapabilities?.mcpCapabilities,
-      params.mcpServers);
-    params.mcpServers = mcpServers;
-    return { params, warnings };
+      `The task's primary working directory is ${params.cwd}. Explicitly change to that directory before running shell commands unless the task requests another directory. Other workspace roots grant file access; their listed order does not select the task directory.` } } };
+    return { params };
   }
 
   async startSession(request) {
     this.startupPhase = "session/new";
-    const { params, warnings } = this.sessionRequest(request);
-    const antigravity = this.initializeResponse.agentInfo?.name === "antigravity-acp";
-    if (antigravity) excludeGeneratedSkill(params.cwd);
+    const { params } = this.sessionRequest(request);
+    const antigravity = isAntigravity(this.initializeResponse);
     const response = await this.connection.newSession(params);
     this.startupPhase = "ready";
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
@@ -465,13 +462,13 @@ export class AcpExecutorJobPort {
     const defaultEffort = antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null;
     const effortId = await this.applyReasoningEffort(response.sessionId, response,
       request.effortId ?? this.effortId ?? defaultEffort);
-    return { ...await this.sessionResult(response.sessionId, response, warnings), effortId };
+    return { ...await this.sessionResult(response.sessionId, response), effortId };
   }
 
   async resumeSession(request) {
     this.startupPhase = "session/resume";
     if (!this.capabilities.resumeSession) throw Object.assign(new Error("ACP agent does not support session/resume."), { code: "UNSUPPORTED_CAPABILITY" });
-    const { params, warnings } = this.sessionRequest(request);
+    const { params } = this.sessionRequest(request);
     const response = await this.connection.resumeSession({ sessionId: request.sessionId, ...params });
     this.startupPhase = "ready";
     await this.applyMode(request.sessionId, response, request.modeId ?? this.modeId);
@@ -480,7 +477,7 @@ export class AcpExecutorJobPort {
     // that a dispatch had deliberately started somewhere else.
     await this.applyModel(request.sessionId, response, request.modelId ?? this.modelId);
     const effortId = await this.applyReasoningEffort(request.sessionId, response, request.effortId ?? this.effortId);
-    return { ...await this.sessionResult(request.sessionId, response, warnings), effortId };
+    return { ...await this.sessionResult(request.sessionId, response), effortId };
   }
 
   async setMode(request) {
@@ -502,13 +499,22 @@ export class AcpExecutorJobPort {
       stderrOffset: this.stderr.length };
     this.activeTurn = active;
     const failed = new Promise((_, reject) => { active.fail = reject; });
-    active.done = Promise.race([this.promptResponse(request.prompt, request.sessionId).then(async (value) => {
+    active.response = this.promptResponse(request.prompt, request.sessionId);
+    active.done = Promise.race([(async () => {
+      let response = active.response;
+      let value = await response;
+      // agy acp settles the previous prompt on steering. The newest prompt
+      // owns completion, so keep the job alive until that response settles.
+      while (response !== active.response) {
+        response = active.response;
+        value = await response;
+      }
       active.accepting = false;
       await this.updateTail;
       await this.cancelPending();
       if (active.error) throw active.error;
       return this.adapter.completeTurn(value, { interrupting: active.interrupting && !active.cancelling });
-    }).catch((error) => { throw active.error ?? error; }), failed]);
+    })().catch((error) => { throw active.error ?? error; }), failed]);
     const settled = () => { active.accepting = false; if (this.activeTurn === active) this.activeTurn = null; };
     active.done.then(settled, settled);
     return { turnId, done: active.done };
@@ -561,19 +567,23 @@ export class AcpExecutorJobPort {
       await adapter.emit("source.error", { code: error.code ?? "STEERING_REJECTED", message: error.message },
         { turnId: active.turnId, messageId: message.id }, null, "session/prompt");
     };
-    // Qoder 1.1.78 can consume a queued prompt without settling its RPC.
-    // The root response owns completion; keep observing errors until then.
-    if (!this.steeringExtension) void this.promptResponse(message.input).then((value) => {
-      if (!active.accepting || this.closed) return;
-      if (value.stopReason === "cancelled" && (active.cancelling || active.interrupting)) return;
-      if (value.stopReason !== "end_turn") return rejected(new Error(`Qoder steering ended: ${value.stopReason}`));
-      message.status = "completed";
-    }, rejected).catch((error) => { if (active.accepting) active.error ??= error; });
+    // Qoder keeps the root response as completion; agy transfers ownership
+    // to the newest prompt. Observe delivery errors for both agents.
+    if (!this.steeringExtension) {
+      const response = this.promptResponse(message.input);
+      if (this.antigravityPromptSteering) active.response = response;
+      void response.then((value) => {
+        if (!active.accepting || this.closed) return;
+        if (value.stopReason === "cancelled" && (active.cancelling || active.interrupting)) return;
+        if (value.stopReason !== "end_turn") return rejected(new Error(`ACP steering ended: ${value.stopReason}`));
+        message.status = "completed";
+      }, rejected).catch((error) => { if (active.accepting) active.error ??= error; });
+    }
     await adapter.controlMessage(message.input, "steer", active.turnId, undefined, accepted);
     if (message.status === "rejected") throw active.error;
     return { turnId: active.turnId, messageId: message.id, sent: true, accepted, consumed: null,
       note: accepted ? "The ACP agent confirmed insertion into the active turn; model consumption is not acknowledged."
-        : "Sent to Qoder's active session; acceptance and model consumption are not acknowledged separately." };
+        : "Sent to the active ACP session; acceptance and model consumption are not acknowledged separately." };
   }
 
   async queuePrompt(request) {
@@ -684,7 +694,7 @@ export class AcpExecutorJobPort {
     const requestId = `permission:${crypto.randomUUID()}`;
     const remembered = this.adapter.tools?.get(String(params.toolCall?.toolCallId)) ?? null;
     const payload = normalizeAcpPermission(params, requestId, remembered);
-    const interaction = this.initializeResponse?.agentInfo?.name === "antigravity-acp" && payload.tool.toolCallId.startsWith("interaction_");
+    const interaction = isAntigravity(this.initializeResponse) && payload.tool.toolCallId.startsWith("interaction_");
     const automatic = !interaction && this.autoApprovePermissions();
     Object.assign(payload, { interaction, expiresAt: automatic ? null : Date.now() + this.inputTimeoutMs });
     const emitted = this.adapter.emit("permission.requested", payload, { requestId, toolCallId: payload.tool.toolCallId }, params,

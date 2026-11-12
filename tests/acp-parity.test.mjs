@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { resolveTaskExecutor } from "../plugins/codex/scripts/codex-companion.mjs";
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
-import { excludeGeneratedSkill } from "../plugins/codex/scripts/lib/git.mjs";
 import { readJobFile, resolveJobFile, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
@@ -17,7 +16,7 @@ function portFixture(options = {}) {
   const events = [], pushes = [];
   port.runtime = { record: async (event) => events.push(event) };
   port.director = { publish: (job, type, payload) => pushes.push({ job, type, payload }) };
-  port.initializeResponse = { agentInfo: { name: "antigravity-acp" } };
+  port.initializeResponse = { agentInfo: { name: "Antigravity ACP Server" } };
   port.sessionId = "session";
   port.adapter = port.createAdapter(job);
   port.adapter.bindSession(port.sessionId);
@@ -122,23 +121,12 @@ test("the shell question uses the existing answer path and accepts free text", a
   await assert.rejects(cancelled, /cancelled/);
 });
 
-test("agy session scope keeps additional roots and HOME; generated skill exclusion is exact and idempotent", (t) => {
+test("agy session scope keeps additional roots and HOME and names the shell directory", () => {
   const { port } = portFixture();
   const params = port.sessionRequest({ cwd: "/tmp/task", additionalDirectories: ["/tmp/extra"] }).params;
   assert.ok(params.additionalDirectories.includes("/tmp/parity-home"));
   assert.ok(params.additionalDirectories.includes("/tmp/extra"));
-  assert.match(params._meta.antigravity.systemPrompt.append, /primary working directory is \/tmp\/task\. Use it as Cwd for run_command/);
-  const cwd = makeTempDir();
-  initGitRepo(cwd);
-  excludeGeneratedSkill(cwd);
-  const file = path.resolve(cwd, run("git", ["rev-parse", "--git-path", "info/exclude"], { cwd }).stdout.trim());
-  const first = fs.readFileSync(file, "utf8");
-  const subdirectory = path.join(cwd, "nested");
-  fs.mkdirSync(subdirectory);
-  excludeGeneratedSkill(subdirectory);
-  assert.equal(fs.readFileSync(file, "utf8"), first);
-  assert.ok(first.includes("/skills/system/run-workflow/SKILL.md"));
-  assert.equal(run("git", ["check-ignore", "skills/system/custom.md"], { cwd }).status, 1);
+  assert.match(params._meta.antigravity.systemPrompt.append, /primary working directory is \/tmp\/task\. Explicitly change to that directory/);
 });
 
 test("thread executor resolution preserves Codex and complete ACP launch identity", (t) => {

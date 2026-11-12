@@ -56,6 +56,7 @@ test("Antigravity harness fatal stderr fails the round before end_turn can publi
   const fatal = "I1111 local_connection.py:553] harness stderr: Agent run failed: no pending hook for ID hook_request_31\n";
   for (const [agent, stderr, fails] of [
     ["antigravity-acp", fatal, true],
+    ["Antigravity ACP Server", fatal, true],
     ["qoder-cli", fatal, false],
     ["antigravity-acp", "ERROR ordinary tool error\nharness stderr: received model response error: context canceled\n", false]
   ]) {
@@ -78,6 +79,27 @@ test("Antigravity harness fatal stderr fails the round before end_turn can publi
       assert.equal(result.status, 0);
     }
   }
+});
+
+test("ACP transport failure remains the job reason when SDK cleanup also rejects", async (t) => {
+  isolateTestEnvironment(t);
+  useInProcessAgent(t);
+  const close = AcpExecutorJobPort.prototype.close;
+  t.mock.method(AcpExecutorJobPort.prototype, "close", async function () {
+    await close.call(this);
+    throw new Error("SDK cleanup rejected");
+  });
+  t.mock.method(AcpExecutorJobPort.prototype, "promptResponse", async () => {
+    throw Object.assign(new Error("ACP connection closed"), { code: "TRANSPORT_CLOSED" });
+  });
+  const cwd = fs.realpathSync(makeTempDir());
+  const job = { id: "acp-close-failure", executor: "acp", workspaceRoot: cwd, status: "running" };
+  writeJobFile(cwd, job.id, job);
+  upsertJob(cwd, job);
+  await assert.rejects(runTrackedJob(job, () => runAcpTurn(cwd, { jobId: job.id,
+    prompt: "basic", command: process.execPath, args: [AGENT] })),
+  error => error.code === "TRANSPORT_CLOSED");
+  assert.match(readJobFile(resolveJobFile(cwd, job.id)).errorMessage, /closed|exited/i);
 });
 
 test("status skips live endpoints for finished ACP jobs including status --wait", async (t) => {

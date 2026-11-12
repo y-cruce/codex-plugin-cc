@@ -49,9 +49,9 @@ test("official Antigravity ACP reads a file and resumes its context in a new pro
   run("git", ["commit", "-m", "fixture"], { cwd });
   // The official runtime creates skills/system/run-workflow before any prompt.
   const before = run("git", ["status", "--short", "--untracked-files=no"], { cwd }).stdout;
-  const command = process.env.CODEX_DIRECTOR_ANTIGRAVITY_COMMAND ?? "agy_acp_server.par";
+  const command = process.env.CODEX_DIRECTOR_ANTIGRAVITY_COMMAND ?? path.join(process.env.HOME, ".local/bin/agy");
   const cli = (prompt, extra = []) => run(process.execPath, [SCRIPT, "task", "--cwd", cwd,
-    "--executor", "acp", "--executor-command", command, "--executor-args", "[]",
+    "--executor", "acp", "--executor-command", command, "--executor-args", '["acp"]',
     "--executor-permissions", "allow-once", "--json", ...extra, prompt], { cwd, timeout: 80000 });
   const first = cli("Read fact.txt only. Reply with exactly the verification phrase. Do not modify files or run commands.");
   assert.equal(first.status, 0, first.stderr);

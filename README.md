@@ -114,13 +114,13 @@ Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求�
 
 任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。
 
-ACP agents can advertise `_meta.steering.supported: true` at the initialize response's top level or under `agentCapabilities`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. DSH's community adapter and Antigravity's extension expose mid-turn input through this route. Servers that do not advertise it keep queue/interrupt behavior.
+ACP agents can advertise `_meta.steering.supported: true` at the initialize response's top level or under `agentCapabilities`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. DSH's community adapter expose mid-turn input through this route. Servers that do not advertise it keep queue/interrupt behavior.
 
-ACP 服务可通过握手顶层或 `agentCapabilities` 下的 `_meta.steering.supported: true` 声明引导扩展。插件调用 `_session/steering` 并要求 `idleBehavior: "promptRequired"`，只有 `injected` 结果才记为已插入（`accepted: true`，模型消费仍未知）；`promptRequired` 表示消息未送入，需要调用方决定后续操作。DSH 社区适配器和 Antigravity 扩展通过此入口连接运行时的追加输入能力，未声明能力的服务继续使用 queue/interrupt。
+ACP 服务可通过握手顶层或 `agentCapabilities` 下的 `_meta.steering.supported: true` 声明引导扩展。插件调用 `_session/steering` 并要求 `idleBehavior: "promptRequired"`，只有 `injected` 结果才记为已插入（`accepted: true`，模型消费仍未知）；`promptRequired` 表示消息未送入，需要调用方决定后续操作。DSH 社区适配器通过此入口连接运行时的追加输入能力，未声明能力的服务继续使用 queue/interrupt。
 
-Plugin 1.4.103 includes the [Antigravity proxy and setup instructions](plugins/codex/scripts/agy-acp/README.md). It uses the installed official ACP 1.4.4 runtime. DSH uses [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp) in its isolated profile; its built-in steering replaces the local DSH adapter patch for new tasks.
+[Antigravity CLI setup](plugins/codex/scripts/agy-acp/README.md) uses native concurrent `session/prompt` for steering. The driver waits for the newest prompt before ending the same job and turn. DSH uses [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp) in its isolated profile; its built-in steering replaces the local DSH adapter patch for new tasks.
 
-插件 1.4.103 包含 [Antigravity 引导代理及接入说明](plugins/codex/scripts/agy-acp/README.md)，复用已安装的官方 ACP 1.4.4 运行时；DSH 使用独立 profile 中的 [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp)，新任务直接使用其内置 steering。
+[Antigravity CLI 接入说明](plugins/codex/scripts/agy-acp/README.md)使用原生并发 `session/prompt` 纠偏；驱动等待最新 prompt 后才结束原 job 和 turn。DSH 使用独立 profile 中的 [@8kugames/dsh-zed-acp](https://github.com/8kugames/dsh-zed-acp)，新任务直接使用其内置 steering。
 
 `status <job-id>` shows pending messages, questions, and interruption state. Messages leave the pending list when their user-message event is observed; this confirms entry into thread history, not model execution. `status --wait` returns early for questions. Answer files contain an answers map such as `{"source":{"answers":["Use the latest plan."]}}`. Answers must match the pending request and question IDs. Questions time out after 10 minutes and interrupt the turn; the plugin does not fabricate an answer or auto-approve permissions. After answering, wait on the same job again and collect `/codex:result <job-id>`.
 
@@ -568,31 +568,33 @@ The updated code-director skill assigns frontend design, implementation, debuggi
 
 更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
 
-New Antigravity sessions default to `$CODEX_COMPANION_ANTIGRAVITY_MODEL`, else `gemini-4-carbon`, with `high` thinking. Selecting an Opus model defaults its thinking to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes Antigravity's `thinking_level` option. Resuming a session preserves its model unless explicitly overridden.
+New Antigravity sessions default to `$CODEX_COMPANION_ANTIGRAVITY_MODEL`, else `gemini-4-carbon`, with `high` thinking. Selecting an Opus model defaults its thinking to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes the CLI server's `thought_level` option. Resuming a session preserves its model unless explicitly overridden.
 
-Antigravity 新会话默认使用 `$CODEX_COMPANION_ANTIGRAVITY_MODEL` 指定的模型，未设置时用 `gemini-4-carbon`，思考强度 `high`；选择 Opus 模型时，思考强度默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持服务的 `thinking_level` 选项。续接会话时，只有显式指定模型才切换。
+Antigravity 新会话默认使用 `$CODEX_COMPANION_ANTIGRAVITY_MODEL` 指定的模型，未设置时用 `gemini-4-carbon`，思考强度 `high`；选择 Opus 模型时，思考强度默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持 CLI 服务的 `thought_level` 选项。续接会话时，只有显式指定模型才切换。
 
-The local agy adapter reports `clientInfo.name: "zed"` on initialize. Official ACP 1.4.4 uses that client identity to include third-party models in the signed-in account's catalog. The catalog is returned and validated by the official server.
+The CLI server returns the signed-in account's full model catalog to `codex-companion`; no client-name override is needed.
 
-本地 agy 适配器初始化时使用 `clientInfo.name: "zed"`，官方 ACP 1.4.4 根据该客户端名称返回账号可用的第三方模型。模型列表由官方服务返回和校验。
+CLI 服务直接向 `codex-companion` 返回账号可用的完整模型列表。
 
-With the updated code-director skill, dispatch with `executor: "antigravity"`. It runs Google's official `agy_acp_server.par` / `agy_acp_server` over stdio ACP, with no launch arguments. Install the binary from the [ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json), keeping `localharness_external` beside it, and complete its Google login first. The server stores settings in `~/.gemini/antigravity-acp/`. Override the executable with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; the default permission policy is `allow-once`. Continue with the returned session id and the same executor. For direct companion calls:
+Dispatch with `executor: "antigravity"` to run the installed CLI's `agy acp` (verified with 1.5.6), reusing its login and MCP configuration. The preset prefers `~/.local/bin/agy`, then PATH, avoiding terminal wrappers when the local binary exists. Override it with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; `executor_args` defaults to `["acp"]`, permissions to `allow-once`. Continue with the returned session id. For direct companion calls:
+
+Qualification remains blocked by 1.5.6 returning `end_turn` before some background commands finish; see the [migration blocker and rollback](plugins/codex/scripts/agy-acp/README.md).
 
 ```bash
-node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command agy_acp_server.par --executor-args '[]' --executor-permissions allow-once --json "Inspect the project"
+node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command "$HOME/.local/bin/agy" --executor-args '["acp"]' --executor-permissions allow-once --json "Inspect the project"
 ```
 
-更新 code-director 技能后，派单传 `executor: "antigravity"`，通过 stdio ACP 启动官方 `agy_acp_server.par` / `agy_acp_server`，无需启动参数。先从 [ACP 注册表](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json)安装服务，保留旁边的 `localharness_external` 并完成服务自身的 Google 登录；配置目录是 `~/.gemini/antigravity-acp/`。可用 `executor_command` 或 `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND` 指定程序，权限默认 `allow-once`。后续使用相同执行器和返回的 session id 继续对话。
+派单传 `executor: "antigravity"`，启动 CLI 自带的 `agy acp`（已验证 1.5.6），复用 CLI 登录和 MCP 配置。优先使用 `~/.local/bin/agy`，其次查 PATH；可用 `executor_command` 或 `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND` 指定程序。`executor_args` 默认 `["acp"]`，权限默认 `allow-once`。后续使用返回的 session id 继续对话。
 
-Expose the matching helper on PATH or set `ANTIGRAVITY_HARNESS_PATH` to its absolute path. The runtime creates `skills/system/run-workflow/SKILL.md` in the workspace during `session/new`, before any prompt.
+The subprocess inherits the companion's network environment and reads `~/.gemini/config/mcp_config.json` itself, including `serverUrl` entries.
 
-配套程序需要在 PATH 中，或通过 `ANTIGRAVITY_HARNESS_PATH` 指定绝对路径。运行时在 `session/new` 时会向工作区生成 `skills/system/run-workflow/SKILL.md`，此时尚未发送提示词。
+子进程继承 companion 的网络环境，原生读取 `~/.gemini/config/mcp_config.json`，包括 `serverUrl` 配置。
 
-The plugin adds HOME to agy's additional directories for both new and resumed sessions, preserving other roots and cwd. File tools can read and write those roots; edit approval remains separate. In a Git repository, it idempotently adds only the untracked generated skill's exact path `/skills/system/run-workflow/SKILL.md` to Git's resolved local `info/exclude`. This writes local metadata even for a read-only investigation; linked worktrees share it. Tracked files and sibling skills remain visible.
+The plugin adds HOME and linked skill directories to agy's additional directories for both new and resumed sessions. File tools can read and write those roots; edit approval remains separate.
 
 agy sorts the workspace list shown to its model, so changing the order of additional roots does not preserve cwd as primary. The plugin uses agy's supported appended system prompt on both new and resumed sessions to name the task's cwd as the default directory for shell commands.
 
-插件在 agy 新建及续接会话时把 HOME 合并进额外目录，保留已有来源和 cwd。文件工具的读写范围随之扩大，编辑批准仍独立。对于 Git 根目录中的未跟踪系统技能，插件只把精确规则 `/skills/system/run-workflow/SKILL.md` 幂等写入 Git 定位的本地 `info/exclude`；只读排查也会发生这项已约定的元数据写入，linked worktree 共用规则。
+插件在 agy 新建及续接会话时把 HOME 和链接技能的实际目录合并进额外目录，保留已有来源和 cwd。文件工具的读写范围随之扩大，编辑批准仍独立。新 CLI 不生成旧版 workflow 技能，插件也不再写入相应 Git 排除规则。
 
 ## DeepSeek Harness executor / DSH 执行器
 
@@ -624,7 +626,7 @@ A shell sends a nonempty note of at most 400 characters with:
 node "$CODEX_ACP_COMPANION_PATH" notify-director "Decision or blocker requiring director action"
 ```
 
-It returns after publishing `director.notified` and continues work. Codex keeps its native `notify_director` tool. agy uses native questions even though its ACP server encodes them as `interaction_*` permission requests: these always wait for the director, including under allow-once. Qoder's native questions use elicitation and also wait under yolo. DSH or another ACP agent without a native question tool uses:
+It returns after publishing `director.notified` and continues work. Codex keeps its native `notify_director` tool. agy uses native form questions that always wait for the director, including under allow-once. Qoder's native questions use elicitation and also wait under yolo. DSH or another ACP agent without a native question tool uses:
 
 ```bash
 node "$CODEX_ACP_COMPANION_PATH" ask-director --question "Choose a source" --options '["First","Second"]'
