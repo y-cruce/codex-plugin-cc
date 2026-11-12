@@ -22,8 +22,8 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const AGENT = path.join(ROOT, "tests/fake-acp-agent.mjs");
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
 
-function useInProcessAgent(t) {
-  t.mock.method(childProcess, "spawn", (_command, _args, { env }) => createFakeAcpProcess(env));
+function useInProcessAgent(t, configure) {
+  t.mock.method(childProcess, "spawn", (_command, _args, { env }) => createFakeAcpProcess(env, configure));
   syncBuiltinESMExports();
   t.after(() => {
     t.mock.restoreAll();
@@ -47,6 +47,107 @@ test("ACP detects steering in both initialize metadata locations", async (t) => 
     } finally {
       await port.close();
     }
+  }
+});
+
+test("prompt completion closes Qoder input immediately and rechecks agy steering after pending updates", async (t) => {
+  isolateTestEnvironment(t);
+  let replies;
+  useInProcessAgent(t, agent => {
+    agent.prompt = () => new Promise(resolve => replies.push(resolve));
+  });
+  for (const name of ["Antigravity ACP Server", "qoder-cli"]) {
+    replies = [];
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: "completion-boundary", executor: "acp", workspaceRoot: cwd, status: "running" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const port = await AcpExecutorJobPort.open({ cwd, job, command: process.execPath, args: [AGENT],
+      env: { ...process.env, HOME: cwd, ACP_FAKE_AGENT_NAME: name } });
+    let release;
+    try {
+      await port.startSession({ modelId: "efficient" });
+      port.capabilities.midTurnSteer = true;
+      const prompt = [{ type: "text", text: "task" }];
+      const turn = await port.startTurn({ sessionId: port.sessionId, prompt });
+      await waitFor(() => replies.length === 1);
+      port.updateTail = new Promise(resolve => { release = resolve; });
+      replies[0]({ stopReason: "end_turn" });
+      await new Promise(setImmediate);
+      const correction = port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt });
+      if (name === "qoder-cli") {
+        await assert.rejects(correction, error => error.code === "TURN_NOT_ACTIVE");
+        assert.equal(replies.length, 1);
+        release();
+      } else {
+        await correction;
+        await waitFor(() => replies.length === 2);
+        release();
+        await new Promise(setImmediate);
+        assert.equal(port.activeTurn?.turnId, turn.turnId);
+        replies[1]({ stopReason: "end_turn" });
+      }
+      assert.equal((await turn.done).status, "completed");
+    } finally { release?.(); await port.close(); }
+  }
+});
+
+test("interruption drains a late load replay before replacement and closes a load that never settles", async (t) => {
+  isolateTestEnvironment(t);
+  let releaseLoad, prompts, stall;
+  useInProcessAgent(t, agent => {
+    agent.prompt = async ({ sessionId }) => {
+      prompts++;
+      if (prompts === 1) await agent.connection.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call",
+        toolCallId: "background-command", title: "npm test", kind: "execute", status: "in_progress" } });
+      else await agent.connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Replacement only" } } });
+      return { stopReason: "end_turn" };
+    };
+    agent.loadSession = ({ sessionId }) => new Promise(resolve => {
+      releaseLoad = async () => {
+        await agent.connection.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "OLD REPLAY MUST NOT APPEAR" } } });
+        await agent.connection.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call",
+          toolCallId: "background-command", title: "npm test", kind: "execute", status: "completed" } });
+        if (!stall) resolve({});
+      };
+    });
+  });
+  for (const mode of ["interrupt", "cancel", "timeout"]) {
+    prompts = 0;
+    releaseLoad = null;
+    stall = mode === "timeout";
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: "load-drain", executor: "acp", workspaceRoot: cwd, status: "running" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const port = await AcpExecutorJobPort.open({ cwd, job, command: process.execPath, args: [AGENT],
+      cancelTimeoutMs: stall ? 10 : 1000, env: { ...process.env, HOME: cwd, ACP_FAKE_AGENT_NAME: "Antigravity ACP Server" } });
+    try {
+      await port.startSession({ modelId: "efficient" });
+      const turn = await port.startTurn({ sessionId: port.sessionId, prompt: [{ type: "text", text: "task" }] });
+      await waitFor(() => releaseLoad);
+      const method = mode === "cancel" ? "cancelJob" : "interruptTurn";
+      const stopped = port[method]({ sessionId: port.sessionId, turnId: turn.turnId, timeoutMs: 1000,
+        replacementPrompt: [{ type: "text", text: "replace" }] });
+      if (stall) {
+        await assert.rejects(Promise.all([turn.done, stopped]), error => error.code === "TRANSPORT_CLOSED" && /session\/load/.test(error.message));
+        assert.equal(port.proc.exitCode, 0);
+        assert.equal(prompts, 1);
+      } else {
+        await new Promise(setImmediate);
+        assert.ok(port.backgroundSnapshot);
+        assert.equal(port.activeTurn?.turnId, turn.turnId);
+        await releaseLoad();
+        await stopped;
+        assert.equal(port.backgroundSnapshot, null);
+        const next = await port.startTurn({ sessionId: port.sessionId, prompt: [{ type: "text", text: "replace" }] });
+        const terminal = await next.done;
+        assert.equal(terminal.finalMessages.find(message => message.role === "assistant").text, "Replacement only");
+        assert.equal(JSON.stringify(terminal).includes("OLD REPLAY"), false);
+      }
+    } finally { await port.close(); }
   }
 });
 

@@ -513,9 +513,11 @@ export class AcpExecutorJobPort {
       while (true) {
         const response = active.response;
         value = await response;
+        if (!this.antigravityPromptSteering) active.accepting = false;
         // Only agy transfers completion to the latest steering prompt.
         if (response !== active.response) continue;
         await this.updateTail;
+        if (response !== active.response) continue;
         if (active.error) throw active.error;
         if (!this.antigravityPromptSteering || value.stopReason !== "end_turn" ||
             active.interrupting || active.cancelling) break;
@@ -559,14 +561,29 @@ export class AcpExecutorJobPort {
         if (!running.length) return "completed";
         this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
         let outcome;
+        const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
+          if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
+          throw error;
+        });
         try {
           outcome = await Promise.race([
-            this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
-              if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
-              throw error;
-            }),
+            load,
             active.backgroundStopped, active.backgroundExpired
           ]);
+          if (outcome === "stopped") {
+            let timer;
+            try {
+              await Promise.race([load, new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("Timed out waiting for the in-flight session/load.")), this.cancelTimeoutMs);
+              })]);
+            } catch (error) {
+              this.proc.kill("SIGKILL");
+              await this.connection.closed.catch(() => {});
+              throw Object.assign(new Error(
+                `ACP session/load did not settle after interruption; connection closed and replacement prompt was not delivered: ${error.message}`,
+                { cause: error }), { code: "TRANSPORT_CLOSED" });
+            } finally { clearTimeout(timer); }
+          }
           await this.updateTail;
         } finally { this.backgroundSnapshot = null; }
         if (outcome === "stopped" || stopped()) return "stopped";

@@ -60,9 +60,13 @@ shell commands.
 
 For rollback, revert the plugin and director migration commits together. This
 restores the previous proxy files and the `agy_acp_server.par` preset. The
-existing `~/.local/share/antigravity-acp/1.4.4/launch.sh` and old installation
-are left in place. Existing jobs keep their recorded command and arguments;
-continue uses those instead of the new preset.
+existing `~/.local/share/antigravity-acp/1.4.4/` installation remains available
+for old jobs. On this machine, `launch.sh` runs the standalone copies of both
+proxy scripts and `ws` under its `compat-proxy/` directory, so deleting the
+checkout proxies does not break recorded launch commands. The original
+launcher is backed up as `launch.sh.before-standalone-proxy-20261112`.
+Existing jobs keep their recorded command and arguments; continue uses those
+instead of the new preset.
 
 派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 Carbon high，
 显式 Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的

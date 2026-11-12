@@ -267,11 +267,15 @@ class FakeAgent {
   }
 }
 
-export function createFakeAcpProcess(env) {
+export function createFakeAcpProcess(env, configure = () => {}) {
   const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
     stderr: new PassThrough(), exitCode: null });
   const stream = ndJsonStream(nodeWritable(child.stdout), nodeReadable(child.stdin));
-  new AgentSideConnection(connection => new FakeAgent(connection, { env, stderr: child.stderr }), stream);
+  new AgentSideConnection(connection => {
+    const agent = new FakeAgent(connection, { env, stderr: child.stderr });
+    configure(agent);
+    return agent;
+  }, stream);
   child.stdin.once("finish", () => {
     child.exitCode = 0;
     child.stdout.end();
