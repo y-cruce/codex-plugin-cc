@@ -34,8 +34,7 @@ const TOOLS = [
         name: { type: 'string', description: 'Three to eight words saying what the task does; never a job id or a mode name.' },
         cwd: CWD,
         brief: { type: 'string', description: 'The brief body Codex reads (for review modes, the focus text). '
-          + 'For investigate, implement, continue and fork, dispatch.sh appends a final-report block requiring evidence '
-          + 'that the work is done; do not repeat it here.' },
+          + 'The codex-executor skill sets the final-report format; do not repeat it here.' },
         thread: { type: 'string', description: 'THREAD: the thread to continue or fork from (required for mode continue and mode fork).' },
         base: { type: 'string', description: 'BASE: the base ref for review modes.' },
         write: { type: 'boolean', description: 'WRITE: continue or fork write intent. Default full sandbox already permits writes; ACP permissions are controlled by the agent. State read-only intent in the brief.' },
