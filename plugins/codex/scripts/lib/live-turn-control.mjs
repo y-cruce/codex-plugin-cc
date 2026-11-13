@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { pendingQuestionSteerMessage } from "./job-event-model.mjs";
 import { runCommand } from "./process.mjs";
 
-const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/queue", "broker/ack-notifications"]);
+const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/queue", "broker/cancel-queued", "broker/ack-notifications"]);
 export const DEFAULT_INPUT_TIMEOUT_MS = 600000;
 
 // The broker owns this state so short-lived control clients cannot steal the event stream.
@@ -161,6 +161,9 @@ export class LiveTurnControl {
       if (!state) throw new Error("Thread is not loaded in this broker.");
       state.notifications = state.notifications.filter((notification) => !p.ids.includes(notification.id));
       return { remaining: state.notifications.length };
+    }
+    if (method === "broker/cancel-queued") {
+      return { removed: state ? state.queuedMessages.splice(0).length : 0 };
     }
     if (!state?.turnId) throw new Error("No active turn or pending question in this broker.");
     const expectedTurnId = p.expectedTurnId ?? p.turnId;

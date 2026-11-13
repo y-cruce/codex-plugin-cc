@@ -166,7 +166,10 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     case "question.resolved": text = `director → answer delivered request=${p.requestId}`; break;
     case "question.closed": text = `Question resolved request=${p.requestId}`; break;
     case "director.notified": text = `notify_director: ${p.message ?? ""}`; break;
-    case "control.message.updated": text = `director → ${p.mode === "interrupt" ? "interrupt" : "message"}: ${p.message ?? ""}`; break;
+    case "control.message.updated":
+      if (p.cancelled) return verbose ? `director → queued message cancelled${p.message ? `: ${p.message}` : ""}` : null;
+      text = `director → ${p.mode === "interrupt" ? "interrupt" : "message"}: ${p.message ?? ""}`;
+      break;
     case "tool.started": case "tool.updated": case "tool.completed": {
       const tool = p.tool;
       if (!verbose && tool.name === "userMessage") return null;
@@ -454,7 +457,14 @@ export function applyJobEvent(view, event, options = {}) {
       break;
     }
     case "control.message.updated":
-      if (p.queued && p.accepted) {
+      if (p.cancelled) {
+        if (view.queuedPrompts) {
+          view.queuedPrompts = p.queuedJobId
+            ? view.queuedPrompts.filter((prompt) => prompt.jobId !== p.queuedJobId)
+            : [];
+        }
+        text = null;
+      } else if (p.queued && p.accepted) {
         view.queuedPrompts ??= [];
         view.queuedPrompts.push({ seq: String(event.seq), text: p.message, ...(p.queuedJobId ? { jobId: p.queuedJobId } : {}) });
         text = null;

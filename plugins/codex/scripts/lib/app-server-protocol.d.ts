@@ -114,12 +114,14 @@ export interface AppServerMethodMap {
   "broker/answer": { params: { threadId: string; turnId: string; requestId: string | number; answers: unknown }; result: { answered: boolean; requestId: string | number } };
   "broker/redirect": { params: { threadId: string; turnId: string; input: UserInput[] }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
   "broker/queue": { params: { threadId: string; expectedTurnId: string; input: UserInput[] }; result: { queued: true; messageId: string } };
+  "broker/cancel-queued": { params: { threadId: string }; result: { removed: number } };
   "executor/status": { params: { jobId: string; executor?: string; executorSessionId?: string | null }; result: LiveTurnStatus & { capabilities: { midTurnSteer: boolean } } };
   "executor/ack-notifications": { params: { jobId: string; executorSessionId?: string | null; ids: string[] }; result: { remaining: number } };
   "executor/answer-question": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; action: string; values: unknown }; result: { answered: boolean; requestId: string | number } };
   "executor/answer-permission": { params: { jobId: string; executorSessionId?: string | null; turnId: string; requestId: string | number; outcome: string; optionId?: string | null }; result: { answered: boolean; requestId: string | number } };
   "executor/steer": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: TurnSteerResponse & { messageId?: string; sent?: boolean; accepted?: boolean | null; consumed?: null; note?: string } };
   "executor/queue-turn": { params: { jobId: string; executorSessionId?: string | null; turnId: string; prompt: Array<{ type: string; text?: string }> }; result: { queued: true; messageId: string; queuedJobId?: string } };
+  "executor/cancel-queued": { params: { jobId: string; executorSessionId?: string | null; all?: boolean }; result: { cancelled: boolean; count: number; removedJobIds?: string[]; alreadyStarted?: boolean; turnId?: string | null } };
   "executor/interrupt-turn": { params: { jobId: string; executorSessionId?: string | null; turnId: string; replacementPrompt?: Array<{ type: string; text?: string }> }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
   "executor/cancel-job": { params: { jobId: string; executorSessionId?: string | null; turnId: string }; result: { interrupted: boolean; threadId: string; turnId: string; partialChanges: LiveTurnStatus["partialChanges"] } };
 }

@@ -50,6 +50,29 @@ test("queued director messages enter the next turn together and clear the waitin
   assert.deepEqual(view.tail.map(row => row.text), ["assistant: Previous answer", batch, "assistant: Next answer"]);
 });
 
+test("cancelled control.message.updated removes matching ACP queuedJobId or clears Codex queuedPrompts", () => {
+  for (const { label, entries, cancelParams, remaining } of [
+    {
+      label: "ACP single queuedJobId removal",
+      entries: [{ message: "first", queuedJobId: "q-1" }, { message: "second", queuedJobId: "q-2" }],
+      cancelParams: { message: "first", queued: true, cancelled: true, queuedJobId: "q-1" },
+      remaining: [{ seq: "2", text: "second", jobId: "q-2" }]
+    },
+    {
+      label: "Codex clear all queuedPrompts",
+      entries: [{ message: "first" }, { message: "second" }],
+      cancelParams: { message: "", queued: true, cancelled: true },
+      remaining: []
+    }
+  ]) {
+    const { view, accept } = harness();
+    for (const entry of entries) accept("companion/control-message", { ...entry, queued: true, status: "accepted" });
+    accept("companion/control-message", cancelParams);
+    assert.deepEqual(view.queuedPrompts, remaining, label);
+    assert.deepEqual(view.tail, [], label);
+  }
+});
+
 test("normalization preserves full source and event identity without modifying it", () => {
   const message = { method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id: "item", type: "commandExecution", command: "x".repeat(500) } }, emittedAtMs: 1000 };
   const event = normalizeJobEvent(message, { id: "job", streamId: "stream" });

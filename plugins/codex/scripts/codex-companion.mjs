@@ -22,7 +22,7 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { runAcpTurn } from "./lib/acp.mjs";
-import { acknowledgeNotifications, cancelLiveJob, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
+import { acknowledgeNotifications, cancelLiveJob, cancelQueuedLiveMessages, inactiveRoundMessage, liveStatus, requireActiveRound, sendLiveCommand } from "./lib/live-commands.mjs";
 import { DEFAULT_QUESTION_REMIND_MS, streamJobEvents } from "./lib/job-events.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "./lib/live-turn-control.mjs";
 import { handleObserve } from "./lib/job-observe.mjs";
@@ -111,7 +111,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs notify-director <message>  (inside an ACP task)",
       '  node scripts/codex-companion.mjs ask-director --question <text> [--options \'["A","B"]\']  (inside an ACP task)',
       "  node scripts/codex-companion.mjs result [job-id] [--thread <thread-id>] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/codex-companion.mjs cancel [job-id] [--queued] [--json]",
       "  node scripts/codex-companion.mjs pane [list|refresh|forget <number|part of a task name|task id>] [--session <id>] [--timeout-ms <ms>] [--json]"
     ].join("\n")
   );
@@ -676,15 +676,25 @@ async function executeTaskRun(request) {
       const queuedRequest = buildTaskRequest({ ...request, prompt, resumeLast: false, resumeThreadId: sessionId, forkThreadId: null, jobId: queuedJob.id });
       const logFile = createJobLogFile(workspaceRoot, queuedJob.id, queuedJob.title);
       appendLogLine(logFile, `Queued behind ${sourceJobId}.`);
-      const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", pid: process.pid, logFile, recordId,
+      const queuedRecord = { ...queuedJob, status: "queued", phase: "queued", queuedRound: true, pid: process.pid, logFile, recordId,
         request: queuedRequest, executorSessionId: sessionId, controlEndpoint };
       writeJobFile(workspaceRoot, queuedJob.id, queuedRecord);
       upsertJob(workspaceRoot, queuedRecord);
       return { job: queuedRecord, request: queuedRequest };
     },
     runQueuedRound: async (round, runner) => {
-      const { logFile, progress } = createTrackedProgress(round.job, { logFile: round.job.logFile });
-      return runTrackedJob(round.job, async () => taskExecution(round.request, await runner(progress)), { logFile });
+      const activeJob = { ...round.job, queuedRound: false };
+      const { logFile, progress } = createTrackedProgress(activeJob, { logFile: round.job.logFile });
+      return runTrackedJob(activeJob, async () => taskExecution(round.request, await runner(progress)), { logFile });
+    },
+    cancelQueuedRound: ({ job }) => {
+      const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+      const completedAt = nowIso();
+      appendLogLine(existing.logFile ?? job.logFile, "Cancelled queued message.");
+      writeJobFile(workspaceRoot, job.id, { ...existing, ...job, status: "cancelled", phase: "cancelled",
+        queuedRound: false, pid: null, completedAt, cancelledAt: completedAt, errorMessage: "Cancelled by user." });
+      upsertJob(workspaceRoot, { id: job.id, status: "cancelled", phase: "cancelled", pid: null,
+        errorMessage: "Cancelled by user.", completedAt });
     },
     failQueuedRound: async (round, error, bindQueuedRound) => {
       try {
@@ -1445,26 +1455,71 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+function isQueuedAcpRound(job) {
+  return Boolean(job && job.status === "queued" && job.executor === "acp" && (job.queuedRound || job.controlEndpoint));
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json", "queued"]
   });
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+
+  if (options.queued) {
+    let workspaceRoot, target;
+    if (reference) {
+      const candidate = buildSingleJobSnapshot(cwd, reference);
+      workspaceRoot = candidate.workspaceRoot;
+      const context = await readRoundContext(workspaceRoot, candidate.job.id);
+      const activeId = context.layout === "thread-record" && context.activeRoundId ? context.activeRoundId : candidate.job.id;
+      target = activeId === candidate.job.id ? candidate.job : buildSingleJobSnapshot(workspaceRoot, activeId).job;
+    } else {
+      ({ workspaceRoot, job: target } = resolveCancelableJob(cwd, "", { env: process.env }));
+    }
+    if (!isActiveJobStatus(target.status)) throw new Error(`No active job found for "${reference || target.id}".`);
+    const cleared = await cancelQueuedLiveMessages(workspaceRoot, { ...target, ...readStoredJob(workspaceRoot, target.id) }, { all: true });
+    if (!cleared.attempted) throw new Error(`Executor session is not available for "${target.id}".`);
+    const count = cleared.count ?? 0;
+    const payload = { jobId: target.id, status: target.status, queuedCancelled: count, removedJobIds: cleared.removedJobIds ?? [] };
+    outputCommandResult(payload, count > 0
+      ? `Cancelled ${count} queued message${count === 1 ? "" : "s"} for ${target.id}.\n`
+      : `No queued messages to cancel for ${target.id} (0 removed).\n`, options.json);
+    return;
+  }
+
   let resolved;
   if (reference) {
     const candidate = buildSingleJobSnapshot(cwd, reference);
-    const context = await readRoundContext(candidate.workspaceRoot, candidate.job.id);
-    if (context.layout === "thread-record") {
-      await requireActiveRound(candidate.workspaceRoot, candidate.job);
-      if (!isActiveJobStatus(candidate.job.status)) throw new Error(`No active job found for "${reference}".`);
+    if (isQueuedAcpRound(candidate.job)) {
       resolved = candidate;
+    } else {
+      const context = await readRoundContext(candidate.workspaceRoot, candidate.job.id);
+      if (context.layout === "thread-record") {
+        await requireActiveRound(candidate.workspaceRoot, candidate.job);
+        if (!isActiveJobStatus(candidate.job.status)) throw new Error(`No active job found for "${reference}".`);
+        resolved = candidate;
+      }
     }
   }
-  const { workspaceRoot, job } = resolved ?? resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+  let { workspaceRoot, job } = resolved ?? resolveCancelableJob(cwd, reference, { env: process.env });
+  let existing = readStoredJob(workspaceRoot, job.id) ?? {};
+
+  if (isQueuedAcpRound({ ...job, ...existing })) {
+    const result = await cancelQueuedLiveMessages(workspaceRoot, { ...job, ...existing }, { all: false });
+    if (result.cancelled) {
+      const payload = { jobId: job.id, status: "cancelled", title: job.title, queuedCancelled: 1,
+        turnInterruptAttempted: false, turnInterrupted: false };
+      outputCommandResult(payload, `Cancelled 1 queued message (${job.id}).\n`, options.json);
+      return;
+    }
+    if (!result.alreadyStarted) throw new Error(`No queued message found for "${job.id}".`);
+    existing = { ...existing, status: "running", queuedRound: false, ...(result.turnId && !existing.turnId ? { turnId: result.turnId } : {}) };
+    job = { ...job, ...existing };
+  }
+
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
   const interrupt = await cancelLiveJob(cwd, { ...job, ...existing, threadId, turnId });
@@ -1488,6 +1543,9 @@ async function handleCancel(argv) {
     return;
   }
 
+  if (isQueuedAcpRound({ ...job, ...existing })) {
+    throw new Error(`Refusing to terminate shared worker for queued ACP round ${job.id}.`);
+  }
   terminateProcessTree(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");
 

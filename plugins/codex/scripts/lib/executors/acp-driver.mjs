@@ -175,6 +175,7 @@ class AcpControlServer {
           break;
         case "executor/steer": result = await this.port.steerPrompt({ sessionId: p.executorSessionId, turnId: p.turnId, prompt: p.prompt }); break;
         case "executor/queue-turn": result = await this.port.queuePrompt({ turnId: p.turnId, prompt: p.prompt }); break;
+        case "executor/cancel-queued": result = await this.port.cancelQueuedPrompts({ jobId: p.all ? null : p.jobId, all: Boolean(p.all) }); break;
         case "executor/interrupt-turn":
           result = await this.port.interruptTurn({ sessionId: this.port.sessionId, turnId: p.turnId, timeoutMs: this.port.cancelTimeoutMs,
             replacementPrompt: p.replacementPrompt ?? null });
@@ -219,11 +220,13 @@ export class AcpExecutorJobPort {
     this.threadRecords = options.threadRecords ?? THREAD_RECORDS_ENABLED;
     this.onProgress = options.onProgress ?? null;
     this.createQueuedRound = options.createQueuedRound ?? null;
+    this.cancelQueuedRound = options.cancelQueuedRound ?? null;
     this.queue = new ExecutorEventQueue();
     this.permissions = new Map();
     this.questions = new Map();
     this.notifications = [];
     this.queuedPrompts = [];
+    this.startingJobId = null;
     this.activeTurn = null;
     this.replacementPrompt = null;
     this.stderr = "";
@@ -349,6 +352,7 @@ export class AcpExecutorJobPort {
 
   async bindQueuedRound(entry) {
     this.job = entry.round.job;
+    this.startingJobId = null;
     await this.runtime.register(this.owner, this.cwd, this.job.id);
     this.job = this.runtime.jobForSocket(this.owner);
     const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, this.sessionId, null, entry.recordId);
@@ -716,8 +720,30 @@ export class AcpExecutorJobPort {
     return { queued: true, messageId: entry.id, queuedJobId: entry.jobId };
   }
 
-  takeQueuedPrompt() { return this.queuedPrompts.shift() ?? null; }
+  takeQueuedPrompt() {
+    const entry = this.queuedPrompts.shift() ?? null;
+    this.startingJobId = entry?.jobId ?? null;
+    return entry;
+  }
   drainQueuedPrompts() { return this.queuedPrompts.splice(0); }
+
+  async cancelQueuedPrompts({ jobId = null, all = false } = {}) {
+    let removed = [];
+    if (all) {
+      removed = this.queuedPrompts.splice(0);
+    } else if (jobId) {
+      const index = this.queuedPrompts.findIndex((entry) => entry.jobId === jobId);
+      if (index >= 0) removed = this.queuedPrompts.splice(index, 1);
+      else if (this.job?.id === jobId || this.startingJobId === jobId) {
+        return { cancelled: false, alreadyStarted: true, turnId: this.activeTurn?.turnId ?? null, count: 0, removedJobIds: [] };
+      }
+    }
+    for (const entry of removed) {
+      await this.cancelQueuedRound?.(entry.round);
+      await this.adapter.controlMessage(entry.input, "queued", this.activeTurn?.turnId ?? null, entry.jobId, false, true);
+    }
+    return { cancelled: removed.length > 0, count: removed.length, removedJobIds: removed.map((entry) => entry.jobId) };
+  }
 
   autoApprovePermissions() {
     return this.permissionPolicy === "allow-once" || (this.permissionPolicy !== "ask" && this.modeId === "yolo");

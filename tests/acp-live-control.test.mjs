@@ -336,6 +336,53 @@ const cases = [
       assert.equal(result.code, 0, result.stderr);
       assert.match(readStoredJob(h.cwd, queuedJobId).result.rawOutput, /"optionId":"allow"/);
     }
+  },
+  {
+    name: "cancel removes a single ACP queuedJobId or clears --queued without killing the running parent",
+    run: async (t) => {
+      const h = await startTask(t, "default", "hold", null, true);
+      const qIds = ["stale-1", "stale-2", "stale-3"].map((text) => {
+        const res = h.cli("message", h.job.id, "--queue", text);
+        assert.equal(res.status, 0, res.stderr);
+        return JSON.parse(res.stdout).queuedJobId;
+      });
+      const viewPath = (await observationThreads(resolveStateDir(h.cwd)))[0].thread.viewPath;
+      const readView = () => JSON.parse(fs.readFileSync(viewPath, "utf8"));
+      await waitFor(() => readView().queuedPrompts?.length === 3, "3 queued prompts projected");
+
+      const single = h.cli("cancel", qIds[0]);
+      assert.equal(single.status, 0, single.stderr);
+      assert.deepEqual(
+        { status: JSON.parse(single.stdout).status, queuedCancelled: JSON.parse(single.stdout).queuedCancelled },
+        { status: "cancelled", queuedCancelled: 1 }
+      );
+      assert.equal(h.child.exitCode, null, "parent ACP worker must stay alive");
+      assert.equal(readStoredJob(h.cwd, h.job.id).status, "running");
+      assert.equal(readStoredJob(h.cwd, qIds[0]).status, "cancelled");
+      assert.equal(listJobs(h.cwd).find((item) => item.id === qIds[0]).status, "cancelled");
+      await waitFor(() => readView().queuedPrompts?.length === 2, "cancelled queuedJobId removed from view");
+      assert.deepEqual(readView().queuedPrompts.map((item) => item.jobId), [qIds[1], qIds[2]]);
+
+      const cleared = h.cli("cancel", h.job.id, "--queued");
+      assert.equal(cleared.status, 0, cleared.stderr);
+      assert.deepEqual(
+        { count: JSON.parse(cleared.stdout).queuedCancelled, ids: JSON.parse(cleared.stdout).removedJobIds },
+        { count: 2, ids: [qIds[1], qIds[2]] }
+      );
+      for (const id of qIds.slice(1)) assert.equal(readStoredJob(h.cwd, id).status, "cancelled");
+      await waitFor(() => readView().queuedPrompts?.length === 0, "all queued prompts cleared from view");
+      assert.equal(h.child.exitCode, null, "parent ACP worker remains running after --queued");
+
+      const empty = run(process.execPath, [SCRIPT, "cancel", h.job.id, "--queued", "--cwd", h.cwd], { cwd: h.cwd, env: h.env });
+      assert.equal(empty.status, 0, empty.stderr);
+      assert.match(empty.stdout, /0 removed/);
+
+      assert.equal(h.cli("message", h.job.id, "--queue", "final-keep").status, 0);
+      h.release();
+      const exited = await waitForExit(h);
+      assert.equal(exited.code, 0, exited.stderr);
+      assert.deepEqual(recordingPrompts(h.recording), ["hold", "final-keep"]);
+    }
   }
 ];
 

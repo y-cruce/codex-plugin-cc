@@ -644,6 +644,7 @@ async function scanRoots($: EngineInterface, state: State) {
         const job = cached?.mtime === mtime ? cached.job : JSON.parse(await $.fs.read(path)) as Job
         if (stale()) return
         state.jobFiles.set(path, { mtime, job })
+        if (cached && cached.job.status !== job.status) $.ui.invalidate('ui.render')
         if (!job.workspaceRoot) continue
         if (DONE.includes(job.status) && job.completedAt && Date.parse(job.completedAt) <= now - KEEP_MS) continue
         if (job.sessionId !== state.sessionId && !state.continued.has(job.sessionId ?? '')) {

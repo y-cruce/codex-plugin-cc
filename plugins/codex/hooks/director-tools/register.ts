@@ -131,10 +131,20 @@ const TOOLS = [
   },
   {
     name: 'cancel',
-    description: 'End a running or queued job now: the companion\'s cancel command. It interrupts the Codex turn and '
-      + 'stops the job\'s process; files it already changed stay. To change a job\'s direction, use message with '
-      + 'interrupt instead. TaskStop cannot stop a Codex job.',
-    inputSchema: { type: 'object', properties: { job: JOB, cwd: JOB_CWD }, required: ['job'] },
+    description: 'End a running or queued job now: the companion\'s cancel command. It interrupts the turn and '
+      + 'stops the job\'s process; files it already changed stay. Passing an ACP `queuedJobId` removes only that queued '
+      + 'message without stopping the running round. Set `queued: true` to clear all queued messages on `job`\'s thread '
+      + 'while leaving the running round untouched. To change a job\'s direction, use message with interrupt instead. '
+      + 'TaskStop cannot stop a Codex job.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job: JOB,
+        cwd: JOB_CWD,
+        queued: { type: 'boolean', description: 'Clear all queued messages on this job\'s thread without stopping the running round.' },
+      },
+      required: ['job'],
+    },
   },
 ] as const
 
@@ -165,8 +175,9 @@ const DELIVERY: Record<string, string[]> = { queue: ['--queue'], steer: [], inte
 let written = 0
 
 async function scratch($: EngineInterface, context: Context, suffix: string, body: string): Promise<string> {
-  written += 1
-  const path = `${context.tmp}/codex-director-${await $.session.id()}-${await $.clock.now()}-${written}${suffix}`
+  // Take the number before awaiting: concurrent calls read the same clock value.
+  const number = ++written
+  const path = `${context.tmp}/codex-director-${await $.session.id()}-${await $.clock.now()}-${number}${suffix}`
   await $.fs.write(path, body)
   return path
 }
@@ -293,7 +304,8 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
       if (!job) return { deny: 'job is required' }
       const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
       if ('deny' in picked) return picked
-      return run($, context, ['node', context.companion, 'cancel', job, '--cwd', picked.cwd], picked.cwd, 60_000)
+      return run($, context, ['node', context.companion, 'cancel', job, '--cwd', picked.cwd,
+        ...(input.queued === true ? ['--queued'] : [])], picked.cwd, 60_000)
     }
   }
   return { deny: `unknown tool ${name}` }
@@ -345,7 +357,7 @@ export async function startDirectorTools($: EngineInterface, tools: DirectorTool
 async function answerCall($: EngineInterface, tools: DirectorTools, name: string, input: ToolInput): Promise<Answer> {
   if (!tools.context) return { deny: 'the code-director skill is not installed, so there is no dispatch.sh to run' }
   const answer = await serve($, tools.context, name, input)
-  if (name === 'dispatch' && 'result' in answer) tools.pending = true
+  if ((name === 'dispatch' || name === 'cancel') && 'result' in answer) tools.pending = true
   return answer
 }
 

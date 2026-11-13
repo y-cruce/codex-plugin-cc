@@ -134,6 +134,17 @@ test("message writes the correction to a file and passes the delivery as dispatc
   assert.deepEqual(await h.call("message", { job: "j", cwd: "/repo", text: "x", delivery: "now" }), { deny: "delivery must be queue, steer or interrupt" });
 });
 
+test("concurrent messages each send their own text", async () => {
+  const h = harness({ stdout: "MESSAGED\n" });
+  await startDirectorTools(h.$, h.tools);
+  await Promise.all([
+    h.call("message", { job: "task-a", cwd: "/repo", text: "to A", delivery: "interrupt" }),
+    h.call("message", { job: "task-b", cwd: "/repo", text: "to B", delivery: "interrupt" }),
+  ]);
+  const sent = h.runs.filter(({ argv }) => argv[2] === "message").map(({ argv }) => [argv[3], h.writes.get(argv[4])]);
+  assert.deepEqual(sent.sort(), [["task-a", "to A"], ["task-b", "to B"]]);
+});
+
 test("answer writes the answers map as JSON for dispatch.sh answer", async () => {
   const h = harness({ stdout: "ANSWERED job=j request=0\n" });
   await startDirectorTools(h.$, h.tools);
@@ -151,11 +162,18 @@ test("answer writes the answers map as JSON for dispatch.sh answer", async () =>
 test("result, status and cancel run the plugin's companion directly", async () => {
   const h = harness({ stdout: "{}\n" });
   await startDirectorTools(h.$, h.tools);
+  const cancelSpec = h.registered.find((spec) => spec.name === "cancel");
+  assert.equal(cancelSpec.inputSchema.properties.queued.type, "boolean");
+  assert.match(cancelSpec.description, /queuedJobId/);
+  assert.match(cancelSpec.description, /queued: true/);
   await h.call("result", { job: "j", cwd: "/repo" });
   await h.call("status", { job: "j", cwd: "/repo" });
   await h.call("status", { cwd: "/repo" });
   await h.call("status", { cwd: "/repo", detail: true });
+  h.tools.pending = false;
   await h.call("cancel", { job: "j", cwd: "/repo" });
+  assert.equal(h.tools.pending, true);
+  await h.call("cancel", { job: "j", cwd: "/repo", queued: true });
   assert.deepEqual(await h.call("cancel", { cwd: "/repo" }), { deny: "job is required" });
   assert.deepEqual(h.runs.map((run) => run.argv), [
     ["node", COMPANION, "result", "j", "--cwd", "/repo"],
@@ -163,6 +181,7 @@ test("result, status and cancel run the plugin's companion directly", async () =
     ["node", COMPANION, "status", "--cwd", "/repo", "--brief"],
     ["node", COMPANION, "status", "--cwd", "/repo", "--json"],
     ["node", COMPANION, "cancel", "j", "--cwd", "/repo"],
+    ["node", COMPANION, "cancel", "j", "--cwd", "/repo", "--queued"],
   ]);
 });
 

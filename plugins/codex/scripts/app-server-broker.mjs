@@ -22,6 +22,7 @@ const EXECUTOR_CONTROL_METHODS = new Set([
   "executor/answer-question",
   "executor/steer",
   "executor/queue-turn",
+  "executor/cancel-queued",
   "executor/interrupt-turn",
   "executor/cancel-job"
 ]);
@@ -42,6 +43,7 @@ function executorControlRequest(message, jobs, cwd) {
       requestId: p.requestId, answers: p.values } };
     case "executor/steer": return { method: "turn/steer", params: { threadId, expectedTurnId: p.turnId, input } };
     case "executor/queue-turn": return { method: "broker/queue", params: { threadId, expectedTurnId: p.turnId, input } };
+    case "executor/cancel-queued": return { method: "broker/cancel-queued", params: { threadId } };
     case "executor/interrupt-turn": return { method: p.replacementPrompt ? "broker/redirect" : "turn/interrupt",
       params: { threadId, turnId: p.turnId, input } };
     case "executor/cancel-job": return { method: "turn/interrupt", params: { threadId, turnId: p.turnId } };
@@ -315,6 +317,15 @@ export async function main(runtimeOptions = {}) {
               await codexEvents.accept({ method: "companion/control-message", params: { threadId: p.threadId,
                 turnId: p.expectedTurnId ?? p.turnId, message: p.input.map((item) => item.text).join("\n"),
                 interrupt: control.method === "broker/redirect", queued: control.method === "broker/queue", status: "accepted" } });
+            } else if (control.method === "broker/cancel-queued") {
+              if (result.removed > 0) {
+                await codexEvents.accept({ method: "companion/control-message", params: { threadId: p.threadId,
+                  turnId: controls.threads.get(p.threadId)?.turnId ?? null, message: "",
+                  queued: true, cancelled: true, status: "cancelled" } });
+              }
+              if (message.method === "executor/cancel-queued") {
+                result = { cancelled: result.removed > 0, count: result.removed, removedJobIds: [] };
+              }
             } else if (control.method === "broker/answer") {
               await codexEvents.accept({ method: "companion/answer-delivered", params: { ...p } });
             }

@@ -126,6 +126,31 @@ test("queued Codex messages are delivered together in one next turn and leave no
   assert.deepEqual(turns[1].params.input.map(block => block.text), pending);
 });
 
+test("cancel --queued clears queued Codex messages without interrupting the active turn", async (t) => {
+  const h = await setup(t);
+  const { job, done } = await startJob(t, h, "hold");
+  for (const text of ["stale-a", "stale-b"]) {
+    assert.equal(h.cli("message", job.id, "--queue", text).status, 0);
+  }
+  const viewPath = JSON.parse(h.cli("observe", "threads").stdout).threads.find(thread => thread.jobId === job.id).viewPath;
+  const view = () => JSON.parse(fs.readFileSync(viewPath, "utf8"));
+  await waitFor(() => view().queuedPrompts?.length === 2, "queued prompts shown");
+
+  const cleared = h.cli("cancel", job.id, "--queued");
+  assert.equal(cleared.status, 0, cleared.stderr);
+  assert.equal(JSON.parse(cleared.stdout).queuedCancelled, 2);
+  await waitFor(() => view().queuedPrompts?.length === 0, "queued prompts cleared from live view");
+
+  const empty = run(process.execPath, [SCRIPT, "cancel", job.id, "--queued"], { cwd: h.repo, env: h.env });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.match(empty.stdout, /0 removed/);
+
+  assert.equal(h.cli("message", job.id, "finish").status, 0);
+  assert.equal((await done).code, 0);
+  const turns = h.requests().filter(request => request.method === "turn/start" && request.params.threadId === job.threadId);
+  assert.equal(turns.length, 1, "cleared queued messages do not start a follow-up turn");
+});
+
 function startEvents(t, h) {
   const child = spawn(process.execPath, [SCRIPT, "events", "--cwd", h.repo, "--poll-ms", "20"], {
     cwd: h.repo, env: h.env

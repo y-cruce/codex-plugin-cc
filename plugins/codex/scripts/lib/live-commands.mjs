@@ -104,6 +104,17 @@ export async function sendLiveCommand(cwd, reference, command, options, text) {
   });
 }
 
+export async function cancelQueuedLiveMessages(cwd, job, { all = false } = {}) {
+  const sessionId = executorSessionId(job);
+  if (!sessionId && !job.controlEndpoint) return { attempted: false, cancelled: false, count: 0, removedJobIds: [] };
+  const result = await withLiveClient(cwd, job, (client) => client.request("executor/cancel-queued", {
+    jobId: job.id,
+    executorSessionId: sessionId,
+    all
+  }), { brokerTimeoutMs: 5000 });
+  return { attempted: true, ...result };
+}
+
 export async function cancelLiveJob(cwd, job) {
   await requireActiveRound(cwd, job);
   const sessionId = executorSessionId(job);

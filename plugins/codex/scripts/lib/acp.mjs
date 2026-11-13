@@ -121,7 +121,7 @@ export async function runAcpTurn(cwd, options = {}) {
     args: options.args, env: options.env, modeId: options.modeId, modelId: options.modelId, effortId: options.effortId,
     permissionPolicy: options.permissionPolicy,
     inputTimeoutMs: options.inputTimeoutMs, cancelTimeoutMs: options.cancelTimeoutMs,
-    createQueuedRound: options.createQueuedRound });
+    createQueuedRound: options.createQueuedRound, cancelQueuedRound: options.cancelQueuedRound });
   const eventPump = (async () => {
     for await (const event of port.events()) {
       options.onExecutorEvent?.(event);
