@@ -20,6 +20,8 @@ import { observationThreads } from "../plugins/codex/scripts/lib/observation-pat
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { isolateTestEnvironment, makeTempDir, waitFor, within } from "./helpers.mjs";
 
+const isHold = request => request.tool === "Monitor" && request.command?.startsWith(": Codex jobs running");
+
 // The pane runs the director ingress ahead of its own prompt.submit; this is that chain.
 const through = (director) => async ($, e, next) => {
   const admitted = await admitDirector($, director, e);
@@ -1329,7 +1331,7 @@ test("a fallback Monitor survives a poll whose listing of its repository failed"
   await pane.tick()
   pane.list(true)
   await pane.tick()
-  assert.deepEqual(calls.filter(tool => tool !== 'Bash'), ['Monitor'], "kept through the failed listing, not stopped and rearmed")
+  assert.deepEqual(calls, ['Monitor'], "kept through the failed listing, not stopped and rearmed")
 })
 
 test("channel confirmation stops an ACP Monitor whose launch reply arrives after retirement", async () => {
@@ -1477,7 +1479,7 @@ test("a channel goal hold stops after the last job ends by status or reconciliat
     const now = Date.now();
     const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
       preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
-      toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+      toolCall: async request => { calls.push(request); return { result: { taskId: "hold-1" } }; },
       replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }),
     });
     const first = { ...pane.listing[0], historyAvailable: true, directorPush };
@@ -1489,16 +1491,15 @@ test("a channel goal hold stops after the last job ends by status or reconciliat
     pane.list([first, second]);
     await pane.tick();
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(calls.filter(request => request.tool === "Bash"), [], "no goal, no hold");
+    assert.deepEqual(calls.filter(isHold), [], "no goal, no hold");
     await pane.goal("all jobs merged", "Goal set: all jobs merged");
     await pane.tick();
     await new Promise(resolve => setImmediate(resolve));
-    const holds = calls.filter(request => request.tool === "Bash");
+    const holds = calls.filter(isHold);
     assert.equal(holds.length, 1);
-    assert.equal(holds[0].run_in_background, true);
     assert.match(holds[0].command, /^: Codex jobs running, \/goal waits.*do sleep 1; done; : session$/);
     await pane.tick();
-    assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "one hold for both live jobs");
+    assert.equal(calls.filter(isHold).length, 1, "one hold for both live jobs");
     pane.list([{ ...first, status: "completed" }, second]);
     await pane.tick();
     assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0, "the other job still keeps the goal waiting");
@@ -1524,23 +1525,23 @@ test("a stale running index does not hold /goal, and a goal turn ended with no j
   const now = Date.now();
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242", push: true, now,
     preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
-    toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+    toolCall: async request => { calls.push(request); return { result: { taskId: "hold-1" } }; },
     replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }),
   });
   pane.list([{ ...pane.listing[0], historyAvailable: true, directorPush: true, live: false }]);
   await pane.goal("all jobs merged", "Goal set: all jobs merged");
   await pane.tick();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(calls.filter(request => request.tool === "Bash"), []);
+  assert.deepEqual(calls.filter(isHold), []);
   // Other background work put the goal's check off; it is still on.
   await pane.turn();
   pane.list([{ ...pane.listing[0], historyAvailable: true, directorPush: true, live: true }]);
   await pane.tick();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
+  assert.equal(calls.filter(isHold).length, 1);
 });
 
-test("reload with a missing hold record adopts the shell and releases it without its pending Bash reply", async (t) => {
+test("reload with a missing hold record adopts the shell and releases it without its pending Monitor reply", async (t) => {
   const tmpdir = makeTempDir("codex-goal'hold-");
   const sessionId = `goal-hold-${process.pid}`;
   const key = `codex:tasks:${sessionId}`;
@@ -1569,7 +1570,7 @@ test("reload with a missing hold record adopts the shell and releases it without
     fileWrite: async (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); },
     toolCall: async request => {
       calls.push(request);
-      if (request.tool === "Bash") {
+      if (isHold(request)) {
         launch(request.command);
         // Unload loses this reply, so neither pane ever receives the taskId.
         return new Promise(() => {});
@@ -1589,12 +1590,12 @@ test("reload with a missing hold record adopts the shell and releases it without
     "the test hold shell", 5000);
   const restored = await paneHarness(stored, undefined, sessionId, options);
   await restored.tick();
-  assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "the claim survives unload before Bash replies");
+  assert.equal(calls.filter(isHold).length, 1, "the claim survives unload before the Monitor replies");
   const reloaded = await paneHarness(stored, undefined, sessionId, { ...options,
     storeRead: async key => { if (key.endsWith(":hold")) throw new Error("hold record unavailable"); },
   });
   await reloaded.tick();
-  assert.equal(calls.filter(request => request.tool === "Bash").length, 1, "a missing record still probes before arming");
+  assert.equal(calls.filter(isHold).length, 1, "a missing record still probes before arming");
   // A second launch already sent before unload must also leave just one waiter.
   const duplicate = launch(calls[0].command);
   assert.deepEqual(await within(duplicate.exited, 5000, "duplicate hold exit"), [0, null]);
@@ -1647,7 +1648,7 @@ test("a replaced pane stays retired until a new tasks command restores its polli
   const options = { ppid: "4242", push: true, now,
     preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
     fileWrite: async (file, text) => { if (file.endsWith(".goal-hold")) markers.push(text); },
-    toolCall: async request => { calls.push(request); return { result: { backgroundTaskId: "hold-1" } }; },
+    toolCall: async request => { calls.push(request); return { result: { taskId: "hold-1" } }; },
   };
   const old = await paneHarness(stored, undefined, "session", options);
   await old.tick();
@@ -1689,7 +1690,7 @@ test("a replaced pane stays retired until a new tasks command restores its polli
   const resumed = old.observed.length;
   await old.tick();
   assert.ok(old.observed.length > resumed, "polling continues after the command");
-  assert.equal(calls.filter(request => request.tool === "Bash").length, 1);
+  assert.equal(calls.filter(isHold).length, 1);
   assert.equal(calls.filter(request => request.tool === "TaskStop").length, 0);
 });
 
@@ -1707,7 +1708,7 @@ test("reload finds the existing session goal hold and stops it without starting 
   });
   await pane.tick();
   assert.ok(probes.some(pattern => pattern.includes('the codex plugin stops this when they end') && pattern.endsWith(': session')));
-  assert.equal(calls.filter(request => request.tool === "Bash").length, 0);
+  assert.equal(calls.filter(isHold).length, 0);
   pane.list([{ ...pane.listing[0], status: "queued" }]);
   Object.assign(pane.live, { status: "completed", activeRoundId: null, endedAt: new Date(now).toISOString() });
   pane.touch();
@@ -1730,11 +1731,11 @@ test("a goal cleared drops the hold, and a turn's end leaves it", async () => {
     preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
     // A resumed session takes its goal from the transcript.
     messages: [{ role: "user", text: "<command-name>/goal</command-name>\n<command-args>ship it</command-args>" }],
-    toolCall: async (request) => { calls.push(request); return { result: { backgroundTaskId: `hold-${calls.length}` } }; },
+    toolCall: async (request) => { calls.push(request); return { result: { taskId: `hold-${calls.length}` } }; },
     replay: () => JSON.stringify({ type: "end", nextCursor: "c1", committedSeq: "1" }) });
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls.filter((request) => request.tool === "Bash").length, 1);
+  assert.equal(calls.filter(isHold).length, 1);
   await pane.turn();
   await pane.goal("clear", "Goal cleared: ship it");
   await new Promise((resolve) => setImmediate(resolve));
@@ -1743,7 +1744,7 @@ test("a goal cleared drops the hold, and a turn's end leaves it", async () => {
   pane.advance(20000);
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls.filter((request) => request.tool === "Bash").length, 2);
+  assert.equal(calls.filter(isHold).length, 2);
   await pane.turn("aborted");
   await pane.tick();
   assert.equal(calls.filter((request) => request.tool === "TaskStop").length, 1, "an interrupt leaves the goal on");
@@ -1762,12 +1763,12 @@ test("goal commands and transcripts read as set or cleared", () => {
 test("without the channel no hold is armed", async () => {
   const calls = [];
   const pane = await paneHarness(new Map(), undefined, "session", { ppid: "4242",
-    toolCall: async (request) => { calls.push(request.tool); return { result: { taskId: "m1" } }; },
+    toolCall: async (request) => { calls.push(request); return { result: { taskId: "m1" } }; },
     replay: () => JSON.stringify({ type: "end", nextCursor: "c0", committedSeq: "0" }) });
   await pane.goal("all jobs merged", "Goal set: all jobs merged");
   await pane.tick();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.filter((tool) => tool === "Bash"), []);
+  assert.deepEqual(calls.filter(isHold), []);
 });
 
 test("a question committed before its view is written is still pushed, and an answered one is not", async () => {

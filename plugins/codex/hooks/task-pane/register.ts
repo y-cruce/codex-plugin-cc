@@ -443,6 +443,8 @@ async function probing($: EngineInterface, base: string, now: number) {
 // and ends when the pane withdraws its session marker after the last job,
 // including when the broker sent its ending before the pane reconciled it.
 // The shell reads as what it is in the goal's check-in, which quotes it.
+// It runs as a Monitor because Code Mode moves Bash into its REPL, where
+// $.tool.call cannot reach it; past the cap, the next check arms a new one.
 function holdFile(state: State) {
   return state.channel ? `${state.channel}.${state.sessionId}.goal-hold` : null
 }
@@ -472,7 +474,7 @@ async function releaseHold($: EngineInterface, state: State) {
   state.hold = null
   recordHold($, state)
   const file = holdFile(state)
-  // A reload may have lost the taskId while Bash was starting. Its shell can
+  // A reload may have lost the taskId while the Monitor was starting. Its shell can
   // still see this marker, even after the environment awaiting Bash is gone.
   if (file) await $.fs.write(file, 'false').catch(error => {
     $.ui.log(`Codex tasks goal hold: ${String(error)}`, { to: 'debug' })
@@ -538,18 +540,17 @@ async function holdGoal($: EngineInterface, state: State, active: boolean, sure:
   const armed: Hold = { armedAt: now }
   state.hold = armed
   await $.fs.write(file, 'true')
-  // Publish the claim before Bash starts, including while its reply is pending.
+  // Publish the claim before the Monitor starts, including while its reply is pending.
   await $.store.set(`${state.key}:hold`, armed)
   if (state.leaving || state.epoch !== epoch || state.hold !== armed) return
   void $.tool.call({
-    tool: 'Bash',
+    tool: 'Monitor',
     command: holdCommand(sessionId, file),
     description: 'Codex jobs running (keeps /goal waiting)',
-    run_in_background: true,
+    timeout_ms: MONITOR_MS,
   }).then(async result => {
     if (!await ownsPane($, state)) return
-    const output = result.result as { backgroundTaskId?: string; taskId?: string } | undefined
-    const taskId = output?.backgroundTaskId ?? output?.taskId
+    const taskId = (result.result as { taskId?: string } | undefined)?.taskId
     if (!taskId) return
     if (state.leaving || state.epoch !== epoch || state.sessionId !== sessionId || state.hold !== armed) {
       return stopMonitor($, state, taskId, `${$.plugin.name}:tasks:${sessionId}`)
