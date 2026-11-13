@@ -13,6 +13,7 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "../broker-endpoint.mj
 import { ExecutorEventQueue } from "../executor-port.mjs";
 import { DirectorPublisher } from "../director-delivery.mjs";
 import { JobRuntime } from "../job-runtime.mjs";
+import { pendingQuestionSteerMessage } from "../job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../live-turn-control.mjs";
 import { ACP_COMPANION_ENV, ACP_CONTROL_ENV } from "../observation-client.mjs";
 import { AcpEventAdapter, normalizeAcpPermission, normalizeAcpQuestion } from "./acp-event-adapter.mjs";
@@ -639,7 +640,9 @@ export class AcpExecutorJobPort {
     if (!active || active.turnId !== request.turnId || request.sessionId !== this.sessionId || !active.accepting || active.interrupting || active.cancelling) {
       throw Object.assign(new Error("Turn is not active."), { code: "TURN_NOT_ACTIVE" });
     }
-    if (this.questions.size || this.permissions.size) throw Object.assign(new Error("Answer the pending question with answer, or use message --interrupt."), { code: "INVALID_STATE" });
+    if (this.questions.size || this.permissions.size) {
+      throw Object.assign(new Error(pendingQuestionSteerMessage(this.liveStatus().questions)), { code: "INVALID_STATE" });
+    }
     if (this.antigravityPromptSteering && this.runningCommands().length) {
       throw Object.assign(new Error("agy 有命令仍在运行，当前不能 steer；请用 queue 留到下一轮，或用 interrupt 停止当前轮后纠偏。"),
         { code: "INVALID_STATE" });

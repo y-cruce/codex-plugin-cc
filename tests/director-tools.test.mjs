@@ -4,7 +4,7 @@ import fs from "node:fs";
 import fsAsync from "node:fs/promises";
 import { parseSessionTaskIndex, sessionTaskIndexPath } from "../plugins/codex/scripts/lib/session-task-index.mjs";
 import path from "node:path";
-import { listDirectorTasks } from "../plugins/codex/scripts/lib/director-tasks.mjs";
+import { listDirectorTasks, resolveDirectorTaskCwd } from "../plugins/codex/scripts/lib/director-tasks.mjs";
 import { createLiveView } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
@@ -16,11 +16,12 @@ import { createJobRecord } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 const WORKER = "/home/test/.claude/skills/code-director/scripts/dispatch.sh";
 const COMPANION = "/plugin/scripts/codex-companion.mjs";
 
-function harness({ root = "/plugin", files = [WORKER, COMPANION, "/repo"], exitCode = 0, stdout = "STATUS: started\nJOB: task-a-b\n", stderr = "" } = {}) {
+function harness({ root = "/plugin", files = [WORKER, COMPANION, "/repo"], indexed = {}, exitCode = 0, stdout = "STATUS: started\nJOB: task-a-b\n", stderr = "" } = {}) {
   const hooks = new Map();
   const on = (event, matcher, hook) => hooks.set(`${event}:${matcher.tool}`, hook);
   const registered = [];
   const runs = [];
+  const lookups = [];
   const writes = new Map();
   const exists = new Set(files);
   const $ = {
@@ -30,13 +31,20 @@ function harness({ root = "/plugin", files = [WORKER, COMPANION, "/repo"], exitC
     session: { id: async () => "session-1", cwd: async () => "/repo" },
     clock: { now: async () => 1000 },
     tool: { register: async (spec) => { registered.push(spec); return { tool: `mcp__codex__${spec.name}` }; } },
-    process: { run: async (argv, init) => { runs.push({ argv, init }); return { exitCode, stdout, stderr }; } },
+    process: { run: async (argv, init) => {
+      if (argv[2] === "tasks" && (argv[3] === "--job-cwd" || argv[3] === "--thread-cwd")) {
+        lookups.push({ argv, init });
+        return { exitCode: 0, stdout: indexed[argv[4]] ? `${indexed[argv[4]]}\n` : "", stderr: "" };
+      }
+      runs.push({ argv, init });
+      return { exitCode, stdout, stderr };
+    } },
     ui: { log: () => {} },
   };
   const tools = directorTools();
   registerDirectorTools(on, tools);
   const call = (name, input) => hooks.get(`tool.call:mcp__codex__${name}`)($, { tool: `mcp__codex__${name}`, ...input }, () => assert.fail("next must not run"));
-  return { $, tools, hooks, registered, runs, writes, call };
+  return { $, tools, hooks, registered, runs, lookups, writes, call };
 }
 
 test("dispatchInput writes the headers dispatch.sh reads, then the brief", () => {
@@ -340,5 +348,68 @@ test("session task index migrates once, keeps old own threads, bounds all by day
     assert.ok(fs.statSync(indexFile).mtimeMs > now - 3_600_000, name);
     assert.equal(fs.existsSync(retired), false, name);
     assert.equal(fs.existsSync(ancientFile), true, name);
+  }
+});
+
+test("job tools and continue/fork prefer unique session-indexed cwd, fall back to caller cwd, and require cwd when neither exists", async (t) => {
+  isolateTestEnvironment(t);
+  const home = fs.realpathSync(makeTempDir());
+  const configDir = path.join(home, ".claude");
+  const tmpDir = path.join(home, "tmp");
+  const repoA = path.join(home, "alpha");
+  const repoB = path.join(home, "beta");
+  for (const dir of [repoA, repoB]) fs.mkdirSync(dir, { recursive: true });
+  writeJobFile(repoA, "job-1", { id: "job-1", sessionId: "session-1", workspaceRoot: repoA, status: "running", threadId: "thr-1" });
+  writeJobFile(repoB, "job-2", { id: "job-2", sessionId: "session-1", workspaceRoot: repoB, status: "completed", executor: "acp", executorSessionId: "thr-2" });
+  writeJobFile(repoA, "job-dup", { id: "job-dup", sessionId: "session-1", workspaceRoot: repoA, status: "completed", threadId: "thr-dup" });
+  writeJobFile(repoB, "job-dup", { id: "job-dup", sessionId: "session-1", workspaceRoot: repoB, status: "completed", threadId: "thr-dup" });
+
+  for (const [label, opts, expected] of [
+    ["exact job hit", { job: "job-1" }, repoA],
+    ["job prefix ignored", { job: "job-" }, null],
+    ["multi-repo job ignored", { job: "job-dup" }, null],
+    ["missing job", { job: "job-missing" }, null],
+    ["thread hit", { thread: "thr-2" }, repoB],
+    ["multi-repo thread ignored", { thread: "thr-dup" }, null],
+    ["missing thread", { thread: "thr-missing" }, null],
+  ]) {
+    assert.equal(await resolveDirectorTaskCwd({ sessionId: "session-1", home, configDir, tmpDir, ...opts }), expected, label);
+  }
+
+  const h = harness({ files: [WORKER, COMPANION, "/repo", repoA, repoB], indexed: { "job-1": repoA, "thr-2": repoB }, stdout: "OK\n" });
+  await startDirectorTools(h.$, h.tools);
+  const byName = Object.fromEntries(h.registered.map(spec => [spec.name, spec.inputSchema]));
+  assert.deepEqual([byName.dispatch.required, byName.message.required, byName.answer.required, byName.result.required, byName.status.required, byName.cancel.required],
+    [["mode", "name", "brief"], ["job", "text"], ["job", "request", "answers"], ["job"], undefined, ["job"]]);
+
+  for (const [label, tool, input, expectedCwd] of [
+    ["indexed job ignores wrong cwd on message", "message", { job: "job-1", cwd: "/gone", text: "Fix." }, repoA],
+    ["indexed job without cwd on answer", "answer", { job: "job-1", request: "0", answers: { q: { answers: ["a"] } } }, repoA],
+    ["indexed job ignores wrong cwd on result", "result", { job: "job-1", cwd: "/repo" }, repoA],
+    ["indexed job without cwd on status", "status", { job: "job-1" }, repoA],
+    ["indexed job without cwd on cancel", "cancel", { job: "job-1" }, repoA],
+    ["unindexed job uses caller cwd", "result", { job: "job-other", cwd: "/repo" }, "/repo"],
+    ["indexed thread ignores wrong cwd on continue", "dispatch", { mode: "continue", name: "next", thread: "thr-2", cwd: "/gone", brief: "Go." }, repoB],
+    ["indexed thread without cwd on fork", "dispatch", { mode: "fork", name: "branch", thread: "thr-2", brief: "Go." }, repoB],
+    ["unindexed thread uses caller cwd", "dispatch", { mode: "continue", name: "next", thread: "thr-other", cwd: "/repo", brief: "Go." }, "/repo"],
+  ]) {
+    h.runs.length = 0;
+    assert.deepEqual(await h.call(tool, input), { result: "OK" }, label);
+    assert.equal(h.runs[0].init.cwd, expectedCwd, label);
+    if (tool === "dispatch") assert.match(h.runs[0].init.stdin, new RegExp(`CWD: ${expectedCwd}\\n`), label);
+    else assert.ok(h.runs[0].argv.includes(expectedCwd), label);
+  }
+
+  for (const [label, tool, input, pattern] of [
+    ["unindexed job without cwd", "result", { job: "job-missing" }, /This session has no record of job job-missing; pass cwd\./],
+    ["unindexed thread without cwd", "dispatch", { mode: "continue", name: "next", thread: "thr-missing", brief: "Go." }, /This session has no record of thread thr-missing; pass cwd\./],
+    ["status without job or cwd", "status", {}, /cwd is required unless job is provided/],
+    ["investigate without cwd", "dispatch", { mode: "investigate", name: "find x", brief: "Go." }, /cwd is required for new tasks/],
+    ["implement without cwd", "dispatch", { mode: "implement", name: "edit x", brief: "Go." }, /cwd is required for new tasks/],
+    ["review without cwd", "dispatch", { mode: "review", name: "rev x", brief: "Go." }, /cwd is required for new tasks/],
+    ["adversarial-review without cwd", "dispatch", { mode: "adversarial-review", name: "adv x", brief: "Go." }, /cwd is required for new tasks/],
+  ]) {
+    const answer = await h.call(tool, input);
+    assert.match(answer.deny ?? "", pattern, label);
   }
 });

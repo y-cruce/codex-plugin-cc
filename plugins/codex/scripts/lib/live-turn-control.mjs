@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { pendingQuestionSteerMessage } from "./job-event-model.mjs";
 import { runCommand } from "./process.mjs";
 
 const CONTROL_METHODS = new Set(["turn/steer", "turn/interrupt", "broker/status", "broker/answer", "broker/redirect", "broker/queue", "broker/ack-notifications"]);
@@ -188,7 +189,7 @@ export class LiveTurnControl {
       }
     }
     if (method === "turn/steer") {
-      if (state.questions.length) throw new Error("Answer the pending question with answer, or use message --interrupt.");
+      if (state.questions.length) throw new Error(pendingQuestionSteerMessage(state.questions));
       if (state.pendingMessages.length >= 100) throw new Error("Pending message queue is full (100 messages).");
       const id = p.clientUserMessageId ?? crypto.randomUUID();
       if (state.pendingMessages.some((message) => message.id === id)) throw new Error("Message ID is already pending.");

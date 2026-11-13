@@ -19,6 +19,18 @@ const HEADERS: [field: string, header: string][] = [
 ]
 
 const CWD = { type: 'string', description: 'Absolute path of the repository (or worktree) the job runs in.' }
+const DISPATCH_CWD = {
+  type: 'string',
+  description: 'Absolute path of the repository (or worktree) the job runs in. Required for new tasks; for continue and fork, a thread recorded in a single repository in this session uses that repository (ignoring `cwd`), otherwise `cwd` is used and required.',
+}
+const JOB_CWD = {
+  type: 'string',
+  description: 'Absolute path of the repository (or worktree) the job runs in. Optional when `job` is recorded in a single repository in this session (that repository is used, ignoring `cwd`); otherwise `cwd` is required.',
+}
+const STATUS_CWD = {
+  type: 'string',
+  description: 'Absolute path of the repository (or worktree) the job runs in. Required without `job`; with `job`, a job recorded in a single repository in this session uses that repository (ignoring `cwd`), otherwise `cwd` is required.',
+}
 const JOB = { type: 'string', description: 'The job id, as dispatch or an event line returned it.' }
 
 const TOOLS = [
@@ -32,7 +44,7 @@ const TOOLS = [
       properties: {
         mode: { type: 'string', enum: ['investigate', 'implement', 'continue', 'fork', 'review', 'adversarial-review'] },
         name: { type: 'string', description: 'Three to eight words saying what the task does; never a job id or a mode name.' },
-        cwd: CWD,
+        cwd: DISPATCH_CWD,
         brief: { type: 'string', description: 'The brief body Codex reads (for review modes, the focus text). '
           + 'The codex-executor skill sets the final-report format; do not repeat it here.' },
         thread: { type: 'string', description: 'THREAD: the thread to continue or fork from (required for mode continue and mode fork).' },
@@ -49,7 +61,7 @@ const TOOLS = [
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor.' },
         executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for ACP. New agy sessions default to Opus medium / Carbon high in the driver; continue keeps the existing effort unless explicitly supplied.' },
       },
-      required: ['mode', 'name', 'cwd', 'brief'],
+      required: ['mode', 'name', 'brief'],
     },
   },
   {
@@ -63,11 +75,11 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        job: JOB, cwd: CWD,
+        job: JOB, cwd: JOB_CWD,
         text: { type: 'string', description: 'The correction for the running agent.' },
         delivery: { type: 'string', enum: ['steer', 'queue', 'interrupt'], default: 'steer' },
       },
-      required: ['job', 'cwd', 'text'],
+      required: ['job', 'text'],
     },
   },
   {
@@ -79,17 +91,17 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        job: JOB, cwd: CWD,
+        job: JOB, cwd: JOB_CWD,
         request: { type: 'string', description: 'The requestId of the pending request.' },
         answers: { type: 'object', additionalProperties: { type: 'object' } },
       },
-      required: ['job', 'cwd', 'request', 'answers'],
+      required: ['job', 'request', 'answers'],
     },
   },
   {
     name: 'result',
     description: 'Read a finished job\'s output, unchanged: the companion\'s result command.',
-    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD }, required: ['job', 'cwd'] },
+    inputSchema: { type: 'object', properties: { job: JOB, cwd: JOB_CWD }, required: ['job'] },
   },
   {
     name: 'status',
@@ -97,7 +109,7 @@ const TOOLS = [
       + 'that job\'s line, its pending questions (request, ids, full text and options), undelivered notes and its last '
       + 'progress lines. Events already wake you, so call it only to check one job you have a reason to doubt. '
       + '`detail: true` returns the companion\'s full JSON (config, every thread, live controls): large, for debugging only.',
-    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD, detail: { type: 'boolean' } }, required: ['cwd'] },
+    inputSchema: { type: 'object', properties: { job: JOB, cwd: STATUS_CWD, detail: { type: 'boolean' } } },
   },
   {
     name: 'tasks',
@@ -122,7 +134,7 @@ const TOOLS = [
     description: 'End a running or queued job now: the companion\'s cancel command. It interrupts the Codex turn and '
       + 'stops the job\'s process; files it already changed stay. To change a job\'s direction, use message with '
       + 'interrupt instead. TaskStop cannot stop a Codex job.',
-    inputSchema: { type: 'object', properties: { job: JOB, cwd: CWD }, required: ['job', 'cwd'] },
+    inputSchema: { type: 'object', properties: { job: JOB, cwd: JOB_CWD }, required: ['job'] },
   },
 ] as const
 
@@ -165,21 +177,48 @@ async function discard($: EngineInterface, path: string) {
   await $.process.run(['rm', '-f', path], { timeoutMs: 5000 }).catch(() => {})
 }
 
+async function companionEnv($: EngineInterface, context: Context, directorAgentId = '') {
+  return {
+    CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
+    CODEX_COMPANION_DIRECTOR_AGENT_ID: directorAgentId,
+    ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
+  }
+}
+
+async function pickCwd(
+  $: EngineInterface,
+  context: Context,
+  flag: '--job-cwd' | '--thread-cwd',
+  id: string,
+  given: string,
+  kind: 'job' | 'thread',
+): Promise<{ cwd: string } | { deny: string }> {
+  let indexed = ''
+  if (id) {
+    try {
+      const ran = await $.process.run(['node', context.companion, 'tasks', flag, id], {
+        cwd: await $.session.cwd(), timeoutMs: 15_000, env: await companionEnv($, context),
+      })
+      const out = ran.exitCode === 0 ? ran.stdout.trim() : ''
+      if (out.startsWith('/') && !/[\r\n]/.test(out)) indexed = out
+    } catch {}
+  }
+  const cwd = indexed || given
+  if (!cwd) return { deny: id ? `This session has no record of ${kind} ${id}; pass cwd.` : 'cwd is required' }
+  return { cwd }
+}
+
 async function run($: EngineInterface, context: Context, argv: string[], cwd: string, timeoutMs: number, stdin?: string, directorAgentId?: string): Promise<Answer> {
   if (!cwd.startsWith('/')) return { deny: 'cwd must be an absolute path' }
   if (!(await $.fs.exists(cwd))) return { deny: `cwd does not exist: ${cwd}` }
   let ran
   try {
+    // The plugin running this tool is the one whose pane watches the job, so its
+    // own companion is the one to use rather than whichever version is newest
+    // in the plugin cache.
     ran = await $.process.run(argv, {
       cwd, stdin, timeoutMs,
-      // The plugin running this tool is the one whose pane watches the job, so its
-      // own companion is the one to use rather than whichever version is newest
-      // in the plugin cache.
-      env: {
-        CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
-        CODEX_COMPANION_DIRECTOR_AGENT_ID: directorAgentId ?? '',
-        ...(context.data ? { CLAUDE_PLUGIN_DATA: context.data } : {}),
-      },
+      env: await companionEnv($, context, directorAgentId ?? ''),
     })
   } catch (error) {
     // A run cut off at its limit rejects. Thrown out of the hook, the call fell
@@ -196,43 +235,66 @@ async function run($: EngineInterface, context: Context, argv: string[], cwd: st
 
 async function serve($: EngineInterface, context: Context, name: string, input: ToolInput): Promise<Answer> {
   const cwd = text(input.cwd)
-  const job = text(input.job)
+  const job = text(input.job).trim()
   switch (name) {
     case 'dispatch': {
+      const mode = text(input.mode)
+      const picked = mode === 'continue' || mode === 'fork'
+        ? await pickCwd($, context, '--thread-cwd', text(input.thread).trim(), cwd, 'thread')
+        : cwd ? { cwd } : { deny: 'cwd is required for new tasks' }
+      if ('deny' in picked) return picked
       let body: string
-      try { body = dispatchInput(input) } catch (error) { return { deny: (error as Error).message } }
-      return run($, context, ['bash', context.worker, 'dispatch'], cwd, 120_000, body, text(input.agentId))
+      try { body = dispatchInput({ ...input, cwd: picked.cwd }) } catch (error) { return { deny: (error as Error).message } }
+      return run($, context, ['bash', context.worker, 'dispatch'], picked.cwd, 120_000, body, text(input.agentId))
     }
     case 'message': {
       const flags = DELIVERY[input.delivery === undefined ? 'steer' : text(input.delivery)]
       if (!flags) return { deny: 'delivery must be queue, steer or interrupt' }
       if (!text(input.text).trim()) return { deny: 'text is empty' }
+      if (!job) return { deny: 'job is required' }
+      const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
+      if ('deny' in picked) return picked
       const file = await scratch($, context, '.md', text(input.text))
-      return run($, context, ['bash', context.worker, 'message', job, file, '--cwd', cwd, ...flags], cwd, 300_000)
+      return run($, context, ['bash', context.worker, 'message', job, file, '--cwd', picked.cwd, ...flags], picked.cwd, 300_000)
         .finally(() => discard($, file))
     }
     case 'answer': {
       const answers = input.answers
       if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return { deny: 'answers must be an object keyed by question id' }
+      if (!job) return { deny: 'job is required' }
+      const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
+      if ('deny' in picked) return picked
       const file = await scratch($, context, '.json', JSON.stringify(answers))
-      return run($, context, ['bash', context.worker, 'answer', job, text(input.request), file, '--cwd', cwd], cwd, 120_000)
+      return run($, context, ['bash', context.worker, 'answer', job, text(input.request), file, '--cwd', picked.cwd], picked.cwd, 120_000)
         .finally(() => discard($, file))
     }
-    case 'result':
-      return run($, context, ['node', context.companion, 'result', job, '--cwd', cwd], cwd, 60_000)
-    case 'status':
-      return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', cwd,
-        input.detail === true ? '--json' : '--brief'], cwd, 30_000)
+    case 'result': {
+      if (!job) return { deny: 'job is required' }
+      const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
+      if ('deny' in picked) return picked
+      return run($, context, ['node', context.companion, 'result', job, '--cwd', picked.cwd], picked.cwd, 60_000)
+    }
+    case 'status': {
+      const picked = job
+        ? await pickCwd($, context, '--job-cwd', job, cwd, 'job')
+        : cwd ? { cwd } : { deny: 'cwd is required unless job is provided' }
+      if ('deny' in picked) return picked
+      return run($, context, ['node', context.companion, 'status', ...(job ? [job] : []), '--cwd', picked.cwd,
+        input.detail === true ? '--json' : '--brief'], picked.cwd, 30_000)
+    }
     case 'tasks':
       return run($, context, ['node', context.companion, 'tasks',
         ...(text(input.query) ? ['--query', text(input.query)] : []), ...(cwd ? ['--cwd', cwd] : []),
         ...(input.all === true ? ['--all'] : []), ...(input.days === undefined ? [] : ['--days', String(input.days)]),
         ...(input.limit === undefined ? [] : ['--limit', String(input.limit)])],
       cwd || await $.session.cwd(), 30_000)
-    case 'cancel':
+    case 'cancel': {
       // Without a job the companion picks one itself; a tool call names it.
       if (!job) return { deny: 'job is required' }
-      return run($, context, ['node', context.companion, 'cancel', job, '--cwd', cwd], cwd, 60_000)
+      const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
+      if ('deny' in picked) return picked
+      return run($, context, ['node', context.companion, 'cancel', job, '--cwd', picked.cwd], picked.cwd, 60_000)
+    }
   }
   return { deny: `unknown tool ${name}` }
 }

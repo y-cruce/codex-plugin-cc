@@ -20,7 +20,7 @@ async function withLiveClient(cwd, job, action, options = {}) {
 export function inactiveRoundMessage(jobId, activeRoundId) {
   return activeRoundId
     ? `Job ${jobId} is not the active round; active job is ${activeRoundId}.`
-    : `Job ${jobId} is not active; this thread has no active round.`;
+    : `Job ${jobId} has finished (no active round). Read its output with result, or start a new round on this thread with message (delivery: "queue") or dispatch (mode: "continue").`;
 }
 
 export async function requireActiveRound(cwd, job) {

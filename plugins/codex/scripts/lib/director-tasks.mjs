@@ -69,11 +69,29 @@ async function readIndex(file) {
   return parseSessionTaskIndex(contents);
 }
 
-export async function listDirectorTasks({ sessionId, query = "", cwd, all = false, limit = 20, days = 3,
-  home = os.homedir(), configDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), tmpDir = os.tmpdir() } = {}) {
-  if (!sessionId) throw new Error("tasks needs the current Claude session id (CODEX_COMPANION_SESSION_ID)");
-  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be an integer from 1 to 100");
-  if (!Number.isSafeInteger(days) || days < 1) throw new Error("days must be a positive integer");
+function createViewCache() {
+  const views = new Map();
+  return history => {
+    if (!views.has(history.liveView)) views.set(history.liveView, readObservationJson(history.liveView));
+    return views.get(history.liveView);
+  };
+}
+
+async function jobHistory(stateDir, job) {
+  let history = await resolveJobHistoryAtStateDir(stateDir, job.id);
+  if (history.layout === "legacy" && job.status === "queued" && job.recordId) {
+    history = threadRecordPaths(stateDir, job.recordId);
+  }
+  return history;
+}
+
+async function jobThreadId(job, history, viewOf, readView = true) {
+  const known = job.executorSessionId || job.threadId;
+  const view = readView && !known ? await viewOf(history) : null;
+  return known || view?.threadId || job.request?.resumeThreadId || null;
+}
+
+async function loadSessionJobs({ sessionId, cwd, all = false, days = 3, configDir, tmpDir, requireTranscript = true }) {
   const primary = process.env.CLAUDE_PLUGIN_DATA ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state") : path.join(tmpDir, "codex-companion");
   const roots = new Set([primary,
     ...(await directories(path.join(configDir, "plugins", "data"))).map(dir => path.join(dir, "state")),
@@ -88,17 +106,22 @@ export async function listDirectorTasks({ sessionId, query = "", cwd, all = fals
       if (roots.has(path.dirname(ref.stateDir))) references.set(`${ref.stateDir}\0${ref.jobId}`, ref);
     }
   }
+  let ready = complete;
   if (!complete) {
     const since = await sessionCreatedAt(sessionId, configDir);
-    if (!Number.isFinite(since)) throw new Error("Cannot bootstrap tasks without this session's transcript creation time");
-    for (const { job, stateDir } of await scanJobs(roots, since)) {
-      if (job.sessionId === sessionId) references.set(`${stateDir}\0${job.id}`,
-        { stateDir, jobId: job.id, createdAt: job.createdAt ?? job.startedAt });
+    if (Number.isFinite(since)) {
+      for (const { job, stateDir } of await scanJobs(roots, since)) {
+        if (job.sessionId === sessionId) references.set(`${stateDir}\0${job.id}`,
+          { stateDir, jobId: job.id, createdAt: job.createdAt ?? job.startedAt });
+      }
+      ready = true;
+    } else if (requireTranscript) {
+      throw new Error("Cannot bootstrap tasks without this session's transcript creation time");
     }
   }
   // No time filter applies to this session. Even an index idle for over a week
   // is read and refreshed before retention considers the other index files.
-  mergeSessionTaskIndex(primary, sessionId, [...references.values()], true);
+  if (ready) mergeSessionTaskIndex(primary, sessionId, [...references.values()], true);
   const cutoff = Date.now() - days * 86_400_000;
   if (all) {
     for (const root of roots) {
@@ -134,25 +157,24 @@ export async function listDirectorTasks({ sessionId, query = "", cwd, all = fals
   // artifacts are opened for the other-session lookback, including widened days.
   if (all) for (const entry of await scanJobs(roots, cutoff)) if (entry.job.sessionId !== sessionId) add(entry);
   for (const root of roots) pruneSessionTaskIndexes(root);
-  const views = new Map();
-  const threads = new Map();
-  const viewOf = history => {
-    if (!views.has(history.liveView)) views.set(history.liveView, readObservationJson(history.liveView));
-    return views.get(history.liveView);
-  };
   const newest = entry => Date.parse(entry.job.createdAt ?? entry.job.startedAt ?? "") || 0;
-  const sorted = [...jobs.values()].sort((a, b) => newest(b) - newest(a) || b.mtime - a.mtime);
+  return [...jobs.values()].sort((a, b) => newest(b) - newest(a) || b.mtime - a.mtime);
+}
+
+export async function listDirectorTasks({ sessionId, query = "", cwd, all = false, limit = 20, days = 3,
+  home = os.homedir(), configDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), tmpDir = os.tmpdir() } = {}) {
+  if (!sessionId) throw new Error("tasks needs the current Claude session id (CODEX_COMPANION_SESSION_ID)");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be an integer from 1 to 100");
+  if (!Number.isSafeInteger(days) || days < 1) throw new Error("days must be a positive integer");
+  const sorted = await loadSessionJobs({ sessionId, cwd, all, days, configDir, tmpDir });
+  const viewOf = createViewCache();
+  const threads = new Map();
   const rows = await mapConcurrent(sorted, async entry => {
     const { job, stateDir, workspaceRoot } = entry;
-    let history = await resolveJobHistoryAtStateDir(stateDir, job.id);
-    if (history.layout === "legacy" && job.status === "queued" && job.recordId) {
-      history = threadRecordPaths(stateDir, job.recordId);
-    }
+    const history = await jobHistory(stateDir, job);
     // Bound records already identify the thread. Most legacy jobs also retain
     // their thread id, so only read a view here when grouping requires it.
-    const knownThread = job.executorSessionId || job.threadId;
-    const view = history.layout === "legacy" && !knownThread ? await viewOf(history) : null;
-    const threadId = knownThread || view?.threadId || job.request?.resumeThreadId || null;
+    const threadId = await jobThreadId(job, history, viewOf, history.layout === "legacy");
     const identity = JSON.stringify([job.executor ?? "codex", job.request?.executorCommand, job.request?.executorArgs]);
     const key = history.layout === "thread-record" ? `${workspaceRoot}\0record:${history.recordId}`
       : `${workspaceRoot}\0${identity}\0${threadId ?? job.id}`;
@@ -167,7 +189,7 @@ export async function listDirectorTasks({ sessionId, query = "", cwd, all = fals
   const line = value => String(value).replace(/\s+/g, " ").trim();
   const lines = await mapConcurrent(matches.slice(0, limit), async ({ job, workspaceRoot, history, forkedFrom }) => {
     const view = await viewOf(history);
-    const threadId = job.executorSessionId || job.threadId || view?.threadId || job.request?.resumeThreadId || null;
+    const threadId = await jobThreadId(job, history, viewOf);
     const executor = (view?.executor ?? createLiveView(job).executor).label.toLowerCase();
     const repo = workspaceRoot.startsWith(`${home}/`) ? `~${workspaceRoot.slice(home.length)}` : workspaceRoot;
     const status = checkJobLiveness(workspaceRoot, job, null, new Map(), { persist: false }).status;
@@ -179,10 +201,34 @@ export async function listDirectorTasks({ sessionId, query = "", cwd, all = fals
   return lines.join("\n") || "No matching tasks.";
 }
 
+export async function resolveDirectorTaskCwd({ sessionId, job, thread,
+  home = os.homedir(), configDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), tmpDir = os.tmpdir() } = {}) {
+  if (!sessionId || Boolean(job) === Boolean(thread)) return null;
+  const entries = await loadSessionJobs({ sessionId, configDir, tmpDir, requireTranscript: false });
+  if (job) {
+    const roots = new Set(entries.filter(entry => entry.job.id === job).map(entry => entry.workspaceRoot));
+    return roots.size === 1 ? [...roots][0] : null;
+  }
+  const viewOf = createViewCache();
+  const roots = new Set();
+  for (const entry of entries) {
+    if (await jobThreadId(entry.job, await jobHistory(entry.stateDir, entry.job), viewOf) === thread) {
+      roots.add(entry.workspaceRoot);
+    }
+  }
+  return roots.size === 1 ? [...roots][0] : null;
+}
+
 export async function handleTasks(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["query", "cwd", "limit", "days"], booleanOptions: ["all"], rejectUnknownOptions: true
+    valueOptions: ["query", "cwd", "limit", "days", "job-cwd", "thread-cwd"], booleanOptions: ["all"], rejectUnknownOptions: true
   });
+  if (options["job-cwd"] !== undefined || options["thread-cwd"] !== undefined) {
+    const found = await resolveDirectorTaskCwd({ sessionId: process.env.CODEX_COMPANION_SESSION_ID,
+      job: options["job-cwd"], thread: options["thread-cwd"] });
+    if (found) console.log(found);
+    return;
+  }
   console.log(await listDirectorTasks({ ...options, sessionId: process.env.CODEX_COMPANION_SESSION_ID,
     limit: options.limit === undefined ? 20 : Number(options.limit),
     days: options.days === undefined ? 3 : Number(options.days) }));

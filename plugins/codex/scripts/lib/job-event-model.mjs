@@ -46,6 +46,15 @@ export function questionText(questions, message, limit = QUESTION_TEXT_LIMIT) {
   return characters.length > limit ? `${characters.slice(0, limit - 1).join("")}…` : text;
 }
 
+export function questionStatusLine(question) {
+  return `QUESTION request=${question.requestId}${questionIds(question.questions)} ${questionText(question.questions, question.message)}`;
+}
+
+export function pendingQuestionSteerMessage(questions) {
+  const detail = (questions ?? []).map(questionStatusLine).join(" | ");
+  return `Steer is unavailable while a question is pending; answer it with answer, or resend message with delivery: "queue" (next turn) or delivery: "interrupt" (cancel this turn).${detail ? ` ${detail}` : ""}`;
+}
+
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);

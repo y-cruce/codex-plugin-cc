@@ -1,4 +1,4 @@
-import { questionText } from "./job-event-model.mjs";
+import { questionStatusLine } from "./job-event-model.mjs";
 function severityRank(severity) {
   switch (severity) {
     case "critical":
@@ -578,10 +578,7 @@ export function renderBriefJobStatus(job) {
   if (job.errorMessage && active) lines.push(`Error: ${briefClip(job.errorMessage, 300)}`);
   if (job.live?.unavailable) lines.push(`Live: ${briefClip(job.live.unavailable, 200)}`);
   else if (job.live) {
-    for (const question of job.live.questions ?? []) {
-      const ids = (question.questions ?? []).map((item) => item.id).filter(Boolean);
-      lines.push(`QUESTION request=${question.requestId}${ids.length ? ` ids=${ids.join(",")}` : ""} ${questionText(question.questions, question.message)}`);
-    }
+    for (const question of job.live.questions ?? []) lines.push(questionStatusLine(question));
     for (const note of job.live.notifications ?? []) lines.push(`Note: ${briefClip(note.message, 400)}`);
     for (const message of job.live.pendingMessages ?? []) {
       lines.push(`Pending message ${message.id} (${message.status}): ${briefClip((message.input ?? []).map((item) => item.text).join(" "), 160)}`);
