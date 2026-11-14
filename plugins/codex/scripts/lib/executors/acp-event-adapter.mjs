@@ -99,6 +99,17 @@ function argumentDetail(tool, title) {
   return null;
 }
 
+function manageTaskTitle(input) {
+  if (!input || typeof input !== "object") return null;
+  if (input.Action === "list") return "List background tasks";
+  const task = typeof input.TaskId === "string" ? input.TaskId.trim().split("/").at(-1) : "";
+  if (!task) return null;
+  if (input.Action === "status") return `Check background ${task}`;
+  if (input.Action === "kill") return `Stop background ${task}`;
+  if (input.Action === "send_input") return `Send input to background ${task}`;
+  return null;
+}
+
 // A shell tool arrives titled with the agent's own word for it -- DSH sends
 // "bash" -- and the command it runs in rawInput. A row that shows the title
 // alone says only "bash"; the command joins it the way a Codex command row
@@ -112,6 +123,7 @@ function toolTitle(tool) {
   // Antigravity's view_file title names only the tool; its input carries the
   // file and requested range. Keep the range in the agent's own line numbers.
   const input = tool.rawInput;
+  if (toolName(tool) === "manage_task") return manageTaskTitle(input) ?? title ?? String(tool.toolCallId);
   if (tool.kind === "read" && typeof input?.file_path === "string" && input.file_path) {
     const range = Number.isInteger(input.start_line) && Number.isInteger(input.end_line)
       ? ` (lines ${input.start_line}–${input.end_line})` : "";

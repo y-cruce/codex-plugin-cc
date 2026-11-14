@@ -87,6 +87,19 @@ const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'com
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
 const isToolRow = (event: TailRow) => event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed'
 const failedTool = (event: TailRow) => event.status === 'failed' || /^\S+ failed:/.test(event.text)
+// A heredoc command carries its own newlines, so the command is one row
+// whatever it contains and the output comes from its own field. What
+// follows the first line is a patch body or a script: spelling its breaks
+// out fills the row with glyphs, so the row says it was cut and stops.
+const commandText = (text: string) => {
+  const [first, ...rest] = clean(text).replace(/^\$\s*/, '').split(/\n| ⏎ /)
+  return rest.some(part => part.trim()) ? `${first!.trimEnd()} …` : first!
+}
+const isSleepCommand = (event: TailRow) => isQuietCommand(event)
+  && /^(?:cd \S+ && )?sleep \d+(?:\.\d+)?(?: && date '[^']*')?$/.test(commandText(event.text).trim())
+const checkTask = (event: TailRow) => isToolRow(event) && !failedTool(event)
+  ? /^manage_task\s+(?:started|updated|completed):\s*Check background (\S+)$/.exec(event.text)?.[1] ?? null
+  : null
 const workKind = (event: TailRow) => {
   if (isQuietCommand(event)) return 'command'
   if (isFileRow(event)) return 'edit'
@@ -359,11 +372,34 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     marks.push({ seq: `${BigInt(round.lastSeq) + 1n}`, at: round.endedAt, type: 'round.ended',
       text: `✻ ${round.status} · ${duration(spent)}${counts} · ${clock(round.endedAt)}` })
   })
-  for (const agent of agents.filter(agent => agent.index < 0)) grouped.push(summary(agent))
+  const stream: LiveView['tail'] = []
+  for (const agent of agents.filter(agent => agent.index < 0)) stream.push(summary(agent))
   data.tail.forEach((event, index) => {
-    while (marks.length && event.seq && BigInt(event.seq) >= BigInt(marks[0]!.seq)) grouped.push(marks.shift()!)
-    for (const agent of agents.filter(agent => agent.index === index)) grouped.push(summary(agent))
-    if (!tail.includes(event)) return
+    while (marks.length && event.seq && BigInt(event.seq) >= BigInt(marks[0]!.seq)) stream.push(marks.shift()!)
+    for (const agent of agents.filter(agent => agent.index === index)) stream.push(summary(agent))
+    if (tail.includes(event)) stream.push(event)
+  })
+  for (const agent of agents.filter(agent => agent.index === data.tail.length)) stream.push(summary(agent))
+  stream.push(...marks)
+  for (let i = 0; i < stream.length; i++) {
+    let j = i
+    let task: string | null = null
+    let lastCheck = -1
+    while (j < stream.length) {
+      if (isSleepCommand(stream[j]!)) { j++; continue }
+      const checked = checkTask(stream[j]!)
+      if (!checked) break
+      if (task && checked !== task) { j = lastCheck + 1; break }
+      task = checked
+      lastCheck = j++
+    }
+    const slice = stream.slice(i, j)
+    if (task && slice.some(isSleepCommand)) {
+      grouped.push({ ...slice.at(-1)!, type: 'wait.group', text: task, items: slice })
+      i = j - 1
+      continue
+    }
+    const event = stream[i]!
     const work = isQuietCommand(event) || isFileRow(event) || (isToolRow(event) && !failedTool(event))
     const last = grouped.at(-1)
     if (work) {
@@ -371,9 +407,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
         items: [...last.items!, event] }
       else grouped.push({ ...event, type: 'work.group', text: '', foldKey: event.positionSeq ?? event.seq, items: [event] })
     } else grouped.push(event)
-  })
-  for (const agent of agents.filter(agent => agent.index === data.tail.length)) grouped.push(summary(agent))
-  grouped.push(...marks)
+  }
   if (grouped.length && !hasContent) lines.push(Text({ children: ' ' }))
   const kind = data.lastMessage?.kind
   const typeOf = (event: LiveView['tail'][number]) => String(event.type ?? '')
@@ -382,14 +416,6 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   // In a full trace, lastMessage replaces the newest 300-character preview from
   // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
-  // A heredoc command carries its own newlines, so the command is one row
-  // whatever it contains and the output comes from its own field. What
-  // follows the first line is a patch body or a script: spelling its breaks
-  // out fills the row with glyphs, so the row says it was cut and stops.
-  const commandText = (text: string) => {
-    const [first, ...rest] = clean(text).replace(/^\$\s*/, '').split(/\n| ⏎ /)
-    return rest.some(part => part.trim()) ? `${first!.trimEnd()} …` : first!
-  }
   const commandRow = (event: TailRow, indent = '') => {
     const completed = event.type === 'command.completed'
     const failed = event.status === 'failed'
@@ -467,6 +493,14 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     }
     if (type === 'round.ended') {
       add(event.text, { dimColor: true })
+      return
+    }
+    if (type === 'wait.group') {
+      const items = event.items!
+      const active = index === grouped.length - 1 && !isOver(data)
+      const checks = items.filter(item => checkTask(item) !== null).length
+      const spent = elapsed(items[0]!.at, active ? now : Date.parse(items.at(-1)!.at))
+      add(`● Waiting for background ${event.text} · ${checks} ${checks === 1 ? 'check' : 'checks'} · ${spent}${active ? '…' : ''}`, { dimColor: !active })
       return
     }
     if (type === 'work.group') {

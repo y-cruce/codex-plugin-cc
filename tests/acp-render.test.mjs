@@ -11,7 +11,7 @@ import { textOf } from "./fixtures/live-tool-row.mjs";
 const element = (type) => ({ children, ...props }) => ({ type, props, children: [children ?? props.label ?? ""].flat() });
 const ui = Object.fromEntries(["Box", "Text", "Markdown", "Button"].map((type) => [type, element(type)]));
 
-function harness() {
+function harness(options = {}) {
   const job = { id: "acp-render", executor: "acp", startedAt: "2026-10-23T00:00:00Z" };
   const view = createLiveView(job);
   const events = [];
@@ -20,10 +20,10 @@ function harness() {
     events.push(event);
     applyJobEvent(view, event);
   };
-  const adapter = new AcpEventAdapter(record, { job });
+  const adapter = new AcpEventAdapter(record, { job, receiveTime: options.receiveTime });
   adapter.bindSession("session");
   const update = (sessionUpdate, content) => adapter.accept({ sessionId: "session", update: { sessionUpdate, ...content } });
-  const draw = (open = false) => textOf(liveTree(ui, { ...view, activeCommands: [] }, 160, Date.now(), 48,
+  const draw = (open = false, now = Date.now()) => textOf(liveTree(ui, { ...view, activeCommands: [] }, 160, now, 48,
     undefined, 200, false, { Button: ui.Button, isOpen: () => open, toggle() {} }));
   return { job, view, events, adapter, record, update, draw };
 }
@@ -202,5 +202,150 @@ test("ACP item, Markdown and file plans render and plan_removed clears them", as
     assert.ok(h.draw().includes(expected), plan.type);
     await h.update("plan_removed", { planId: "plan" });
     assert.ok(!h.draw().includes(expected), plan.type);
+  }
+});
+
+test("Antigravity manage_task calls show action-specific background task titles and fall back when incomplete", async () => {
+  const h = harness();
+  await h.adapter.startTurn("turn", []);
+  const cases = [
+    [{ Action: "status", TaskId: "eacf1062-c868-4ece-99d3-6ba021370a37/task-1087" }, "Check background task-1087"],
+    [{ Action: "kill", TaskId: "eacf1062-c868-4ece-99d3-6ba021370a37/task-1087" }, "Stop background task-1087"],
+    [{ Action: "list" }, "List background tasks"],
+    [{ Action: "send_input", TaskId: "eacf1062-c868-4ece-99d3-6ba021370a37/task-1087", Input: "y\n" }, "Send input to background task-1087"],
+    [{ Action: "status" }, "Run manage_task"],
+  ];
+  for (const [index, [rawInput, expected]] of cases.entries()) {
+    const toolCallId = `manage-${index}`;
+    await h.update("tool_call", { toolCallId, name: "manage_task", title: "Run manage_task", kind: "other", rawInput, status: "pending" });
+    assert.equal(h.events.at(-1).payload.tool.title, expected);
+    await h.update("tool_call_update", { toolCallId, status: "completed" });
+    assert.equal(h.events.at(-1).payload.tool.title, expected);
+  }
+  h.view.status = "completed";
+  const drawn = h.draw(true);
+  for (const [, expected] of cases) assert.ok(drawn.includes(`● ${expected}`), expected);
+  assert.match(drawn, /Called 5 tools/);
+});
+
+test("Antigravity sleep-and-check polling collapses into one wait row and splits on interruptions", async () => {
+  const base = Date.parse("2026-10-23T00:00:00Z");
+  const pollCmd = "cd /Users/test/order-space && sleep 9 && date '+%Y-%m-%d %H:%M:%S%z'";
+  const cases = [
+    {
+      name: "17 polling checks collapse into one row",
+      steps: Array.from({ length: 17 }, (_, i) => [
+        { kind: "command", command: i === 8 ? "sleep 9" : pollCmd, atSec: i * 40 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: i * 40 + 20 },
+      ]).flat(),
+      activeNowSec: 17 * 60,
+      activeExpected: "● Waiting for background task-1087 · 17 checks · 17m…",
+      expected: ["● Waiting for background task-1087 · 17 checks · 11m"],
+      absent: ["sleep 9", "Check background task-1087", "Ran ", "Called "],
+    },
+    {
+      name: "interrupted by read_file",
+      steps: [
+        { kind: "command", command: pollCmd, atSec: 0 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 10 },
+        { kind: "command", command: pollCmd, atSec: 20 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 30 },
+        { kind: "read", path: "/repo/src/index.ts", atSec: 35 },
+        { kind: "command", command: pollCmd, atSec: 40 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 55 },
+      ],
+      expected: [
+        "● Waiting for background task-1087 · 2 checks · 30s",
+        "Read 1 file",
+        "● Waiting for background task-1087 · 1 check · 15s",
+      ],
+      absent: ["Check background task-1087"],
+    },
+    {
+      name: "interrupted by sleep 9 && ls",
+      steps: [
+        { kind: "command", command: pollCmd, atSec: 0 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 10 },
+        { kind: "command", command: "sleep 9 && ls", atSec: 20 },
+        { kind: "command", command: pollCmd, atSec: 30 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 42 },
+      ],
+      expected: [
+        "● Waiting for background task-1087 · 1 check · 10s",
+        "Ran 1 shell command",
+        "sleep 9 && ls",
+        "● Waiting for background task-1087 · 1 check · 12s",
+      ],
+      absent: ["Check background task-1087"],
+    },
+    {
+      name: "interrupted by switching to another task",
+      steps: [
+        { kind: "command", command: pollCmd, atSec: 0 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 10 },
+        { kind: "command", command: pollCmd, atSec: 20 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 30 },
+        { kind: "command", command: pollCmd, atSec: 40 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1167" }, atSec: 50 },
+      ],
+      expected: [
+        "● Waiting for background task-1087 · 2 checks · 30s",
+        "● Waiting for background task-1167 · 1 check · 10s",
+      ],
+      absent: ["Check background task-1087", "Check background task-1167"],
+    },
+    {
+      name: "interrupted by switching to list action",
+      steps: [
+        { kind: "command", command: pollCmd, atSec: 0 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 10 },
+        { kind: "manage", rawInput: { Action: "list" }, atSec: 20 },
+        { kind: "command", command: pollCmd, atSec: 30 },
+        { kind: "manage", rawInput: { Action: "status", TaskId: "sess/task-1087" }, atSec: 45 },
+      ],
+      expected: [
+        "● Waiting for background task-1087 · 1 check · 10s",
+        "Called 1 tool",
+        "● List background tasks",
+        "● Waiting for background task-1087 · 1 check · 15s",
+      ],
+      absent: ["Check background task-1087"],
+    },
+  ];
+
+  for (const scenario of cases) {
+    let clock = base;
+    const h = harness({ receiveTime: () => new Date(clock) });
+    await h.adapter.startTurn("turn", []);
+    for (const [index, step] of scenario.steps.entries()) {
+      clock = base + step.atSec * 1000;
+      const toolCallId = `step-${index}`;
+      if (step.kind === "command") {
+        await h.update("tool_call", { toolCallId, kind: "execute", title: step.command, rawInput: { command: step.command }, status: "pending" });
+        await h.update("tool_call_update", { toolCallId, status: "completed" });
+      } else if (step.kind === "manage") {
+        await h.update("tool_call", { toolCallId, name: "manage_task", title: "Run manage_task", kind: "other", rawInput: step.rawInput, status: "pending" });
+        await h.update("tool_call_update", { toolCallId, status: "completed" });
+      } else if (step.kind === "read") {
+        await h.update("tool_call", { toolCallId, name: "read_file", title: "Running view_file", kind: "read",
+          rawInput: { file_path: step.path }, status: "pending" });
+        await h.update("tool_call_update", { toolCallId, status: "completed" });
+      }
+    }
+    if (scenario.activeExpected) {
+      assert.ok(h.draw(true, base + scenario.activeNowSec * 1000).includes(scenario.activeExpected), `${scenario.name} (active)`);
+    }
+    await h.adapter.completeTurn({ stopReason: "end_turn" });
+    h.view.status = "completed";
+    const drawn = h.draw(true, base + 1200 * 1000);
+    let cursor = -1;
+    for (const line of scenario.expected) {
+      const next = drawn.indexOf(line, cursor + 1);
+      assert.notEqual(next, -1, `${scenario.name}: missing "${line}" in:\n${drawn}`);
+      cursor = next;
+    }
+    for (const forbidden of scenario.absent) {
+      assert.ok(!drawn.includes(forbidden), `${scenario.name}: unexpected "${forbidden}" in:\n${drawn}`);
+    }
   }
 });
