@@ -68,11 +68,12 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("new Antigravity sessions default to Carbon high or Opus medium, honor overrides and preserve resumed sessions", async () => {
+test("new Antigravity sessions default to the orchestrator without effort, named models to high or Opus medium, honor overrides and preserve resumed sessions", async () => {
   const home = makeTempDir();
   for (const row of [
-    { agent: "antigravity-acp", model: "gemini-4-carbon", effort: "high" },
-    { agent: "Antigravity ACP Server", model: "gemini-4-carbon", effort: "high" },
+    { agent: "antigravity-acp", model: "gemini-pro-orchestrator", effort: null, requests: 1 },
+    { agent: "Antigravity ACP Server", model: "gemini-pro-orchestrator", effort: null, requests: 1 },
+    { agent: "antigravity-acp", overrides: { modelId: "gemini-4-carbon" }, model: "gemini-4-carbon", effort: "high" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
     { agent: "antigravity-acp", env: "claude-opus-5-5", model: "claude-opus-5-5", effort: "medium" },
@@ -86,11 +87,17 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
     const effortOption = row.agent === "Antigravity ACP Server" ? "thought_level" : "thinking_level";
     const h = recordingPort([
       { type: "select", id: "model", currentValue: "gemini-3.8-flash",
-        options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-3.8-flash"].map(value => ({ value })) },
+        options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-pro-orchestrator", "gemini-3.8-flash"].map(value => ({ value })) },
       { type: "select", id: effortOption, currentValue: "low",
         options: ["low", "medium", "high"].map(value => ({ value })) }
     ], { env: { HOME: home }, ...row.overrides });
     h.port.initializeResponse = { agentInfo: { name: row.agent } };
+    const setOption = h.port.connection.setSessionConfigOption;
+    h.port.connection.setSessionConfigOption = async (params) => {
+      const result = await setOption(params);
+      return params.value === "gemini-pro-orchestrator"
+        ? { configOptions: result.configOptions.filter(option => option.id !== effortOption) } : result;
+    };
     h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });
     h.port.connection.resumeSession = async () => h.response;
     h.port.sessionResult = async (sessionId, response) => ({ sessionId, configOptions: response.configOptions });
@@ -100,9 +107,10 @@ test("new Antigravity sessions default to Carbon high or Opus medium, honor over
     delete process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL;
     const configured = Boolean(row.overrides) || ["antigravity-acp", "Antigravity ACP Server"].includes(row.agent) && !row.resume;
     assert.equal(result.configOptions.find(option => option.id === "model").currentValue, row.model);
-    assert.equal(result.configOptions.find(option => option.id === effortOption).currentValue, row.effort);
+    assert.equal(result.configOptions.find(option => option.id === effortOption)?.currentValue ?? null, row.effort);
     assert.equal(result.effortId, configured ? row.effort : null);
-    assert.equal(h.requests.length, configured ? 2 : 0);
+    assert.equal(h.requests.length, row.requests ?? (configured ? 2 : 0));
+    assert.equal(h.progress.length, 0);
   }
 });
 
