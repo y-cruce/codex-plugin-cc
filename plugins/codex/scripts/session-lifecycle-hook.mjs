@@ -87,8 +87,10 @@ export function handleSessionStart(input) {
 }
 
 export async function handleSessionEnd(input) {
-  // /branch and /resume leave the original session resumable, with its jobs.
-  if (input.reason === "resume") return;
+  // Users often reopen the same session with --resume after exiting. Keep its
+  // jobs and thread records for resume. The state cap of 150 jobs per workspace
+  // and daily GC manage retention.
+  if (input.reason !== "clear") return;
 
   const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || process.env[SESSION_ID_ENV];

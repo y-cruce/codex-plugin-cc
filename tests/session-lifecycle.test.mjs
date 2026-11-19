@@ -8,7 +8,7 @@ import { register } from "../plugins/codex/hooks/register.ts";
 import { resolveClaudeSessionPath } from "../plugins/codex/scripts/lib/claude-session-transfer.mjs";
 import { handleSessionStart, handleSessionEnd } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 import { createJobRecord } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
-import { loadState, updateState, resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { loadState, updateState, resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { isolateTestEnvironment, makeTempDir } from "./helpers.mjs";
 
 test("native lifecycle restores ownership without command exports and clears a previous transcript", async (t) => {
@@ -69,7 +69,7 @@ test("lifecycle CLI state failures produce no hook failure or person-visible std
   try {
     for (const event of ["SessionStart", "SessionEnd"]) {
       const result = spawnSync(process.execPath, [script, event], { cwd, encoding: "utf8",
-        input: JSON.stringify({ cwd, session_id: "test", transcript_path: "/transcript" }),
+        input: JSON.stringify({ cwd, session_id: "test", transcript_path: "/transcript", reason: "clear" }),
         env: { ...process.env, CLAUDE_ENV_FILE: cwd } });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stderr, "");
@@ -97,19 +97,45 @@ syncBuiltinESMExports();
   assert.equal(result.stderr, "");
 });
 
-test("clear cleans only the ended session and preserves the shared broker for the next session", async (t) => {
-  isolateTestEnvironment(t);
-  const cwd = makeTempDir();
-  updateState(cwd, state => { state.jobs = [
-    { id: "ended", sessionId: "ended", status: "completed" },
-    { id: "next", sessionId: "next", status: "completed" },
-  ]; });
-  const file = path.join(resolveStateDir(cwd), "broker.json");
-  const broker = { sessionId: "next" };
-  fs.writeFileSync(file, JSON.stringify(broker));
-  await handleSessionEnd({ cwd, session_id: "ended", reason: "clear" });
-  assert.deepEqual(loadState(cwd).jobs.map(job => job.id), ["next"]);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), broker);
+test("only clear cleans up the ended session's jobs and threads", async (t) => {
+  for (const [reason, cleanup] of [["prompt_input_exit", false], ["other", false], ["clear", true]]) {
+    await t.test(reason, async (t) => {
+      isolateTestEnvironment(t);
+      const cwd = makeTempDir();
+      const stateDir = resolveStateDir(cwd);
+      const completed = { id: "completed", sessionId: "ended", status: "completed" };
+      const pid = process.platform === "win32" ? undefined : 2147483647;
+      const running = { id: "running", sessionId: "ended", status: "running", ...(pid ? { pid } : {}) };
+      const next = { id: "next", sessionId: "next", status: "completed" };
+      const jobs = [completed, running, next];
+      updateState(cwd, state => { state.jobs = jobs; });
+      const artifacts = [writeJobFile(cwd, completed.id, completed), writeJobFile(cwd, running.id, running)];
+      const nextFile = writeJobFile(cwd, next.id, next);
+      for (const [relative, value] of Object.entries({
+        "thread-records/completed/manifest.json": { closed: true },
+        "thread-records/completed/rounds/completed.json": { status: completed.status, job: completed },
+        "job-index/completed.json": { jobId: completed.id, recordId: completed.id },
+        "thread-index/completed.json": { recordId: completed.id },
+      })) {
+        const file = path.join(stateDir, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(value));
+        artifacts.push(file);
+      }
+      const brokerFile = path.join(stateDir, "broker.json");
+      const broker = { sessionId: next.sessionId };
+      fs.writeFileSync(brokerFile, JSON.stringify(broker));
+      const kill = t.mock.method(process, "kill", () => true);
+
+      await handleSessionEnd({ cwd, session_id: completed.sessionId, reason });
+
+      assert.deepEqual(kill.mock.calls.map(call => call.arguments), cleanup && pid ? [[-pid, "SIGTERM"]] : []);
+      assert.deepEqual(loadState(cwd).jobs, cleanup ? [next] : jobs);
+      for (const file of artifacts) assert.equal(fs.existsSync(file), !cleanup, path.relative(stateDir, file));
+      assert.equal(fs.existsSync(nextFile), true);
+      assert.deepEqual(JSON.parse(fs.readFileSync(brokerFile, "utf8")), broker);
+    });
+  }
 });
 
 test("fork start exports branch ownership; resume end preserves the original jobs", async (t) => {
