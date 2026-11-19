@@ -147,13 +147,25 @@ export function statusText(jobs: LiveView[], now: number): string | undefined {
   }).join(' · ')}`
 }
 
+export const PANE_USER_PREFIX = '[From user via tasks pane]'
+
+function paneSender(text: string): { sender: 'Director' | 'User'; body: string } {
+  const body = clean(text)
+  return body.startsWith(`${PANE_USER_PREFIX}\n`)
+    ? { sender: 'User', body: body.slice(PANE_USER_PREFIX.length + 1) }
+    : { sender: 'Director', body }
+}
+
 function communicationTree(ui: Pick<Elements['terminal'], 'Box' | 'Text'>, kind: 'reply' | 'message' | 'interrupt' | 'notification', text: string, columns: number) {
   const { Box, Text } = ui
   const notified = kind === 'notification'
   const color = 'cyan'
+  const { sender, body } = kind === 'message' || kind === 'interrupt'
+    ? paneSender(text)
+    : { sender: 'Director', body: clean(text) }
   return Box({ flexDirection: 'column', paddingLeft: 0, width: columns, children: [
-    Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ Executor notification' : `◆ ↓ Director ${kind}` }),
-    Box({ paddingLeft: 2, children: Text({ color, wrap: 'wrap', children: clean(text) }) }),
+    Text({ color, bold: true, wrap: 'wrap', children: notified ? '◇ ↑ Executor notification' : `◆ ↓ ${sender} ${kind}` }),
+    Box({ paddingLeft: 2, children: Text({ color, wrap: 'wrap', children: body }) }),
   ] })
 }
 
@@ -586,7 +598,8 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
     entry = true
     separate(true)
     for (const prompt of data.queuedPrompts) {
-      const text = `◆ ↓ Director message · queued: ${clean(prompt.text).replace(/\s+/gu, ' ').trim()}`
+      const { sender, body } = paneSender(prompt.text)
+      const text = `◆ ↓ ${sender} message · queued: ${body.replace(/\s+/gu, ' ').trim()}`
       const preview = clip(text, columns)
       lines.push(Text({ color: 'cyan', wrap: 'truncate-end', children: preview === text ? preview : `${clip(text, columns - 1)}…` }))
     }

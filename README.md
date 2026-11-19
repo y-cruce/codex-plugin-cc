@@ -102,7 +102,7 @@ rejection received before the original prompt completes fails the turn. Use `del
 next turn or an ACP agent without steering support; use
 `delivery: "interrupt"` when the current turn must stop.
 
-`delivery: "queue"` (or `/codex:message <job-id> --queue`) also works after the task has ended. When the thread has no active round, it starts a background follow-up in the same thread and returns `queuedJobId`, retaining the task name, write permissions and executor configuration.
+`delivery: "queue"` (or `/codex:message <job-id> --queue`) also works after the task has ended. When the thread has no active round, it starts a background follow-up in the same thread and returns `queuedJobId`, retaining the task name, write permissions and executor configuration. In the tasks pane, the input below the task list grows with the draft and sends directly to the selected task: `Enter` steers, `ctrl+x enter` queues (starting a new round when idle), and `ctrl+x ctrl+s` interrupts; messages carry a `[From user via tasks pane]` prefix and drafts stay per task.
 
 主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认引导当前任务。Qoder 初始化声明
 `agentCapabilities._meta.qoder.promptQueueing: true`，且插件报告 `midTurnSteer: true` 时，
@@ -112,7 +112,7 @@ Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求�
 原始请求完成前收到追加请求的明确拒绝，会使当前轮失败。未提供引导能力的 ACP 执行器，或明确要求下一轮执行时，
 使用 `delivery: "queue"`；需要停止当前轮时使用 `delivery: "interrupt"`。
 
-任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。
+任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。任务面板的任务列表下方提供输入框（随内容增高），可直接向当前选中任务发消息：`Enter` 引导、`ctrl+x enter` 排队（空闲时开新一轮）、`ctrl+x ctrl+s` 打断；消息带 `[From user via tasks pane]` 前缀，草稿按任务独立保留。
 
 ACP agents can advertise `_meta.steering.supported: true` at the initialize response's top level or under `agentCapabilities`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. DSH's community adapter expose mid-turn input through this route. Servers that do not advertise it keep queue/interrupt behavior.
 
@@ -325,7 +325,7 @@ When execution starts, each message appears between the preceding answer and its
 own turn's output with the complete body. Queued follow-up jobs show their briefs in the same waiting area.
 When a Codex turn ends, all messages then waiting are sent together to the next
 turn in arrival order. Messages received during that turn form the next batch.
-Completed, failed and cancelled tasks stay in the pane for three minutes after ending.
+Completed, failed and cancelled tasks stay in the pane for six minutes after ending.
 Completed Markdown tables use bordered columns with wrapping cells, or labelled
 rows when the viewport is too narrow. Cell formatting and links use native Markdown.
 While Codex compacts its context, the trace, task list and status hint show
@@ -340,7 +340,7 @@ compaction completes or the turn or task ends.
 换行合并为空格，超长内容以省略号截断，排队条目之间不留空行。
 开始执行后，消息在上一轮回复与本轮输出之间显示完整正文；后续任务的排队正文也显示在底部等待区。
 Codex 当前轮结束时，会将当时积压的全部消息按发送顺序一起交给下一轮；该轮执行期间新收到的消息进入下一批。
-已完成、失败和取消的任务在结束后保留三分钟，再从面板隐藏。
+已完成、失败和取消的任务在结束后保留六分钟，再从面板隐藏。
 完整 Markdown 表格显示为带边框且单元格换行的分列布局；窗口过窄时按列名逐条展示。
 单元格内的格式和链接继续使用宿主 Markdown 渲染。
 Codex 压缩上下文期间，轨迹、任务列表和状态提示显示 `正在压缩上下文`，轨迹与提示同时显示耗时。
@@ -578,7 +578,7 @@ CLI 服务直接向 `codex-companion` 返回账号可用的完整模型列表。
 
 Dispatch with `executor: "antigravity"` to run the installed CLI's `agy acp` (verified with 1.5.6), reusing its login and MCP configuration. The preset prefers `~/.local/bin/agy`, then PATH, avoiding terminal wrappers when the local binary exists. Override it with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; `executor_args` defaults to `["acp"]`, permissions to `allow-once`. Continue with the returned session id. For direct companion calls:
 
-When agy ends a prompt with unfinished commands, the job waits for their native statuses and automatically continues in the same job, sharing a 30-minute limit; native `IsDaemon: true` commands are excluded. Steering is refused while a command runs: choose queue or interrupt. See [background recovery and rollback](plugins/codex/scripts/agy-acp/README.md).
+Steering works while agy's prompt is active, including while commands run. When agy ends a prompt with unfinished commands, the job waits for their native statuses and automatically continues in the same job. The driver refuses steer during this wait. Use queue or interrupt. Waits share a 30-minute limit and exclude native `IsDaemon: true` commands. See [background recovery and rollback](plugins/codex/scripts/agy-acp/README.md).
 
 ```bash
 node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command "$HOME/.local/bin/agy" --executor-args '["acp"]' --executor-permissions allow-once --json "Inspect the project"

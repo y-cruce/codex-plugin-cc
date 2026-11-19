@@ -649,8 +649,8 @@ export class AcpExecutorJobPort {
     if (this.questions.size || this.permissions.size) {
       throw Object.assign(new Error(pendingQuestionSteerMessage(this.liveStatus().questions)), { code: "INVALID_STATE" });
     }
-    if (this.antigravityPromptSteering && this.runningCommands().length) {
-      throw Object.assign(new Error("agy 有命令仍在运行，当前不能 steer；请用 queue 留到下一轮，或用 interrupt 停止当前轮后纠偏。"),
+    if (this.antigravityPromptSteering && active.waitingForCommands) {
+      throw Object.assign(new Error("agy 正在等后台命令结束（本轮已提前结束），当前不能 steer；请用 queue 留到下一轮，或用 interrupt"),
         { code: "INVALID_STATE" });
     }
     if (!Array.isArray(request.prompt) || !request.prompt.length ||

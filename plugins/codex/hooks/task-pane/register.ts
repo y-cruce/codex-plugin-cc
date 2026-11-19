@@ -1,12 +1,12 @@
 import type { EngineInterface, On } from 'claude-code'
 import { admitDirector, bindDirector, directorIngress, forwardDirectorEvents } from '../director-channel/register.ts'
 import type { DirectorChannel, DirectorEvent } from '../director-channel/register.ts'
-import { directorTools, startDirectorTools } from '../director-tools/register.ts'
+import { companionEnv, DELIVERY, directorTools, discard, scratch, startDirectorTools } from '../director-tools/register.ts'
 import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
-import { isOver, latestRound } from '../live-tool-row/view.ts'
+import { isOver, latestRound, PANE_USER_PREFIX } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
-import { paneBody } from './pane.ts'
+import { composerRows, paneBody } from './pane.ts'
 import type { PaneView } from './pane.ts'
 import { activityState, activityRequests, activityText, finishActivity } from './activity.ts'
 import type { ActivityState, ActivityEntry, ActivityRequest } from './activity.ts'
@@ -23,9 +23,12 @@ type Receipt = { cursor?: string; terminal?: string; floor?: string }
 type Ledger = Record<string, Receipt>
 type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
 type Hold = { armedAt: number; checkedAt?: number; taskId?: string }
+type Delivery = 'steer' | 'queue' | 'interrupt'
+type Notice = { text: string; error?: boolean }
 type State = {
   cwd: string
   home: string
+  tmp: string
   script: string
   sessionId: string
   key: string
@@ -110,9 +113,22 @@ type State = {
   activitySaved: string
   // When the companion last listed this session's threads; 0 lists next poll.
   listedAt: number
+  paneFocused: boolean
+  paneColumns: number
+  paneRows: number
+  // Per-recordId composer state kept in memory: drafts update on every edit
+  // without redrawing, while seeds and inputRevs change only on task switch,
+  // pane close, or send completion so periodic redraws keep typing and cursor.
+  drafts: Map<string, string>
+  seeds: Map<string, string>
+  inputRevs: Map<string, number>
+  inputRows: Map<string, number>
+  sending: Map<string, Delivery>
+  notices: Map<string, Notice>
 }
 
 const PANE = 'codex_tasks'
+const MESSAGE_TIMEOUT_MS = 300_000
 const DONE = ['completed', 'failed', 'cancelled']
 // The events a director must act on: the same set `dispatch.sh follow`
 // stops at. Everything else is progress the pane already shows.
@@ -172,7 +188,7 @@ const BACKOFF_FAILURES = 5
 // `dispatch.sh events` already prints one line per event the director must
 // act on: armed as a Monitor, those lines arrive while the turn is still going.
 // A task that has ended stays in the pane long enough to be read, then goes.
-const KEEP_MS = 180_000
+const KEEP_MS = 360_000
 const MONITOR_MS = 1_800_000
 const SETTLE_MS = 15_000
 const CHECK_MS = 15_000
@@ -593,6 +609,115 @@ async function companion($: EngineInterface, state: State, cwd: string, args: st
   return result.stdout
 }
 
+function inputKey(state: State, recordId: string) {
+  return `codex_input_${recordId}_${state.inputRevs.get(recordId) ?? 0}`
+}
+
+function isInputKey(element?: string) {
+  return Boolean(element?.startsWith('codex_input_'))
+}
+
+function syncSeed(state: State, recordId: string | null) {
+  if (recordId) state.seeds.set(recordId, state.drafts.get(recordId) ?? '')
+}
+
+function bumpInput(state: State, recordId: string, value: string) {
+  const previous = inputKey(state, recordId)
+  state.drafts.set(recordId, value)
+  state.seeds.set(recordId, value)
+  state.inputRevs.set(recordId, (state.inputRevs.get(recordId) ?? 0) + 1)
+  if (state.ring === previous) state.ring = inputKey(state, recordId)
+}
+
+function viewCwd(state: State, view: LiveView): string {
+  const recordId = view.recordId ?? view.jobId
+  for (const [root, ids] of state.rootIds) {
+    if (ids.has(recordId)) return root
+  }
+  const jobIds = new Set([view.activeRoundId, view.latestRoundId, view.jobId, ...(view.rounds ?? []).map(round => round.jobId)].filter(Boolean))
+  for (const { job } of state.jobFiles.values()) {
+    if (job.workspaceRoot && (job.recordId === recordId || jobIds.has(job.id))) return job.workspaceRoot
+  }
+  return state.cwd
+}
+
+function viewDataDir(state: State, view: LiveView): string | null {
+  const recordId = view.recordId ?? view.jobId
+  const path = state.paths.get(recordId)
+  const fromView = path ? /^(.*)\/state\/[^/]+\/(?:thread-records|job-history)\/[^/]+\/live-view\.json$/.exec(path)?.[1] : null
+  if (fromView) return fromView
+  const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId
+  for (const [file, { job }] of state.jobFiles) {
+    if (job.id === jobId || job.recordId === recordId) {
+      return /^(.*)\/state\/[^/]+\/jobs\/[^/]+\.json$/.exec(file)?.[1] ?? null
+    }
+  }
+  return null
+}
+
+function settleSentDraft(state: State, recordId: string, delivery: Delivery, raw: string) {
+  const current = state.drafts.get(recordId) ?? ''
+  if (delivery === 'steer') {
+    if (!current) bumpInput(state, recordId, '')
+    return
+  }
+  if (current === raw) bumpInput(state, recordId, '')
+  else if (current.startsWith(raw)) bumpInput(state, recordId, current.slice(raw.length).replace(/^\n/, ''))
+}
+
+function restoreFailedDraft(state: State, recordId: string, delivery: Delivery, raw: string) {
+  const current = state.drafts.get(recordId) ?? ''
+  const restored = delivery === 'steer'
+    ? (current && current !== raw ? `${raw}\n${current}` : raw)
+    : (!current || current === raw ? raw : current.startsWith(raw) ? current : `${raw}\n${current}`)
+  bumpInput(state, recordId, restored)
+}
+
+async function sendPaneMessage($: EngineInterface, state: State, view: LiveView, delivery: Delivery, raw: string) {
+  const recordId = view.recordId ?? view.jobId
+  if (!state.script || state.replaced || state.leaving || state.sending.has(recordId) || !raw.trim()) return
+  const epoch = state.epoch
+  const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId
+  const cwd = viewCwd(state, view)
+  const data = viewDataDir(state, view)
+  if (delivery === 'steer') state.drafts.set(recordId, '')
+  state.sending.set(recordId, delivery)
+  state.notices.delete(recordId)
+  $.ui.invalidate('ui.render')
+  let file = ''
+  try {
+    file = await scratch($, { tmp: state.tmp }, '.md', `${PANE_USER_PREFIX}\n${raw}`)
+    const ran = await $.process.run(
+      ['node', state.script, 'message', jobId, ...DELIVERY[delivery]!, '--prompt-file', file, '--cwd', cwd, '--json'],
+      { cwd, timeoutMs: MESSAGE_TIMEOUT_MS, env: await companionEnv($, { companion: state.script, data }) },
+    )
+    if (state.replaced || state.leaving || state.epoch !== epoch) return
+    if (ran.exitCode === 0) {
+      settleSentDraft(state, recordId, delivery, raw)
+      state.ticks = 0
+      state.listedAt = 0
+      $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
+    } else {
+      const detail = ran.stderr.trim().split(/\r?\n/)[0] || ran.stdout.trim().split(/\r?\n/)[0] || `exited with code ${ran.exitCode}`
+      const text = delivery === 'interrupt' ? `${detail} (turn may be cancelled; check status)` : detail
+      restoreFailedDraft(state, recordId, delivery, raw)
+      state.notices.set(recordId, { text, error: true })
+    }
+  } catch (error) {
+    if (state.replaced || state.leaving || state.epoch !== epoch) return
+    const detail = error instanceof Error ? error.message : String(error)
+    const text = delivery === 'interrupt' ? `${detail} (turn may be cancelled; check status)` : detail
+    restoreFailedDraft(state, recordId, delivery, raw)
+    state.notices.set(recordId, { text, error: true })
+  } finally {
+    if (file) await discard($, file)
+    if (state.epoch === epoch && !state.replaced && !state.leaving) {
+      state.sending.delete(recordId)
+      $.ui.invalidate('ui.render')
+    }
+  }
+}
+
 // Bound external calls so one slow root cannot hold every other root behind it.
 async function each<T>(items: T[], visit: (item: T) => Promise<void>) {
   let at = 0
@@ -802,6 +927,13 @@ function resetRows(state: State) {
   state.clock = ''
   state.ticks = 0
   state.listedAt = 0
+  state.paneFocused = false
+  state.drafts.clear()
+  state.seeds.clear()
+  state.inputRevs.clear()
+  state.inputRows.clear()
+  state.sending.clear()
+  state.notices.clear()
 }
 
 async function bindSession($: EngineInterface, state: State, sessionId: string) {
@@ -1260,7 +1392,10 @@ async function forgetRow($: EngineInterface, state: State, view: LiveView) {
   const id = view.recordId ?? view.jobId
   state.forgotten.add(id)
   writeStore($, state, `${state.key}:forgotten`, [...state.forgotten])
-  if (state.selected === id) state.selected = null
+  if (state.selected === id) {
+    syncSeed(state, id)
+    state.selected = null
+  }
   state.toEnd = true
   $.ui.invalidate('ui.render')
 }
@@ -1328,6 +1463,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
   const starting: State = {
     ...state, jobFiles: new Map(), provisional: new Set(), discovering: null, paths: new Map(), mtimes: new Map(), views: new Map(), owners: new Map(), rootIds: new Map(),
     forgotten: new Set(), unreadable: new Map(), expanded: new Set(), monitors: new Map(),
+    drafts: new Map(), seeds: new Map(), inputRevs: new Map(), inputRows: new Map(), sending: new Map(), notices: new Map(),
   }
   async function initialize() {
     if (!(await $.session.surfaces()).length) throw Object.assign(new Error('no interactive session surface'), { actionRequired: true })
@@ -1336,6 +1472,7 @@ function bootstrap($: EngineInterface, state: State, push: boolean): Promise<str
     const home = await $.env.get('HOME')
     if (!home) throw Object.assign(new Error('HOME is unavailable'), { actionRequired: true })
     starting.home = home
+    starting.tmp = ((await $.env.get('TMPDIR')) ?? '').replace(/\/+$/, '') || '/tmp'
     const script = `${$.plugin.root}/scripts/codex-companion.mjs`
     if (!await $.fs.exists(script)) throw Object.assign(new Error(`companion is missing: ${script}`), { actionRequired: true })
     // Both current and older skill installations can arm the events monitor.
@@ -1447,7 +1584,7 @@ function visibleThreads(state: State): PaneView[] {
 
 export function registerTaskPane(on: On, followed: Set<string> = new Set<string>(), background?: string, push = true, tools: DirectorTools = directorTools(), director?: DirectorChannel, relay?: RemoteRelay, summaries = true) {
   const state: State = {
-    cwd: '', home: '', script: '', sessionId: '', key: '', push,
+    cwd: '', home: '', tmp: '/tmp', script: '', sessionId: '', key: '', push,
     discovering: null, jobFiles: new Map(), provisional: new Set(), roots: new Set<string>(), paths: new Map<string, string>(), mtimes: new Map<string, number>(), worker: '',
     owners: new Map<string, string[]>(), rootIds: new Map<string, Set<string>>(), continued: new Set<string>(), asked: new Set<string>(), forgotten: new Set<string>(), generation: 0,
     answering: false, requestMtime: 0, dismissed: false, epoch: 0,
@@ -1458,6 +1595,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
     instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
     summaries, activities: activityState(), activitySaved: '{}', listedAt: 0,
+    paneFocused: false, paneColumns: 100, paneRows: 12, drafts: new Map(), seeds: new Map(), inputRevs: new Map(), inputRows: new Map(), sending: new Map(), notices: new Map(),
   }
 
   on('session.start', async ($, e, next) => {
@@ -1621,6 +1759,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
         await forgetRow($, state, match)
         return { text: `Codex tasks · forgot ${match.label}` }
       }
+      syncSeed(state, state.selected)
       state.selected = id
       state.toEnd = true
     }
@@ -1641,7 +1780,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // Plugin and engine closes leave that choice alone; an explicit open clears it.
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
-      state.opened = state.shown = false
+      state.opened = state.shown = state.paneFocused = false
+      for (const [id, value] of state.drafts) state.seeds.set(id, value)
       if (e.origin.kind === 'person') {
         state.dismissed = true
         if (state.key) writeStore($, state, `${state.key}:dismissed`, true)
@@ -1681,17 +1821,29 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
   // they move the trace, not the ring.
   on('ui.focus', ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const tabs = visibleThreads(state).map(view => `codex_tab_${view.recordId ?? view.jobId}`)
-    const element = e.element?.startsWith('codex_fold_') && tabs.length
-      ? state.ring === tabs.at(-1) ? tabs[0]! : tabs.at(-1)!
+    const threads = visibleThreads(state)
+    const tabs = threads.map(view => `codex_tab_${view.recordId ?? view.jobId}`)
+    const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]
+    const shownId = shown ? (shown.recordId ?? shown.jobId) : null
+    const field = shownId ? inputKey(state, shownId) : undefined
+    const skip = e.element?.startsWith('codex_fold_') || e.element?.startsWith('codex_act_')
+    const element = skip && tabs.length
+      ? isInputKey(state.ring) ? tabs[0]! : (field ?? tabs.at(-1)!)
       : e.element
+    const wasInput = isInputKey(state.ring)
+    const nowInput = isInputKey(element)
     state.ring = element
     const recordId = /^codex_tab_(.+)$/.exec(element ?? '')?.[1]
+    let redraw = wasInput !== nowInput
     if (recordId && recordId !== state.selected) {
+      syncSeed(state, shownId)
       state.selected = recordId
       state.toEnd = true
-      $.ui.invalidate('ui.render')
+      redraw = true
+    } else if (nowInput && !wasInput) {
+      state.toEnd = true
     }
+    if (redraw) $.ui.invalidate('ui.render')
     return next({ ...e, element })
   })
   // Where the window sits is a render prop; how tall the tree is is not, so
@@ -1707,12 +1859,17 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     // An unasked pane waiting for room may now be placed after a resize.
     state.opened = true
     state.shown = true
+    state.paneFocused = Boolean(e.props.isFocused)
     const threads = visibleThreads(state)
     if (state.selected && !threads.some(view => (view.recordId ?? view.jobId) === state.selected)) {
+      syncSeed(state, state.selected)
       state.selected = null
       state.toEnd = true
     }
+    const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]
+    const shownId = shown ? (shown.recordId ?? shown.jobId) : null
     const select = (recordId: string) => {
+      syncSeed(state, shownId)
       state.selected = recordId
       // A click leaves the ring where Tab last put it, so the next Tab went on
       // from a task other than the one on screen, or landed on it and changed
@@ -1724,8 +1881,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       state.toEnd = true
       $.ui.invalidate('ui.render')
     }
-    const shown = threads.find(view => (view.recordId ?? view.jobId) === state.selected) ?? threads[0]
-    const foldId = (key: string) => `${shown?.recordId ?? shown?.jobId}:${key}`
+    const foldId = (key: string) => `${shownId}:${key}`
     const fold = {
       isOpen: (key: string) => state.expanded.has(foldId(key)),
       toggle: (key: string) => {
@@ -1733,8 +1889,51 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
         $.ui.invalidate('ui.render')
       },
     }
-    const tree = paneBody($.ui.resolve(e), threads, Math.max(20, e.props.bodyColumns),
-      Math.max(6, e.props.scroll?.bodyRows ?? 12), state.now, state.selected, select, background, fold)
+    const ui = $.ui.resolve(e)
+    const paneColumns = Math.max(20, e.props.bodyColumns)
+    const paneRows = Math.max(6, e.props.scroll?.bodyRows ?? 12)
+    state.paneColumns = paneColumns
+    state.paneRows = paneRows
+    const fieldKey = shownId ? inputKey(state, shownId) : ''
+    const draftText = shownId ? (state.drafts.get(shownId) ?? state.seeds.get(shownId) ?? '') : ''
+    const draftRows = shownId ? composerRows(draftText, paneColumns, paneRows, threads.length) : 1
+    if (shownId) state.inputRows.set(shownId, draftRows)
+    const composer = shown && shownId && 'Input' in ui && ui.Input ? {
+      Input: ui.Input,
+      key: fieldKey,
+      value: state.seeds.get(shownId) ?? '',
+      rows: draftRows,
+      focused: Boolean(e.props.isFocused && state.ring === fieldKey),
+      sending: state.sending.get(shownId),
+      notice: state.notices.get(shownId),
+      onInput: (value: string) => {
+        state.drafts.set(shownId, value)
+        const cleared = state.notices.delete(shownId)
+        const nextRows = composerRows(value, state.paneColumns, state.paneRows, visibleThreads(state).length)
+        const prevRows = state.inputRows.get(shownId) ?? 1
+        if (cleared || nextRows !== prevRows) {
+          state.inputRows.set(shownId, nextRows)
+          $.ui.invalidate('ui.render')
+        }
+      },
+      onSubmit: (value: string) => {
+        if (state.sending.has(shownId) || !value.trim()) return
+        void sendPaneMessage($, state, shown, 'steer', value)
+      },
+      onQueue: () => {
+        if (!state.paneFocused || state.ring !== inputKey(state, shownId) || state.sending.has(shownId)) return
+        const value = state.drafts.get(shownId) ?? ''
+        if (!value.trim()) return
+        void sendPaneMessage($, state, shown, 'queue', value)
+      },
+      onInterrupt: () => {
+        if (!state.paneFocused || state.ring !== inputKey(state, shownId) || state.sending.has(shownId)) return
+        const value = state.drafts.get(shownId) ?? ''
+        if (!value.trim()) return
+        void sendPaneMessage($, state, shown, 'interrupt', value)
+      },
+    } : undefined
+    const tree = paneBody(ui, threads, paneColumns, paneRows, state.now, state.selected, select, background, fold, composer)
     // The status line is the tree's last row and the engine scrolls the whole
     // tree, so a trace that grows carries the status off the bottom of the
     // window. `end` keeps up with a tree that grows until something else moves

@@ -122,27 +122,25 @@ test("agy native steering keeps the turn active until the latest prompt complete
 });
 
 
-test("agy refuses steering during a running command without sending another prompt", async () => {
-  for (const [agy, status, rejected] of [[true, "in_progress", true], [true, "completed", false],
-    [true, "failed", false], [false, "in_progress", false]]) {
+test("agy steers during a running command and rejects steering during background recovery", async () => {
+  for (const [waitingForCommands, expectedPrompts] of [[false, 1], [true, 0]]) {
     const port = new AcpExecutorJobPort({ job: { id: "command-steering" } });
     port.sessionId = "session";
     port.capabilities.midTurnSteer = true;
-    port.antigravityPromptSteering = agy;
-    port.activeTurn = { turnId: "turn", accepting: true, messages: [] };
+    port.antigravityPromptSteering = true;
+    port.activeTurn = { turnId: "turn", accepting: true, waitingForCommands, messages: [] };
     port.adapter = new AcpEventAdapter(() => {}, { job: port.job });
-    port.adapter.tools.set("command-1", { kind: "execute", status });
+    port.adapter.tools.set("command-1", { kind: "execute", status: "in_progress" });
     let prompts = 0;
     port.promptResponse = async () => { prompts++; return { stopReason: "end_turn" }; };
     const sent = port.steerPrompt({ sessionId: "session", turnId: "turn", prompt: [{ type: "text", text: "correct" }] });
-    if (rejected) {
-      await assert.rejects(sent, error => error.code === "INVALID_STATE" && /queue.*interrupt/.test(error.message));
-      assert.equal(prompts, 0);
-      assert.equal(port.activeTurn.messages.length, 0);
+    if (waitingForCommands) {
+      await assert.rejects(sent, error => error.code === "INVALID_STATE" && /正在等后台命令结束.*queue.*interrupt/.test(error.message));
     } else {
       await sent;
-      assert.equal(prompts, 1);
     }
+    assert.equal(prompts, expectedPrompts);
+    assert.equal(port.activeTurn.messages.length, expectedPrompts);
   }
 });
 

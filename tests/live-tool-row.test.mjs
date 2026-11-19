@@ -3,7 +3,7 @@ import { describe, test, tier, fixture, row, resultRow, world, textOf, hint, row
 import { followOf } from '../plugins/codex/hooks/live-tool-row/command.ts';
 import { refresh } from '../plugins/codex/hooks/live-tool-row/register.ts';
 import { terminalOf, cellWidth, duration, elapsed, shortPath, tailLimit, tokens, waiting } from '../plugins/codex/hooks/live-tool-row/format.ts';
-import { clip, liveTree, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
+import { clip, liveTree, PANE_USER_PREFIX, statusText } from '../plugins/codex/hooks/live-tool-row/view.ts';
 import { markdown } from '../plugins/codex/hooks/live-tool-row/markdown.ts';
 import { paneBody } from '../plugins/codex/hooks/task-pane/pane.ts';
 
@@ -18,14 +18,15 @@ describe('live ToolUse row', () => {
     data.thinkingSince = data.startedAt;
     data.tail = [{ seq: '1', at: data.startedAt, type: 'message.completed', text: 'assistant: Current answer' }];
     const first = `Queued first\n${'完整正文'.repeat(350)}`;
-    data.queuedPrompts = [{ seq: '2', text: first }, { seq: '3', text: 'Queued second' }];
+    const fromPane = `${PANE_USER_PREFIX}\nQueued from pane`;
+    data.queuedPrompts = [{ seq: '2', text: first }, { seq: '3', text: 'Queued second' }, { seq: '4', text: fromPane }];
     for (const maxTail of [undefined, 200]) {
       const tree = liveTree($.ui.resolve(row()), data, 80, Date.parse(data.startedAt), 48, undefined, maxTail);
       const text = textOf(tree);
       const rows = rowsOf(tree);
-      const queued = rows.filter(node => textOf(node).startsWith('◆ ↓ Director message · queued'));
-      assert.equal(queued.length, 2);
-      assert.deepEqual(rows.slice(-2), queued, 'queue entries have no blank rows between them');
+      const queued = rows.filter(node => /^◆ ↓ (?:Director|User) message · queued/.test(textOf(node)));
+      assert.equal(queued.length, 3);
+      assert.deepEqual(rows.slice(-3), queued, 'queue entries have no blank rows between them');
       for (const node of queued) {
         assert.equal(node.type, 'Text');
         assert.equal(node.props.wrap, 'truncate-end');
@@ -34,11 +35,15 @@ describe('live ToolUse row', () => {
       }
       assert.ok(textOf(queued[0]).endsWith('…'));
       assert.ok(textOf(queued[1]).endsWith('Queued second'));
+      assert.equal(textOf(queued[2]), '◆ ↓ User message · queued: Queued from pane');
       assert.equal(data.queuedPrompts[0].text, first, 'the complete message remains available when execution starts');
+      assert.equal(data.queuedPrompts[2].text, fromPane);
       assert.ok(text.indexOf('Current answer') < text.indexOf('Thinking'));
       assert.ok(text.indexOf('Thinking') < text.indexOf('Queued first'));
       assert.ok(text.indexOf('Queued first') < text.indexOf('Queued second'));
+      assert.ok(text.indexOf('Queued second') < text.indexOf('Queued from pane'));
       assert.equal((text.match(/◆ ↓ Director message · queued/g) ?? []).length, 2);
+      assert.doesNotMatch(text, /From user via tasks pane/);
     }
   });
   test('shows context compaction once in the trace and in the prompt hint until it ends', ($, on) => {
@@ -79,9 +84,15 @@ describe('live ToolUse row', () => {
       { type: 'message.completed', text: 'assistant: Ordinary executor message.' },
     ].map((event, index) => ({ ...event, seq: String(index + 1), at: data.startedAt }));
     const controlText = `${'补充背景核对🙂'.repeat(50)}\n完整结尾 orderFreightCost`;
-    for (const [seq, interrupt] of [['4', false], ['5', true]]) {
+    const userText = '请先只跑这两个单测\n不要提交';
+    for (const [seq, interrupt, message] of [
+      ['4', false, controlText],
+      ['5', true, controlText],
+      ['6', false, `${PANE_USER_PREFIX}\n${userText}`],
+      ['7', true, `${PANE_USER_PREFIX}\n${userText}`],
+    ]) {
       const control = normalizeJobEvent({ method: 'companion/control-message', params: {
-        threadId: 'thread-1', turnId: 'turn-1', message: controlText, interrupt, status: 'accepted',
+        threadId: 'thread-1', turnId: 'turn-1', message, interrupt, status: 'accepted',
       } }, { id: data.jobId, streamId: 'stream-1' });
       control.seq = seq;
       applyJobEvent(data, control);
@@ -93,6 +104,8 @@ describe('live ToolUse row', () => {
         ['◇ ↑ Executor notification', notification, 0, 'cyan'],
         ['◆ ↓ Director message', controlText, 0, 'cyan'],
         ['◆ ↓ Director interrupt', controlText, 0, 'cyan'],
+        ['◆ ↓ User message', userText, 0, 'cyan'],
+        ['◆ ↓ User interrupt', userText, 0, 'cyan'],
       ]) {
         const block = nodes.find(node => textOf(node).startsWith(title));
         assert.ok(block, title);

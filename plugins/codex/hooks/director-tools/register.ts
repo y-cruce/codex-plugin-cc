@@ -170,11 +170,11 @@ export function dispatchInput(input: ToolInput): string {
   return `${lines.join('\n')}\n\n${brief.endsWith('\n') ? brief : `${brief}\n`}`
 }
 
-const DELIVERY: Record<string, string[]> = { queue: ['--queue'], steer: [], interrupt: ['--interrupt'] }
+export const DELIVERY: Record<string, string[]> = { queue: ['--queue'], steer: [], interrupt: ['--interrupt'] }
 
 let written = 0
 
-async function scratch($: EngineInterface, context: Context, suffix: string, body: string): Promise<string> {
+export async function scratch($: EngineInterface, context: Pick<Context, 'tmp'>, suffix: string, body: string): Promise<string> {
   // Take the number before awaiting: concurrent calls read the same clock value.
   const number = ++written
   const path = `${context.tmp}/codex-director-${await $.session.id()}-${await $.clock.now()}-${number}${suffix}`
@@ -184,11 +184,11 @@ async function scratch($: EngineInterface, context: Context, suffix: string, bod
 
 // dispatch.sh has read the file by the time it exits; there is no `$.fs` call
 // that removes one.
-async function discard($: EngineInterface, path: string) {
+export async function discard($: EngineInterface, path: string) {
   await $.process.run(['rm', '-f', path], { timeoutMs: 5000 }).catch(() => {})
 }
 
-async function companionEnv($: EngineInterface, context: Context, directorAgentId = '') {
+export async function companionEnv($: EngineInterface, context: Pick<Context, 'companion' | 'data'>, directorAgentId = '') {
   return {
     CODEX_COMPANION: context.companion, CODEX_COMPANION_SESSION_ID: await $.session.id(),
     CODEX_COMPANION_DIRECTOR_AGENT_ID: directorAgentId,

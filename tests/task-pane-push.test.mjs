@@ -62,7 +62,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
   const refusedReads = [];
   const observed = [];
   const acks = [];
-  const base = options.fallback ? "/tmp/codex-companion/main" : "/home/test/.claude/plugins/data/codex/state/main";
+  const dataName = options.dataName ?? "codex";
+  const base = options.fallback ? "/tmp/codex-companion/main" : `/home/test/.claude/plugins/data/${dataName}/state/main`;
   const jobPath = `${base}/jobs/job-a.json`;
   const viewPath = `${base}/thread-records/record-a/live-view.json`;
   const live = {
@@ -90,8 +91,9 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     return JSON.stringify(files.get(path));
   };
   const element = (type) => (props) => ({ type, ...props });
+  const pluginRoot = options.pluginRoot ?? "/plugin";
   const engine = {
-    plugin: { name: "codex", root: "/plugin" },
+    plugin: { name: "codex", root: pluginRoot },
     session: { surfaces: async () => ["terminal"], cwd: async () => "/work", id: async () => { if (options.sessionRead) await options.sessionRead(); return sessionId; }, usage: async () => ({ startedAt }),
       messages: async () => options.messages ?? [] },
     env: { get: async (name) => name === "TMPDIR" ? options.tmpdir ?? "/tmp" : "/home/test" },
@@ -103,8 +105,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (key === `codex:tasks:${sessionId}`) writes++;
     } },
     fs: {
-      exists: async (path) => files.has(path) || path === "/plugin/scripts/codex-companion.mjs" || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
-      list: async (path) => options.fsList ? options.fsList(path, files) : path.endsWith("plugins/data") ? options.fallback ? [] : [{ kind: "dir", name: "codex" }]
+      exists: async (path) => files.has(path) || dirs.has(path) || path === `${pluginRoot}/scripts/codex-companion.mjs` || path === "/home/test/.claude/skills/code-director/scripts/dispatch.sh",
+      list: async (path) => options.fsList ? options.fsList(path, files) : path.endsWith("plugins/data") ? options.fallback ? [] : [{ kind: "dir", name: dataName }]
         : path.endsWith("/state") || options.fallback && path === "/tmp/codex-companion" ? [{ kind: "dir", name: "main" }]
         : path.endsWith("/jobs") && files.has(jobPath) ? [{ name: "job-a.json", kind: "file", mtimeMs: mtime, isLink: false, ...options.jobEntry }] : [],
       stat: async (path) => {
@@ -113,7 +115,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         await read(path);
         return { mtimeMs: mtime };
       },
-      write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path, text); files.set(path, JSON.parse(text)); },
+      write: async (path, text) => { if (options.fileWrite) await options.fileWrite(path, text); files.set(path, path.endsWith(".json") ? JSON.parse(text) : text); },
       read: async (path) => {
         const text = await read(path);
         // The hooks host rejects reads over 4 MiB; stat still succeeds.
@@ -132,8 +134,10 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     process: { run: async (args, init) => {
       const routed = await ingressRun(args);
       if (routed) return routed;
-      if (args[1] === "/plugin/scripts/activity-summary.mjs") return options.activityRun(init);
+      if (args[1] === `${pluginRoot}/scripts/activity-summary.mjs`) return options.activityRun(init);
       if (args[3] === "codex-monitor-stop") return options.stopProcess ? options.stopProcess(args) : { exitCode: 0, stdout: "", stderr: "" };
+      if (args[0] === "rm") { files.delete(args[2]); return { exitCode: 0, stdout: "", stderr: "" }; }
+      if (args[2] === "message" && options.messageRun) return options.messageRun(args, init);
       if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
@@ -157,7 +161,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
     ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return request.focus ? options.focusResult ?? { isPlaced: true } : openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
       notify: async (text) => { notices.push(text); if (options.notify) return options.notify(); return { isSent: true, channel: "terminal_bell" }; },
-      scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button"].map((key) => [key, element(key)])) },
+      focus: async () => ({}), scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button", "Input"].map((key) => [key, element(key)])) },
   };
   registerTaskPane((event, matcher, callback) => hooks.set(`${event}:${matcher?.component ?? ""}`, callback ?? matcher), new Set(), undefined, options.push ?? false,
     options.tools, undefined, undefined, options.activitySummaries ?? false);
@@ -216,6 +220,8 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
     render: async () => JSON.stringify(await hooks.get("ui.render:Pane")(engine,
       { requestId: "codex_tasks", props: { bodyColumns: 100 } }, async () => {})),
+    renderTree: async (props = {}) => hooks.get("ui.render:Pane")(engine,
+      { requestId: "codex_tasks", props: { bodyColumns: 100, ...props } }, async () => {}),
   };
 }
 
@@ -891,7 +897,7 @@ test("queued follow-up rounds share the running task row through handoff and pan
     await pane.tick();
     const row = async (status, pending, label) => {
       const rendered = await pane.render();
-      const tabs = JSON.parse(rendered).children[1].children;
+      const tabs = JSON.parse(rendered).children[0].children.filter(item => item.children?.[1]?.key?.startsWith("codex_tab_"));
       assert.deepEqual(tabs.map(tab => tab.children[1].key), ["codex_tab_record-a"]);
       assert.match(tabs[0].children[1].label, new RegExp(`^1 ${label}(?: ·|$)`));
       const state = status === "queued" ? `${pending} queued` : `${status}${pending ? ` · ${pending} queued` : ""}`;
@@ -2034,9 +2040,11 @@ test("task pane renders one thread row with both rounds in trace order", () => {
     return (value.children ?? []).map(visit).join("\n");
   };
   const text = visit(tree);
+  assert.equal(tree.props.paddingLeft, 1);
   assert.equal(tree.props.paddingRight, 2);
-  assert.ok(nodes.filter((node) => node !== tree && typeof node.props.width === "number").every((node) => node.props.width <= 98));
+  assert.ok(nodes.filter((node) => node !== tree && typeof node.props.width === "number").every((node) => node.props.width <= 97));
   const empty = paneBody(ui, [], 100, 20, Date.parse(data.endedAt), null, () => {});
+  assert.equal(empty.props.paddingLeft, 1);
   assert.equal(empty.props.paddingRight, 2);
   assert.equal(nodes.filter((node) => node.type === "Button").length, 1);
   assert.equal(nodes.find((node) => node.type === "Button").props.key, "codex_tab_task-old");
@@ -2074,4 +2082,173 @@ test("task pane renders one thread row with both rounds in trace order", () => {
   nodes.length = 0;
   visit(paneBody(ui, [data], 20, 20, Date.parse(data.endedAt), null, () => {}));
   assert.ok(nodes.slice(1).filter((node) => typeof node.props.width === "number").every((node) => node.props.width <= 18));
+});
+
+test("pane composer maps steer/queue/interrupt to companion argv, derives plugin data from view path, preserves in-flight typing, and skips action buttons in focus", async () => {
+  const findAll = (tree, pred, out = []) => {
+    if (!tree || typeof tree === "string") return out;
+    if (pred(tree)) out.push(tree);
+    for (const child of Array.isArray(tree.children) ? tree.children : [tree.children]) findAll(child, pred, out);
+    return out;
+  };
+  const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  const cases = [
+    {
+      delivery: "steer", flag: [], pluginRoot: "/checkout/plugins/codex", dataName: "codex-inline",
+      expectedData: "/home/test/.claude/plugins/data/codex-inline",
+      okReply: { exitCode: 0, stdout: JSON.stringify({ jobId: "job-a", turnId: "t1" }), stderr: "" },
+      failTyped: "typed during fail", failExpected: "rejected msg\ntyped during fail",
+    },
+    {
+      delivery: "queue", flag: ["--queue"], pluginRoot: "/home/test/.claude/plugins/cache/y-cruce-codex/codex/1.0.0",
+      dataName: "codex-y-cruce-codex", expectedData: "/home/test/.claude/plugins/data/codex-y-cruce-codex",
+      okReply: { exitCode: 0, stdout: JSON.stringify({ jobId: "job-a", queued: true, queuedJobId: "task-q1" }), stderr: "" },
+      failTyped: "rejected msg\ntyped during fail", failExpected: "rejected msg\ntyped during fail",
+    },
+    {
+      delivery: "interrupt", flag: ["--interrupt"], pluginRoot: "/checkout/plugins/codex", fallback: true,
+      expectedData: undefined,
+      okReply: { exitCode: 0, stdout: JSON.stringify({ jobId: "job-a", interrupted: true }), stderr: "" },
+      failTyped: "brand new", failExpected: "rejected msg\nbrand new",
+    },
+  ];
+  for (const { delivery, flag, pluginRoot, dataName, fallback, expectedData, okReply, failTyped, failExpected } of cases) {
+    const calls = [];
+    let nextGate = null;
+    const pane = await paneHarness(new Map(), undefined, "session", {
+      pluginRoot,
+      dataName,
+      fallback,
+      workspaceRoot: "/work/repo-a",
+      dirs: ["/work/repo-a"],
+      messageRun: (argv, init) => {
+        const promptFile = argv[argv.indexOf("--prompt-file") + 1];
+        calls.push({ argv, init, body: pane.files.get(promptFile), promptFile });
+        return nextGate.promise;
+      },
+    });
+    const fire = (tree, text) => {
+      const box = findAll(tree, (n) => n.type === "Input")[0];
+      const q = findAll(tree, (n) => n.type === "Button" && n.action === "chat:queueSubmit")[0];
+      const i = findAll(tree, (n) => n.type === "Button" && n.action === "chat:sendNow")[0];
+      if (delivery === "steer") box.onSubmit(text);
+      else if (delivery === "queue") q.onPress();
+      else i.onPress();
+    };
+    // Before Input focus, action buttons stay unmounted so they cannot catch chords elsewhere.
+    const unfocused = await pane.renderTree({ isFocused: false });
+    assert.equal(findAll(unfocused, (n) => n.type === "Button" && n.action).length, 0);
+    const initialInput = findAll(unfocused, (n) => n.type === "Input")[0];
+    assert.equal(initialInput.rows, 1);
+    assert.equal(initialInput.placeholder, "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
+    assert.equal(findAll(await pane.renderTree({ bodyColumns: 48, isFocused: false }), (n) => n.type === "Input")[0].placeholder, "⏎ steer · ^x⏎ queue · ^x^s interrupt");
+    assert.equal(findAll(await pane.renderTree({ bodyColumns: 32, isFocused: false }), (n) => n.type === "Input")[0].placeholder, "⏎ steer · ^x⏎ queue · ^x^s ");
+    await pane.focus(initialInput.key);
+    const focused = await pane.renderTree({ isFocused: true });
+    const input = findAll(focused, (n) => n.type === "Input")[0];
+    assert.equal(input.placeholder.trimEnd(), "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
+    assert.equal(input.placeholder.length, 95);
+    assert.ok(findAll(focused, (n) => n.type === "Button" && n.action === "chat:queueSubmit")[0]);
+    assert.ok(findAll(focused, (n) => n.type === "Button" && n.action === "chat:sendNow")[0]);
+    // Empty text does not send.
+    input.onInput("   ");
+    fire(focused, "   ");
+    await drain();
+    assert.equal(calls.length, 0);
+    // Typing updates draft without mutating Input.key or Input.value across redraws.
+    input.onInput("fix tests");
+    const duringEdit = findAll(await pane.renderTree({ isFocused: true }), (n) => n.type === "Input")[0];
+    assert.equal(duringEdit.key, input.key);
+    assert.equal(duringEdit.value, "");
+    // Start in-flight send and verify duplicate triggers are ignored.
+    nextGate = Promise.withResolvers();
+    fire(focused, "fix tests");
+    await drain();
+    assert.equal(calls.length, 1);
+    fire(focused, "fix tests");
+    input.onSubmit("second attempt");
+    await drain();
+    assert.equal(calls.length, 1, `${delivery} must ignore duplicate triggers while in flight`);
+    const sendingTree = await pane.renderTree({ isFocused: true });
+    assert.equal(findAll(sendingTree, (n) => n.type === "Input")[0].placeholder.trimEnd(), `Sending (${delivery})…`);
+    assert.deepEqual(calls[0].argv, [
+      "node", `${pluginRoot}/scripts/codex-companion.mjs`, "message", "job-a", ...flag,
+      "--prompt-file", calls[0].promptFile, "--cwd", "/work/repo-a", "--json",
+    ]);
+    assert.equal(calls[0].init.cwd, "/work/repo-a");
+    assert.equal(calls[0].init.timeoutMs, 300_000);
+    assert.equal(calls[0].init.env.CODEX_COMPANION_SESSION_ID, "session");
+    assert.equal(calls[0].init.env.CLAUDE_PLUGIN_DATA, expectedData);
+    assert.equal(calls[0].body, "[From user via tasks pane]\nfix tests");
+    // Success clears draft, bumps Input.key, removes temp file, and shows no receipt or extra row.
+    nextGate.resolve(okReply);
+    await drain();
+    assert.equal(pane.files.has(calls[0].promptFile), false);
+    const afterOk = await pane.renderTree({ isFocused: true });
+    const clearedInput = findAll(afterOk, (n) => n.type === "Input")[0];
+    assert.notEqual(clearedInput.key, input.key);
+    assert.equal(clearedInput.value, "");
+    assert.equal(clearedInput.placeholder.trimEnd(), "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
+    assert.doesNotMatch(JSON.stringify(afterOk), /Sent \(steer\)|Submitted \(steer\)|Queued as|Interrupted & sent|Sending \(/);
+    assert.equal(findAll(afterOk, (n) => n.type === "Text" && n.color === "red").length, 0);
+    const bottomRow = afterOk.children[0].children.at(-1);
+    assert.equal(bottomRow.children[0].children, "─".repeat(97));
+    assert.deepEqual(bottomRow.children.slice(1).map((n) => n.key), ["codex_act_queue", "codex_act_interrupt"]);
+    // Typing while a send is in flight survives completion without losing the new draft.
+    clearedInput.onInput("first msg");
+    nextGate = Promise.withResolvers();
+    fire(afterOk, "first msg");
+    await drain();
+    clearedInput.onInput(delivery === "steer" ? "typed in flight" : "first msg\ntyped in flight");
+    nextGate.resolve(okReply);
+    await drain();
+    const afterMidOk = await pane.renderTree({ isFocused: true });
+    let nextTree = afterMidOk;
+    if (delivery === "steer") {
+      assert.equal(findAll(afterMidOk, (n) => n.type === "Input")[0].key, clearedInput.key);
+      await pane.close();
+      const reopened = await pane.renderTree({ isFocused: true });
+      const reopenedInput = findAll(reopened, (n) => n.type === "Input")[0];
+      assert.equal(reopenedInput.value, "typed in flight");
+      await pane.focus(reopenedInput.key);
+      nextTree = await pane.renderTree({ isFocused: true });
+    } else {
+      const strippedInput = findAll(afterMidOk, (n) => n.type === "Input")[0];
+      assert.notEqual(strippedInput.key, clearedInput.key);
+      assert.equal(strippedInput.value, "typed in flight");
+    }
+    // Failure preserves draft text and renders companion reason in red.
+    const beforeFailInput = findAll(nextTree, (n) => n.type === "Input")[0];
+    beforeFailInput.onInput("keep draft");
+    nextGate = Promise.withResolvers();
+    fire(nextTree, "keep draft");
+    await drain();
+    nextGate.resolve({ exitCode: 1, stdout: "", stderr: "cannot deliver right now\n" });
+    await drain();
+    const afterFail = await pane.renderTree({ isFocused: true });
+    const keptInput = findAll(afterFail, (n) => n.type === "Input")[0];
+    assert.notEqual(keptInput.key, beforeFailInput.key);
+    assert.equal(keptInput.value, "keep draft");
+    const errText = findAll(afterFail, (n) => n.type === "Text" && n.color === "red")[0];
+    assert.match(errText.children, /cannot deliver right now/);
+    // Failure after in-flight typing preserves both rejected text and newly typed text without duplicating.
+    keptInput.onInput("rejected msg");
+    assert.equal(findAll(await pane.renderTree({ isFocused: true }), (n) => n.type === "Text" && n.color === "red").length, 0);
+    nextGate = Promise.withResolvers();
+    fire(afterFail, "rejected msg");
+    await drain();
+    keptInput.onInput(failTyped);
+    nextGate.resolve({ exitCode: 1, stdout: "", stderr: "still busy\n" });
+    await drain();
+    const afterMidFail = await pane.renderTree({ isFocused: true });
+    const mergedInput = findAll(afterMidFail, (n) => n.type === "Input")[0];
+    assert.notEqual(mergedInput.key, keptInput.key);
+    assert.equal(mergedInput.value, failExpected);
+    // Focus skips action and fold buttons in both directions; narrow pane degrades hint.
+    assert.equal((await pane.focus("codex_act_queue")).element, "codex_tab_record-a");
+    assert.equal((await pane.focus(undefined)).element, undefined);
+    assert.equal((await pane.focus("codex_fold_1")).element, mergedInput.key);
+    const narrow = JSON.stringify(await pane.renderTree({ bodyColumns: 32, isFocused: false }));
+    assert.match(narrow, /still busy/);
+  }
 });

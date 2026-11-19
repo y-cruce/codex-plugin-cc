@@ -31,10 +31,10 @@ for the newest response before completing the original job and turn. Sending
 a message confirms submission, without a separate model-consumption receipt.
 Queue, interrupt, cancel and continue retain the usual director controls.
 
-While an execute tool is unfinished, agy steering is refused with instructions
-to choose queue or interrupt; no second prompt is sent. When agy returns
-`end_turn` with unfinished commands, the job stays running. The driver reads
-their native tool statuses with `session/load`, filters out history replay,
+Steering works while agy's prompt is active, including while commands run.
+When agy returns `end_turn` with unfinished commands, the job stays running.
+The driver refuses steering during this wait and offers queue or interrupt.
+It reads native tool statuses with `session/load`, filters out history replay,
 and sends a continuation prompt in the same job and turn once they finish.
 Repeated waits share a 30-minute limit. On timeout the task fails with the
 explicit warning `agy 结束本轮时仍有后台命令在运行` and the remaining commands.
