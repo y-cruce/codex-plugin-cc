@@ -20,7 +20,7 @@ node plugins/codex/scripts/codex-companion.mjs task \
   --json "Inspect the project"
 ```
 
-New sessions default to `gemini-pro-orchestrator`, which exposes no thinking
+New sessions default to `gemini-pro-orchestrator-neon`, which exposes no thinking
 level. Other explicit models default to high thinking, Opus to medium; explicit model/effort options take priority. The
 server exposes effort as `thought_level`. Continued sessions retain their
 existing settings unless explicitly overridden.
@@ -68,7 +68,7 @@ launcher is backed up as `launch.sh.before-standalone-proxy-20261112`.
 Existing jobs keep their recorded command and arguments; continue uses those
 instead of the new preset.
 
-派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 gemini-pro-orchestrator（没有思考强度选项），
+派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 gemini-pro-orchestrator-neon（没有思考强度选项），
 显式选其他模型默认 high，Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的
 新 prompt，等待最新响应后结束原任务。回退时一起撤销插件和调度规则的迁移
 提交，恢复旧代理和预设；旧安装及启动器保留在原处。

@@ -71,9 +71,9 @@ function recordingPort(configOptions, options = {}) {
 test("new Antigravity sessions default to the orchestrator without effort, named models to high or Opus medium, honor overrides and preserve resumed sessions", async () => {
   const home = makeTempDir();
   for (const row of [
-    { agent: "antigravity-acp", model: "gemini-pro-orchestrator", effort: null, requests: 1 },
-    { agent: "Antigravity ACP Server", model: "gemini-pro-orchestrator", effort: null, requests: 1 },
-    { agent: "antigravity-acp", overrides: { modelId: "gemini-4-carbon" }, model: "gemini-4-carbon", effort: "high" },
+    { agent: "antigravity-acp", model: "gemini-pro-orchestrator-neon", effort: null, requests: 1 },
+    { agent: "Antigravity ACP Server", model: "gemini-pro-orchestrator-neon", effort: null, requests: 1 },
+    { agent: "antigravity-acp", overrides: { modelId: "gemini-4-neon" }, model: "gemini-4-neon", effort: "high" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
     { agent: "antigravity-acp", env: "claude-opus-5-5", model: "claude-opus-5-5", effort: "medium" },
@@ -87,7 +87,7 @@ test("new Antigravity sessions default to the orchestrator without effort, named
     const effortOption = row.agent === "Antigravity ACP Server" ? "thought_level" : "thinking_level";
     const h = recordingPort([
       { type: "select", id: "model", currentValue: "gemini-3.8-flash",
-        options: ["claude-opus-5-5", "gemini-4-carbon", "gemini-pro-orchestrator", "gemini-3.8-flash"].map(value => ({ value })) },
+        options: ["claude-opus-5-5", "gemini-4-neon", "gemini-pro-orchestrator-neon", "gemini-3.8-flash"].map(value => ({ value })) },
       { type: "select", id: effortOption, currentValue: "low",
         options: ["low", "medium", "high"].map(value => ({ value })) }
     ], { env: { HOME: home }, ...row.overrides });
@@ -95,7 +95,7 @@ test("new Antigravity sessions default to the orchestrator without effort, named
     const setOption = h.port.connection.setSessionConfigOption;
     h.port.connection.setSessionConfigOption = async (params) => {
       const result = await setOption(params);
-      return params.value === "gemini-pro-orchestrator"
+      return params.value === "gemini-pro-orchestrator-neon"
         ? { configOptions: result.configOptions.filter(option => option.id !== effortOption) } : result;
     };
     h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });

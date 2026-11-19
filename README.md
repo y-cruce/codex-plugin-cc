@@ -568,9 +568,9 @@ The updated code-director skill assigns frontend design, implementation, debuggi
 
 更新后的 code-director 技能默认将前端设计、实现、排障、验证和评审交给 agy，小改动同样适用。前端评审通过 `investigate` 任务配只读审查任务书执行。
 
-New Antigravity sessions default to `$CODEX_COMPANION_ANTIGRAVITY_MODEL`, else `gemini-pro-orchestrator`, which exposes no thinking level. Other models default their thinking to `high`, Opus models to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes the CLI server's `thought_level` option. Resuming a session preserves its model unless explicitly overridden.
+New Antigravity sessions default to `$CODEX_COMPANION_ANTIGRAVITY_MODEL`, else `gemini-pro-orchestrator-neon`, which exposes no thinking level. Other models default their thinking to `high`, Opus models to `medium`. Pass `--executor-model` and `--executor-effort` to override those defaults; the director's fields are `model` and `executor_effort`. The ACP driver recognizes the CLI server's `thought_level` option. Resuming a session preserves its model unless explicitly overridden.
 
-Antigravity 新会话默认使用 `$CODEX_COMPANION_ANTIGRAVITY_MODEL` 指定的模型，未设置时用 `gemini-pro-orchestrator`，该模型没有思考强度选项；选其他模型时思考强度默认 `high`，Opus 模型默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持 CLI 服务的 `thought_level` 选项。续接会话时，只有显式指定模型才切换。
+Antigravity 新会话默认使用 `$CODEX_COMPANION_ANTIGRAVITY_MODEL` 指定的模型，未设置时用 `gemini-pro-orchestrator-neon`，该模型没有思考强度选项；选其他模型时思考强度默认 `high`，Opus 模型默认 `medium`。可用 `--executor-model`、`--executor-effort` 显式覆盖，Director 原生工具对应 `model`、`executor_effort` 字段。ACP 驱动支持 CLI 服务的 `thought_level` 选项。续接会话时，只有显式指定模型才切换。
 
 The CLI server returns the signed-in account's full model catalog to `codex-companion`; no client-name override is needed.
 
@@ -614,7 +614,7 @@ Keep the new runtime's credentials and sessions in its own home. Credentials can
 
 ## ACP director controls
 
-Omitting dispatch's executor uses `CODEX_DIRECTOR_EXECUTOR`, else Codex. Select `executor: "codex"` explicitly when needed. Review ignores this default; continue restores its thread and rejects an executor or launch-configuration mismatch. New agy sessions default in the driver to gemini-pro-orchestrator (no effort option); explicitly chosen models default to high, Opus to medium; continuation preserves the existing effort unless explicitly supplied.
+Omitting dispatch's executor uses `CODEX_DIRECTOR_EXECUTOR`, else Codex. Select `executor: "codex"` explicitly when needed. Review ignores this default; continue restores its thread and rejects an executor or launch-configuration mismatch. New agy sessions default in the driver to gemini-pro-orchestrator-neon (no effort option); explicitly chosen models default to high, Opus to medium; continuation preserves the existing effort unless explicitly supplied.
 
 ACP workers inject `CODEX_ACP_CONTROL_ENDPOINT` and `CODEX_ACP_COMPANION_PATH` before spawning the agent.
 

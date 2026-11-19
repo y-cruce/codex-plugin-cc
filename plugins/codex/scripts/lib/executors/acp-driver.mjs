@@ -471,7 +471,7 @@ export class AcpExecutorJobPort {
     const response = await this.connection.newSession(params);
     this.startupPhase = "ready";
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
-    const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-pro-orchestrator" : null);
+    const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-pro-orchestrator-neon" : null);
     await this.applyModel(response.sessionId, response, modelId);
     // Orchestrator models expose no thought_level; default effort only where the model offers one.
     const defaultEffort = antigravity && findReasoningEffortOption(response.configOptions)
