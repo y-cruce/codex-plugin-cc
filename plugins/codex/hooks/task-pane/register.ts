@@ -6,7 +6,7 @@ import type { DirectorTools } from '../director-tools/register.ts'
 import { clip, elapsed } from '../live-tool-row/format.ts'
 import { isOver, latestRound, PANE_USER_PREFIX } from '../live-tool-row/view.ts'
 import type { LiveView } from '../live-tool-row/view.ts'
-import { composerRows, paneBody } from './pane.ts'
+import { composerRows, hasActiveRound, paneBody } from './pane.ts'
 import type { PaneView } from './pane.ts'
 import { activityState, activityRequests, activityText, finishActivity } from './activity.ts'
 import type { ActivityState, ActivityEntry, ActivityRequest } from './activity.ts'
@@ -655,9 +655,9 @@ function viewDataDir(state: State, view: LiveView): string | null {
   return null
 }
 
-function settleSentDraft(state: State, recordId: string, delivery: Delivery, raw: string) {
+function settleSentDraft(state: State, recordId: string, clearedOnSubmit: boolean, raw: string) {
   const current = state.drafts.get(recordId) ?? ''
-  if (delivery === 'steer') {
+  if (clearedOnSubmit) {
     if (!current) bumpInput(state, recordId, '')
     return
   }
@@ -665,22 +665,22 @@ function settleSentDraft(state: State, recordId: string, delivery: Delivery, raw
   else if (current.startsWith(raw)) bumpInput(state, recordId, current.slice(raw.length).replace(/^\n/, ''))
 }
 
-function restoreFailedDraft(state: State, recordId: string, delivery: Delivery, raw: string) {
+function restoreFailedDraft(state: State, recordId: string, clearedOnSubmit: boolean, raw: string) {
   const current = state.drafts.get(recordId) ?? ''
-  const restored = delivery === 'steer'
+  const restored = clearedOnSubmit
     ? (current && current !== raw ? `${raw}\n${current}` : raw)
     : (!current || current === raw ? raw : current.startsWith(raw) ? current : `${raw}\n${current}`)
   bumpInput(state, recordId, restored)
 }
 
-async function sendPaneMessage($: EngineInterface, state: State, view: LiveView, delivery: Delivery, raw: string) {
+async function sendPaneMessage($: EngineInterface, state: State, view: LiveView, delivery: Delivery, raw: string, clearedOnSubmit = false) {
   const recordId = view.recordId ?? view.jobId
   if (!state.script || state.replaced || state.leaving || state.sending.has(recordId) || !raw.trim()) return
   const epoch = state.epoch
   const jobId = view.activeRoundId ?? view.latestRoundId ?? view.jobId
   const cwd = viewCwd(state, view)
   const data = viewDataDir(state, view)
-  if (delivery === 'steer') state.drafts.set(recordId, '')
+  if (clearedOnSubmit) state.drafts.set(recordId, '')
   state.sending.set(recordId, delivery)
   state.notices.delete(recordId)
   $.ui.invalidate('ui.render')
@@ -693,21 +693,21 @@ async function sendPaneMessage($: EngineInterface, state: State, view: LiveView,
     )
     if (state.replaced || state.leaving || state.epoch !== epoch) return
     if (ran.exitCode === 0) {
-      settleSentDraft(state, recordId, delivery, raw)
+      settleSentDraft(state, recordId, clearedOnSubmit, raw)
       state.ticks = 0
       state.listedAt = 0
       $.clock.after(0, () => { void discoverRoots($, state).then(() => poll($, state)) })
     } else {
       const detail = ran.stderr.trim().split(/\r?\n/)[0] || ran.stdout.trim().split(/\r?\n/)[0] || `exited with code ${ran.exitCode}`
       const text = delivery === 'interrupt' ? `${detail} (turn may be cancelled; check status)` : detail
-      restoreFailedDraft(state, recordId, delivery, raw)
+      restoreFailedDraft(state, recordId, clearedOnSubmit, raw)
       state.notices.set(recordId, { text, error: true })
     }
   } catch (error) {
     if (state.replaced || state.leaving || state.epoch !== epoch) return
     const detail = error instanceof Error ? error.message : String(error)
     const text = delivery === 'interrupt' ? `${detail} (turn may be cancelled; check status)` : detail
-    restoreFailedDraft(state, recordId, delivery, raw)
+    restoreFailedDraft(state, recordId, clearedOnSubmit, raw)
     state.notices.set(recordId, { text, error: true })
   } finally {
     if (file) await discard($, file)
@@ -1896,7 +1896,7 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     state.paneRows = paneRows
     const fieldKey = shownId ? inputKey(state, shownId) : ''
     const draftText = shownId ? (state.drafts.get(shownId) ?? state.seeds.get(shownId) ?? '') : ''
-    const draftRows = shownId ? composerRows(draftText, paneColumns, paneRows, threads.length) : 1
+    const draftRows = shown && shownId ? composerRows(draftText, paneColumns, paneRows, threads.length, hasActiveRound(shown)) : 1
     if (shownId) state.inputRows.set(shownId, draftRows)
     const composer = shown && shownId && 'Input' in ui && ui.Input ? {
       Input: ui.Input,
@@ -1909,7 +1909,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       onInput: (value: string) => {
         state.drafts.set(shownId, value)
         const cleared = state.notices.delete(shownId)
-        const nextRows = composerRows(value, state.paneColumns, state.paneRows, visibleThreads(state).length)
+        const current = state.views.get(shownId) ?? shown
+        const nextRows = composerRows(value, state.paneColumns, state.paneRows, visibleThreads(state).length, hasActiveRound(current))
         const prevRows = state.inputRows.get(shownId) ?? 1
         if (cleared || nextRows !== prevRows) {
           state.inputRows.set(shownId, nextRows)
@@ -1918,7 +1919,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
       },
       onSubmit: (value: string) => {
         if (state.sending.has(shownId) || !value.trim()) return
-        void sendPaneMessage($, state, shown, 'steer', value)
+        const current = state.views.get(shownId) ?? shown
+        void sendPaneMessage($, state, current, hasActiveRound(current) ? 'steer' : 'queue', value, true)
       },
       onQueue: () => {
         if (!state.paneFocused || state.ring !== inputKey(state, shownId) || state.sending.has(shownId)) return

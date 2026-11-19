@@ -61,16 +61,28 @@ const PANE_PADDING_RIGHT = 2
 const SUBMIT_LABEL = 'steer'
 const FULL_HINT = '⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt'
 const SHORT_HINT = '⏎ steer · ^x⏎ queue · ^x^s interrupt'
-const HINT_SINGLE_WIDTH = cellWidth(' ⏎ steer')
-const HINT_MULTI_WIDE = cellWidth(' ⏎ steer · shift+⏎ new line')
-const HINT_MULTI_NARROW = cellWidth(' ⏎ steer · \\⏎ new line')
+const IDLE_SUBMIT_LABEL = 'new round'
+const IDLE_FULL_HINT = '⏎ new round · starts a follow-up in this thread'
+const IDLE_SHORT_HINT = '⏎ new round · same thread'
 const INPUT_MIN_COLUMNS = 12
 
-function inputWrapColumns(columns: number, multiline: boolean): number {
-  let hintWidth = HINT_SINGLE_WIDTH
+export function hasActiveRound(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundId'>): boolean {
+  if (view.activeRoundId !== undefined) return Boolean(view.activeRoundId)
+  return !isOver(view) && view.status !== 'queued'
+}
+
+function submitLabelFor(active: boolean): string {
+  return active ? SUBMIT_LABEL : IDLE_SUBMIT_LABEL
+}
+
+function inputWrapColumns(columns: number, multiline: boolean, submitLabel = SUBMIT_LABEL): number {
+  const single = cellWidth(` ⏎ ${submitLabel}`)
+  const multiWide = cellWidth(` ⏎ ${submitLabel} · shift+⏎ new line`)
+  const multiNarrow = cellWidth(` ⏎ ${submitLabel} · \\⏎ new line`)
+  let hintWidth = single
   if (multiline) {
-    if (columns - HINT_MULTI_WIDE >= columns / 2) hintWidth = HINT_MULTI_WIDE
-    else if (columns - HINT_MULTI_NARROW >= columns / 2) hintWidth = HINT_MULTI_NARROW
+    if (columns - multiWide >= columns / 2) hintWidth = multiWide
+    else if (columns - multiNarrow >= columns / 2) hintWidth = multiNarrow
   }
   const visibleColumns = Math.max(1, columns - PANE_PADDING_LEFT - PANE_PADDING_RIGHT - 2)
   return Math.min(visibleColumns, Math.max(1, Math.max(INPUT_MIN_COLUMNS, columns - hintWidth) - 1))
@@ -120,10 +132,11 @@ function wrappedLineCount(text: string, wrapCols: number): number {
   return Math.max(1, total)
 }
 
-export function composerRows(text: string, columns: number, rows: number, listLength: number): number {
+export function composerRows(text: string, columns: number, rows: number, listLength: number, active = true): number {
+  const submitLabel = submitLabelFor(active)
   const maxRows = Math.max(1, Math.min(Math.floor(rows / 2), rows - listLength - 7))
-  if (wrappedLineCount(text, inputWrapColumns(columns, false)) <= 1) return 1
-  return Math.min(maxRows, Math.max(2, wrappedLineCount(text, inputWrapColumns(columns, true))))
+  if (wrappedLineCount(text, inputWrapColumns(columns, false, submitLabel)) <= 1) return 1
+  return Math.min(maxRows, Math.max(2, wrappedLineCount(text, inputWrapColumns(columns, true, submitLabel))))
 }
 
 export function paneBody(
@@ -196,10 +209,15 @@ export function paneBody(
   const TAIL = 200
   const composerBlock = (() => {
     if (!composer) return []
+    const active = hasActiveRound(focused)
+    const submitLabel = submitLabelFor(active)
+    const fullHint = active ? FULL_HINT : IDLE_FULL_HINT
+    const shortHint = active ? SHORT_HINT : IDLE_SHORT_HINT
+    const hintSingleWidth = cellWidth(` ⏎ ${submitLabel}`)
     const inputWidth = Math.max(1, width - 2)
     const hintText = composer.sending
       ? clip(`Sending (${composer.sending})…`, inputWidth)
-      : cellWidth(FULL_HINT) <= inputWidth ? FULL_HINT : clip(SHORT_HINT, inputWidth)
+      : cellWidth(fullHint) <= inputWidth ? fullHint : clip(shortHint, inputWidth)
     // Claude Code 2.1.327's Input always draws ` ⏎ <submitLabel>` beside the
     // field while focused. Padding the focused placeholder to the clipped
     // viewport pushes that suffix past overflow:hidden while empty; once
@@ -221,13 +239,13 @@ export function paneBody(
           Box({
             flexDirection: 'column',
             flexShrink: 0,
-            ...(composer.focused ? { minWidth: Math.max(columns, inputWidth + HINT_SINGLE_WIDTH) } : { width: inputWidth }),
+            ...(composer.focused ? { minWidth: Math.max(columns, inputWidth + hintSingleWidth) } : { width: inputWidth }),
             children: [
               composer.Input({
                 key: composer.key,
                 value: composer.value,
                 placeholder,
-                submitLabel: SUBMIT_LABEL,
+                submitLabel,
                 rows: inputRows,
                 onInput: composer.onInput,
                 onSubmit: composer.onSubmit,

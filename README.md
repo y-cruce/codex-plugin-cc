@@ -102,7 +102,7 @@ rejection received before the original prompt completes fails the turn. Use `del
 next turn or an ACP agent without steering support; use
 `delivery: "interrupt"` when the current turn must stop.
 
-`delivery: "queue"` (or `/codex:message <job-id> --queue`) also works after the task has ended. When the thread has no active round, it starts a background follow-up in the same thread and returns `queuedJobId`, retaining the task name, write permissions and executor configuration. In the tasks pane, the input below the task list grows with the draft and sends directly to the selected task: `Enter` steers, `ctrl+x enter` queues (starting a new round when idle), and `ctrl+x ctrl+s` interrupts; messages carry a `[From user via tasks pane]` prefix and drafts stay per task.
+`delivery: "queue"` (or `/codex:message <job-id> --queue`) also works after the task has ended. When the thread has no active round, it starts a background follow-up in the same thread and returns `queuedJobId`, retaining the task name, write permissions and executor configuration. In the tasks pane, the input below the task list grows with the draft and sends directly to the selected task: `Enter` steers an active round or queues a new round when the task has no active round, `ctrl+x enter` queues, and `ctrl+x ctrl+s` interrupts; messages carry a `[From user via tasks pane]` prefix and drafts stay per task.
 
 主 agent 的 `mcp__codex__message` 省略 `delivery` 时，默认引导当前任务。Qoder 初始化声明
 `agentCapabilities._meta.qoder.promptQueueing: true`，且插件报告 `midTurnSteer: true` 时，
@@ -112,7 +112,7 @@ Qoder 可能已消费追加消息但一直不结束其 RPC，该未结束请求�
 原始请求完成前收到追加请求的明确拒绝，会使当前轮失败。未提供引导能力的 ACP 执行器，或明确要求下一轮执行时，
 使用 `delivery: "queue"`；需要停止当前轮时使用 `delivery: "interrupt"`。
 
-任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。任务面板的任务列表下方提供输入框（随内容增高），可直接向当前选中任务发消息：`Enter` 引导、`ctrl+x enter` 排队（空闲时开新一轮）、`ctrl+x ctrl+s` 打断；消息带 `[From user via tasks pane]` 前缀，草稿按任务独立保留。
+任务结束后也可以使用 `delivery: "queue"` 或 `/codex:message <job-id> --queue`。线程没有活动轮次时，会在同一线程启动后台续跑并返回 `queuedJobId`，沿用任务名、写入权限和执行器配置。任务面板的任务列表下方提供输入框（随内容增高），可直接向当前选中任务发消息：有活动轮次时 `Enter` 引导，没有活动轮次时 `Enter` 按排队开新一轮，`ctrl+x enter` 排队，`ctrl+x ctrl+s` 打断；消息带 `[From user via tasks pane]` 前缀，草稿按任务独立保留。
 
 ACP agents can advertise `_meta.steering.supported: true` at the initialize response's top level or under `agentCapabilities`. The plugin then calls the pre-standard `_session/steering` extension with `idleBehavior: "promptRequired"`. Only `outcome: "injected"` confirms insertion (`accepted: true`, `consumed: null`); `promptRequired` leaves the message with the caller. DSH's community adapter expose mid-turn input through this route. Servers that do not advertise it keep queue/interrupt behavior.
 

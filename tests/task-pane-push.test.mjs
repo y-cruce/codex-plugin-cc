@@ -2111,8 +2111,14 @@ test("pane composer maps steer/queue/interrupt to companion argv, derives plugin
       okReply: { exitCode: 0, stdout: JSON.stringify({ jobId: "job-a", interrupted: true }), stderr: "" },
       failTyped: "brand new", failExpected: "rejected msg\nbrand new",
     },
+    {
+      delivery: "queue", trigger: "submit", finished: true, flag: ["--queue"], pluginRoot: "/checkout/plugins/codex", dataName: "codex-inline",
+      expectedData: "/home/test/.claude/plugins/data/codex-inline",
+      okReply: { exitCode: 0, stdout: JSON.stringify({ jobId: "job-a", queued: true, queuedJobId: "task-q2" }), stderr: "" },
+      failTyped: "typed during fail", failExpected: "rejected msg\ntyped during fail",
+    },
   ];
-  for (const { delivery, flag, pluginRoot, dataName, fallback, expectedData, okReply, failTyped, failExpected } of cases) {
+  for (const { delivery, trigger, finished, flag, pluginRoot, dataName, fallback, expectedData, okReply, failTyped, failExpected } of cases) {
     const calls = [];
     let nextGate = null;
     const pane = await paneHarness(new Map(), undefined, "session", {
@@ -2127,11 +2133,25 @@ test("pane composer maps steer/queue/interrupt to companion argv, derives plugin
         return nextGate.promise;
       },
     });
+    if (finished) {
+      const endedAt = new Date().toISOString();
+      pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed", completedAt: endedAt });
+      pane.files.set(pane.viewPath, { ...pane.live, status: "completed", activeRoundId: null, endedAt });
+      pane.listing[0].status = "completed";
+      pane.listing[0].live = false;
+      pane.touch();
+      await pane.tick();
+    }
+    const viaSubmit = trigger === "submit" || delivery === "steer";
+    const expectedFull = finished ? "⏎ new round · starts a follow-up in this thread" : "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt";
+    const expectedShort = finished ? "⏎ new round · same thread" : "⏎ steer · ^x⏎ queue · ^x^s interrupt";
+    const expectedClipped = finished ? "⏎ new round · same thread" : "⏎ steer · ^x⏎ queue · ^x^s ";
+    const expectedSubmitLabel = finished ? "new round" : "steer";
     const fire = (tree, text) => {
       const box = findAll(tree, (n) => n.type === "Input")[0];
       const q = findAll(tree, (n) => n.type === "Button" && n.action === "chat:queueSubmit")[0];
       const i = findAll(tree, (n) => n.type === "Button" && n.action === "chat:sendNow")[0];
-      if (delivery === "steer") box.onSubmit(text);
+      if (viaSubmit) box.onSubmit(text);
       else if (delivery === "queue") q.onPress();
       else i.onPress();
     };
@@ -2140,13 +2160,14 @@ test("pane composer maps steer/queue/interrupt to companion argv, derives plugin
     assert.equal(findAll(unfocused, (n) => n.type === "Button" && n.action).length, 0);
     const initialInput = findAll(unfocused, (n) => n.type === "Input")[0];
     assert.equal(initialInput.rows, 1);
-    assert.equal(initialInput.placeholder, "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
-    assert.equal(findAll(await pane.renderTree({ bodyColumns: 48, isFocused: false }), (n) => n.type === "Input")[0].placeholder, "⏎ steer · ^x⏎ queue · ^x^s interrupt");
-    assert.equal(findAll(await pane.renderTree({ bodyColumns: 32, isFocused: false }), (n) => n.type === "Input")[0].placeholder, "⏎ steer · ^x⏎ queue · ^x^s ");
+    assert.equal(initialInput.submitLabel, expectedSubmitLabel);
+    assert.equal(initialInput.placeholder, expectedFull);
+    assert.equal(findAll(await pane.renderTree({ bodyColumns: 48, isFocused: false }), (n) => n.type === "Input")[0].placeholder, expectedShort);
+    assert.equal(findAll(await pane.renderTree({ bodyColumns: 32, isFocused: false }), (n) => n.type === "Input")[0].placeholder, expectedClipped);
     await pane.focus(initialInput.key);
     const focused = await pane.renderTree({ isFocused: true });
     const input = findAll(focused, (n) => n.type === "Input")[0];
-    assert.equal(input.placeholder.trimEnd(), "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
+    assert.equal(input.placeholder.trimEnd(), expectedFull);
     assert.equal(input.placeholder.length, 95);
     assert.ok(findAll(focused, (n) => n.type === "Button" && n.action === "chat:queueSubmit")[0]);
     assert.ok(findAll(focused, (n) => n.type === "Button" && n.action === "chat:sendNow")[0]);
@@ -2188,7 +2209,7 @@ test("pane composer maps steer/queue/interrupt to companion argv, derives plugin
     const clearedInput = findAll(afterOk, (n) => n.type === "Input")[0];
     assert.notEqual(clearedInput.key, input.key);
     assert.equal(clearedInput.value, "");
-    assert.equal(clearedInput.placeholder.trimEnd(), "⏎ steer · ctrl+x ⏎ queue · ctrl+x ctrl+s interrupt");
+    assert.equal(clearedInput.placeholder.trimEnd(), expectedFull);
     assert.doesNotMatch(JSON.stringify(afterOk), /Sent \(steer\)|Submitted \(steer\)|Queued as|Interrupted & sent|Sending \(/);
     assert.equal(findAll(afterOk, (n) => n.type === "Text" && n.color === "red").length, 0);
     const bottomRow = afterOk.children[0].children.at(-1);
@@ -2199,12 +2220,12 @@ test("pane composer maps steer/queue/interrupt to companion argv, derives plugin
     nextGate = Promise.withResolvers();
     fire(afterOk, "first msg");
     await drain();
-    clearedInput.onInput(delivery === "steer" ? "typed in flight" : "first msg\ntyped in flight");
+    clearedInput.onInput(viaSubmit ? "typed in flight" : "first msg\ntyped in flight");
     nextGate.resolve(okReply);
     await drain();
     const afterMidOk = await pane.renderTree({ isFocused: true });
     let nextTree = afterMidOk;
-    if (delivery === "steer") {
+    if (viaSubmit) {
       assert.equal(findAll(afterMidOk, (n) => n.type === "Input")[0].key, clearedInput.key);
       await pane.close();
       const reopened = await pane.renderTree({ isFocused: true });
