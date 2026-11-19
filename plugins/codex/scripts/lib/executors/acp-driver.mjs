@@ -234,6 +234,7 @@ export class AcpExecutorJobPort {
     this.updateTail = Promise.resolve();
     this.backgroundTimeoutMs = 30 * 60 * 1000;
     this.backgroundPollMs = 1000;
+    this.scheduleQuietMs = 25_000;
   }
 
   static async open(options) {
@@ -313,15 +314,7 @@ export class AcpExecutorJobPort {
     const stream = ndJsonStream(nodeWritable(this.proc.stdin), nodeReadable(this.proc.stdout));
     this.connection = new ClientSideConnection(() => ({
       requestPermission: (params) => this.requestPermission(params),
-      sessionUpdate: (params) => {
-        if (this.backgroundSnapshot) {
-          if (!["tool_call", "tool_call_update"].includes(params.update.sessionUpdate) ||
-              !this.backgroundSnapshot.has(String(params.update.toolCallId))) return Promise.resolve();
-          params = { ...params, update: { ...params.update, sessionUpdate: "tool_call_update" } };
-        }
-        this.updateTail = this.updateTail.then(() => this.adapter.accept(params));
-        return this.updateTail;
-      },
+      sessionUpdate: (params) => this.acceptSessionUpdate(params),
       createElicitation: (params) => this.createElicitation(params)
     }), stream);
     this.initializeResponse = await this.connection.initialize({ protocolVersion: PROTOCOL_VERSION,
@@ -335,6 +328,35 @@ export class AcpExecutorJobPort {
     this.antigravityPromptSteering = this.initializeResponse.agentInfo?.name === "Antigravity ACP Server";
     this.capabilities.midTurnSteer = this.steeringExtension || this.antigravityPromptSteering || (this.initializeResponse.agentInfo?.name === "qoder-cli" &&
       this.initializeResponse.agentCapabilities?._meta?.qoder?.promptQueueing === true);
+  }
+
+  noteSessionActivity(sessionId) {
+    const active = this.activeTurn;
+    if (!this.antigravityPromptSteering || !active || sessionId !== this.sessionId) return null;
+    active.lastUpdateAt = Date.now();
+    return active;
+  }
+
+  acceptSessionUpdate(params) {
+    const update = params.update;
+    if (this.backgroundSnapshot) {
+      if (!["tool_call", "tool_call_update"].includes(update.sessionUpdate) ||
+          !this.backgroundSnapshot.has(String(update.toolCallId))) return Promise.resolve();
+      params = { ...params, update: { ...update, sessionUpdate: "tool_call_update" } };
+    } else {
+      const active = this.noteSessionActivity(params.sessionId);
+      if (active && update.sessionUpdate === "tool_call" && update.name === "schedule") {
+        active.scheduleStarts.set(String(update.toolCallId), active.lastUpdateAt);
+      }
+      const schedule = active?.scheduleWait;
+      if (schedule) {
+        if (update.sessionUpdate === "agent_message_chunk" && update.content?.text?.trim()) schedule.answered = true;
+        if (["agent_thought_chunk", "tool_call"].includes(update.sessionUpdate) ||
+            (update.sessionUpdate === "tool_call_update" && update.name === "schedule")) schedule.answered = false;
+      }
+    }
+    this.updateTail = this.updateTail.then(() => this.adapter.accept(params));
+    return this.updateTail;
   }
 
   events() { return this.queue; }
@@ -529,7 +551,7 @@ export class AcpExecutorJobPort {
     const turnId = `turn:${crypto.randomUUID()}`;
     await this.adapter.startTurn(turnId, request.prompt);
     const active = { turnId, interrupting: false, cancelling: false, accepting: true, messages: [], error: null,
-      stderrOffset: this.stderr.length };
+      stderrOffset: this.stderr.length, lastUpdateAt: Date.now(), scheduleStarts: new Map() };
     this.activeTurn = active;
     const failed = new Promise((_, reject) => { active.fail = reject; });
     active.response = this.promptResponse(request.prompt, request.sessionId);
@@ -547,12 +569,15 @@ export class AcpExecutorJobPort {
         if (active.error) throw active.error;
         if (!this.antigravityPromptSteering || value.stopReason !== "end_turn" ||
             active.interrupting || active.cancelling) break;
-        const commands = this.runningCommands().filter(tool => tool.rawInput?.IsDaemon !== true);
-        if (!commands.length) break;
-        const waited = await this.waitForBackgroundCommands(active);
-        if (waited === "stopped") { value = { stopReason: "cancelled" }; break; }
+        const tools = this.pendingTools();
+        const commands = tools.filter(tool => tool.kind === "execute");
+        const scheduled = tools.some(tool => tool.name === "schedule");
+        if (!commands.length && !scheduled) break;
+        const resumeCommands = await this.waitForBackgroundWork(active, commands, scheduled);
+        if (resumeCommands === "stopped") { value = { stopReason: "cancelled" }; break; }
+        if (!resumeCommands.length) break;
         active.response = this.promptResponse([{ type: "text", text:
-          `你启动的后台命令已结束：\n${commands.map(tool => tool.title).join("\n")}\n根据命令结果继续完成原任务，不要重新执行这些命令。` }]);
+          `你启动的后台命令已结束：\n${resumeCommands.map(tool => tool.title).join("\n")}\n根据命令结果继续完成原任务，不要重新执行这些命令。` }]);
       }
       active.accepting = false;
       await this.updateTail;
@@ -569,64 +594,109 @@ export class AcpExecutorJobPort {
     return { turnId, done: active.done };
   }
 
-  runningCommands() {
-    return [...this.adapter.tools.values()].filter(tool => tool.kind === "execute" &&
-      !["completed", "failed"].includes(tool.status));
+  pendingTools() {
+    return [...this.adapter.tools.values()].filter(tool => !["completed", "failed"].includes(tool.status) &&
+      !(tool.kind === "execute" && tool.rawInput?.IsDaemon === true));
   }
 
-  async waitForBackgroundCommands(active) {
-    if (!active.backgroundExpired) active.backgroundExpired = new Promise(resolve => {
+  waitForScheduleIdle(active) {
+    return new Promise(resolve => {
+      const check = () => {
+        const now = Date.now();
+        const remaining = active.lastUpdateAt + this.backgroundTimeoutMs - now;
+        if (remaining > 0) {
+          active.backgroundTimer = setTimeout(check, remaining);
+        } else if (this.pendingTools().some(tool => tool.name === "schedule" &&
+            active.scheduleStarts.get(String(tool.toolCallId)) + tool.rawInput?.DurationSeconds * 1000 > now)) {
+          active.backgroundTimer = setTimeout(check, this.backgroundPollMs);
+        } else resolve("timeout");
+      };
+      check();
+    });
+  }
+
+  async waitForBackgroundWork(active, commands, scheduled) {
+    if (scheduled) {
+      clearTimeout(active.backgroundTimer);
+      active.backgroundExpired = this.waitForScheduleIdle(active);
+    } else if (!active.backgroundExpired) active.backgroundExpired = new Promise(resolve => {
       active.backgroundTimer = setTimeout(() => resolve("timeout"), this.backgroundTimeoutMs);
     });
-    active.waitingForCommands = true;
-    this.onProgress?.({ message: "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
+    const schedule = scheduled ? { answered: false } : null;
+    active.scheduleWait = schedule;
+    active.waitingForBackgroundWork = true;
+    this.onProgress?.({ message: scheduled ? "agy 本轮已结束，正在等待定时接续和后台工具完成。" :
+      "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
     const stopped = () => active.interrupting || active.cancelling;
+    let resumeCommands = scheduled ? [] : commands;
     try {
       while (!stopped()) {
-        const running = this.runningCommands().filter(tool => tool.rawInput?.IsDaemon !== true);
-        if (!running.length) return "completed";
-        this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+        await this.updateTail;
+        if (stopped()) return "stopped";
+        const pending = this.pendingTools();
+        const running = pending.filter(tool => tool.kind === "execute");
+        // agy resumes a fired timer on its own and streams updates without a
+        // prompt response. Keep history replay out of that live update stream.
+        const scheduleActive = schedule && (!schedule.answered || pending.some(tool => tool.kind !== "execute") ||
+          Date.now() - active.lastUpdateAt < this.scheduleQuietMs);
         let outcome;
-        const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
-          if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
-          throw error;
-        });
-        try {
-          outcome = await Promise.race([
-            load,
-            active.backgroundStopped, active.backgroundExpired
-          ]);
-          if (outcome === "stopped") {
-            let timer;
-            try {
-              await Promise.race([load, new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error("Timed out waiting for the in-flight session/load.")), this.cancelTimeoutMs);
-              })]);
-            } catch (error) {
-              this.proc.kill("SIGKILL");
-              await this.connection.closed.catch(() => {});
-              throw Object.assign(new Error(
-                `ACP session/load did not settle after interruption; connection closed and replacement prompt was not delivered: ${error.message}`,
-                { cause: error }), { code: "TRANSPORT_CLOSED" });
-            } finally { clearTimeout(timer); }
-          }
-          await this.updateTail;
-        } finally { this.backgroundSnapshot = null; }
-        if (outcome === "stopped" || stopped()) return "stopped";
-        if (outcome !== "timeout" && !this.runningCommands().some(tool => tool.rawInput?.IsDaemon !== true)) return "completed";
+        if (!scheduleActive) {
+          if (!running.length) return resumeCommands;
+          if (scheduled && !resumeCommands.length) resumeCommands = running;
+          outcome = await this.loadBackgroundCommands(active, running);
+          if (outcome === "stopped" || stopped()) return "stopped";
+          if (outcome !== "timeout" && !this.pendingTools().some(tool => tool.kind === "execute")) continue;
+        }
         if (outcome !== "timeout") {
           let timer;
           outcome = await Promise.race([new Promise(resolve => { timer = setTimeout(resolve, this.backgroundPollMs); }),
             active.backgroundStopped, active.backgroundExpired]);
           clearTimeout(timer);
         }
-        if (outcome === "timeout") throw Object.assign(new Error(
-          "agy 结束本轮时仍有后台命令在运行，等待已达到 30 分钟上限。请 continue 此会话核对结果。\n" +
-          this.runningCommands().map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")),
-        { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
+        if (outcome === "timeout") {
+          const unfinished = this.pendingTools().filter(tool => scheduled || tool.kind === "execute");
+          const message = scheduled ? "agy 定时接续尚未完成，已空闲 30 分钟且没有待触发的定时任务。" :
+            "agy 结束本轮时仍有后台命令在运行，等待已达到 30 分钟上限。";
+          throw Object.assign(new Error(message + "请 continue 此会话核对结果。\n" +
+            unfinished.map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")), { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
+        }
       }
       return "stopped";
-    } finally { active.waitingForCommands = false; }
+    } finally {
+      if (scheduled) {
+        clearTimeout(active.backgroundTimer);
+        active.backgroundExpired = null;
+      }
+      active.waitingForBackgroundWork = false;
+      active.scheduleWait = null;
+    }
+  }
+
+  async loadBackgroundCommands(active, running) {
+    this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+    const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
+      if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
+      throw error;
+    });
+    try {
+      const outcome = await Promise.race([load, active.backgroundStopped, active.backgroundExpired]);
+      if (outcome === "stopped") {
+        let timer;
+        try {
+          await Promise.race([load, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Timed out waiting for the in-flight session/load.")), this.cancelTimeoutMs);
+          })]);
+        } catch (error) {
+          this.proc.kill("SIGKILL");
+          await this.connection.closed.catch(() => {});
+          throw Object.assign(new Error(
+            `ACP session/load did not settle after interruption; connection closed and replacement prompt was not delivered: ${error.message}`,
+            { cause: error }), { code: "TRANSPORT_CLOSED" });
+        } finally { clearTimeout(timer); }
+      }
+      await this.updateTail;
+      return outcome;
+    } finally { this.backgroundSnapshot = null; }
   }
 
   promptResponse(prompt, sessionId = this.sessionId) {
@@ -649,8 +719,9 @@ export class AcpExecutorJobPort {
     if (this.questions.size || this.permissions.size) {
       throw Object.assign(new Error(pendingQuestionSteerMessage(this.liveStatus().questions)), { code: "INVALID_STATE" });
     }
-    if (this.antigravityPromptSteering && active.waitingForCommands) {
-      throw Object.assign(new Error("agy 正在等后台命令结束（本轮已提前结束），当前不能 steer；请用 queue 留到下一轮，或用 interrupt"),
+    if (this.antigravityPromptSteering && active.waitingForBackgroundWork) {
+      const waiting = active.scheduleWait ? "定时接续" : "后台命令";
+      throw Object.assign(new Error(`agy 正在等${waiting}结束（本轮已提前结束），当前不能 steer；请用 queue 留到下一轮，或用 interrupt`),
         { code: "INVALID_STATE" });
     }
     if (!Array.isArray(request.prompt) || !request.prompt.length ||
@@ -822,6 +893,7 @@ export class AcpExecutorJobPort {
   }
 
   async requestPermission(params) {
+    this.noteSessionActivity(params.sessionId);
     if (this.failure) return { outcome: { outcome: "cancelled" } };
     // The tool this asks about was announced by an earlier update, and the
     // adapter applies updates asynchronously while the protocol delivers this
@@ -857,6 +929,7 @@ export class AcpExecutorJobPort {
   }
 
   createElicitation(params, method = "elicitation/create") {
+    this.noteSessionActivity(params.sessionId);
     if (this.failure) return Promise.resolve({ action: "cancel" });
     const requestId = `question:${crypto.randomUUID()}`;
     const receivedAt = new Date().toISOString();

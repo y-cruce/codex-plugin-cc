@@ -32,14 +32,33 @@ a message confirms submission, without a separate model-consumption receipt.
 Queue, interrupt, cancel and continue retain the usual director controls.
 
 Steering works while agy's prompt is active, including while commands run.
-When agy returns `end_turn` with unfinished commands, the job stays running.
-The driver refuses steering during this wait and offers queue or interrupt.
-It reads native tool statuses with `session/load`, filters out history replay,
-and sends a continuation prompt in the same job and turn once they finish.
-Repeated waits share a 30-minute limit. On timeout the task fails with the
-explicit warning `agy 结束本轮时仍有后台命令在运行` and the remaining commands.
-Queue, interrupt and cancel remain available during waiting. Commands marked
-with the native `run_command` field `IsDaemon: true` are not waited on.
+When agy returns `end_turn` with unfinished commands or a pending `schedule`,
+the job stays running. The driver checks command statuses with `session/load`,
+filters history replay, and sends a continuation prompt once the commands
+finish. For a scheduled follow-up, it keeps the ACP connection open and
+collects agy's native updates in the same job and turn. It defers command
+snapshots during the native follow-up to keep replay separate from live output.
+Command-only waits share a cumulative 30-minute limit. A scheduled follow-up
+times out after 30 minutes without a live session event once all pending
+timers have reached their deadlines. A timer's deadline is its tool start
+time plus `DurationSeconds`. A timeout reports the outstanding tools.
+During the wait, use queue, interrupt, or cancel. Commands marked
+`IsDaemon: true` are excluded from the wait.
+
+Direct stdio probes with `agy acp` 1.5.12 observed a one-shot `schedule` remain
+`in_progress` past the original prompt's `end_turn`. At the requested time the
+CLI pushed a `completed` tool update, then ran the scheduled prompt and streamed
+its output without a new `session/prompt`. Closing stdio before the timer fired
+exited the process. Loading the same session in a new process after the deadline
+replayed the first reply and the completed tool row, with no scheduled reply.
+An explicit `session/cancel` before the deadline also stopped the follow-up.
+
+The native follow-up sends no second `end_turn`. A two-read probe saw
+`usage_update` before the first tool call, between tool calls, and after the
+final answer. The driver therefore infers completion from assistant text after
+the latest scheduled work, terminal tool statuses, and 25 seconds without a
+new ACP update. The longest observed gap from timer completion to a live
+follow-up update was 20.8 seconds. Each live update restarts the quiet period.
 
 This is recovery from the observed premature response, not a guarantee that
 every native agent task finishes correctly. A three-run comparison per model
@@ -70,5 +89,8 @@ instead of the new preset.
 
 派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 gemini-pro-orchestrator-neon（没有思考强度选项），
 显式选其他模型默认 high，Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的
-新 prompt，等待最新响应后结束原任务。回退时一起撤销插件和调度规则的迁移
+新 prompt，等待最新响应后结束原任务。提前 `end_turn` 时，原任务继续等待
+后台命令或 `schedule`。仅有后台命令时累计等待上限为 30 分钟。定时接续在连续
+30 分钟未收到会话事件且没有未到点的定时任务时超时。agy 自行执行定时接续，驱动在同一
+job 收取输出，并根据工具状态、助手输出和 25 秒无新事件推断结束。回退时一起撤销插件和调度规则的迁移
 提交，恢复旧代理和预设；旧安装及启动器保留在原处。

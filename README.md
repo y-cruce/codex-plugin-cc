@@ -578,13 +578,15 @@ CLI 服务直接向 `codex-companion` 返回账号可用的完整模型列表。
 
 Dispatch with `executor: "antigravity"` to run the installed CLI's `agy acp` (verified with 1.5.6), reusing its login and MCP configuration. The preset prefers `~/.local/bin/agy`, then PATH, avoiding terminal wrappers when the local binary exists. Override it with `executor_command` or `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND`; `executor_args` defaults to `["acp"]`, permissions to `allow-once`. Continue with the returned session id. For direct companion calls:
 
-Steering works while agy's prompt is active, including while commands run. When agy ends a prompt with unfinished commands, the job waits for their native statuses and automatically continues in the same job. The driver refuses steer during this wait. Use queue or interrupt. Waits share a 30-minute limit and exclude native `IsDaemon: true` commands. See [background recovery and rollback](plugins/codex/scripts/agy-acp/README.md).
+Steering works while agy's prompt is active, including while commands run. When agy ends a prompt with unfinished commands or a pending `schedule`, the driver keeps the same job running. Command-only waits share a cumulative 30-minute limit and exclude `IsDaemon: true` commands. A scheduled follow-up times out after 30 minutes with no session events and no timer still due to fire. During the wait, use queue, interrupt, or cancel. See [background recovery and rollback](plugins/codex/scripts/agy-acp/README.md).
 
 ```bash
 node plugins/codex/scripts/codex-companion.mjs task --executor acp --executor-command "$HOME/.local/bin/agy" --executor-args '["acp"]' --executor-permissions allow-once --json "Inspect the project"
 ```
 
 派单传 `executor: "antigravity"`，启动 CLI 自带的 `agy acp`（已验证 1.5.6），复用 CLI 登录和 MCP 配置。优先使用 `~/.local/bin/agy`，其次查 PATH；可用 `executor_command` 或 `CODEX_DIRECTOR_ANTIGRAVITY_COMMAND` 指定程序。`executor_args` 默认 `["acp"]`，权限默认 `allow-once`。后续使用返回的 session id 继续对话。
+
+agy 提前 `end_turn` 时，原 job 会继续等待尚未结束的后台命令或待触发的 `schedule`，并收取 agy 自行定时接续的输出。仅有后台命令时累计等待上限为 30 分钟，排除 `IsDaemon: true` 的命令。定时接续在连续 30 分钟未收到会话事件且没有未到点的定时任务时超时。等待期间可排队、打断或取消。
 
 The subprocess inherits the companion's network environment and reads `~/.gemini/config/mcp_config.json` itself, including `serverUrl` entries.
 
