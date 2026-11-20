@@ -88,7 +88,8 @@ const TOOLS = [
       + 'each { "answers": ["..."] }: the `ids=` list on the question event line, or job.live.questions in status. '
       + 'Never guess a key to find out the ids. Put the chosen option label (or free text) first; add a second entry '
       + '"user_note: <why, and the scope, conditions or hand-off the job must keep>" whenever the choice alone does not say it. '
-      + 'A permission question (id optionId, how agy asks) takes exactly one option; send its note with message after ANSWERED. '
+      + 'agy pairs each qN with a free-text qN_other: start it with the chosen label, then the note. '
+      + 'A permission question (id optionId) takes exactly one option; send its note with message after ANSWERED. '
       + 'Returns ANSWERED or ANSWER_FAILED; on "still pending after answer" check status before answering again.',
     inputSchema: {
       type: 'object',

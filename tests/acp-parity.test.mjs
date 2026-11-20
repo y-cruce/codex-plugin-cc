@@ -121,6 +121,17 @@ test("the shell question uses the existing answer path and keeps free text and a
   await assert.rejects(cancelled, /cancelled/);
 });
 
+test("an agy form answer sends the option value and the note in its other field", async () => {
+  const { port } = portFixture();
+  const reply = port.createElicitation({ message: "Which?", requestedSchema: { type: "object", properties: {
+    q1: { type: "string", oneOf: [{ const: "1", title: "A (Recommended)" }, { const: "2", title: "B" }] },
+    q1_other: { type: "string", title: "Other" } } } });
+  const [pending] = port.questions.values();
+  await port.answerQuestion({ requestId: pending.requestId, action: "accept",
+    values: { q1: { answers: ["A (Recommended)"] }, q1_other: { answers: ["keep the old path"] } } });
+  assert.deepEqual(await reply, { action: "accept", content: { q1: "1", q1_other: "keep the old path" } });
+});
+
 test("agy session scope keeps additional roots and HOME and names the shell directory", () => {
   const { port } = portFixture();
   const params = port.sessionRequest({ cwd: "/tmp/task", additionalDirectories: ["/tmp/extra"] }).params;

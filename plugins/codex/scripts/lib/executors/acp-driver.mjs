@@ -99,16 +99,19 @@ function permissionQuestion(entry) {
     expiresAt: entry.payload.expiresAt ?? null };
 }
 
-// A string field holds one value, so a note after the choice joins it on a new
-// line. An agent's own option list keeps the choice alone to stay valid; the
-// options of an ask-director question only label the answer.
+// The director names an option by its label; the agent expects its value (agy
+// drops a choice whose value it does not know). A string field holds one value,
+// so a note after the choice joins it on a new line. An agent's own option list
+// keeps the choice alone to stay valid; the options of an ask-director question
+// only label the answer.
 function elicitationContent(values, fields, freeText = false) {
   return Object.fromEntries(Object.entries(values ?? {}).map(([id, value]) => {
     if (!Array.isArray(value?.answers)) return [id, value];
     const field = fields.find((item) => item.id === id);
-    if (field?.rawSchema.type === "array") return [id, value.answers];
+    const answers = value.answers.map((answer) => field?.options?.find((option) => option.label === answer)?.value ?? answer);
+    if (field?.rawSchema.type === "array") return [id, answers];
     const joined = field?.rawSchema.type === "string" && (freeText || !field.options);
-    return [id, joined ? value.answers.join("\n") : value.answers[0]];
+    return [id, joined ? answers.join("\n") : answers[0]];
   }));
 }
 

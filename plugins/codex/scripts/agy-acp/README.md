@@ -25,6 +25,13 @@ level. Other explicit models default to high thinking, Opus to medium; explicit 
 server exposes effort as `thought_level`. Continued sessions retain their
 existing settings unless explicitly overridden.
 
+agy asks native questions through `elicitation/create`, since the driver
+advertises form elicitation. Each question `qN` is a string field whose `oneOf`
+lists the options, paired with an optional free-text field `qN_other`. agy
+drops a choice whose `const` it does not recognize, so the driver sends the
+value of the option the director names by label. The director puts its note in
+`qN_other`, and agy hands the model both as `A1: <option>, <note>`.
+
 Running corrections use another `session/prompt` on the same session. The
 server settles the previous prompt when steering arrives; the driver waits
 for the newest response before completing the original job and turn. Sending
