@@ -107,14 +107,14 @@ test("ACP notifications retain unacknowledged notes and publish under the curren
   await assert.rejects(port.notifyDirector("x".repeat(401)), /400/);
 });
 
-test("the shell question uses the existing answer path and accepts free text", async () => {
+test("the shell question uses the existing answer path and keeps free text and a note", async () => {
   const { port, events } = portFixture();
   const reply = port.askDirector("Which source?", ["First", "Second"]);
   const [pending] = port.questions.values();
   assert.equal(events[0].source.method, "executor/ask-director");
   assert.deepEqual(port.liveStatus().questions[0].questions[0].options.map(option => option.label), ["First", "Second"]);
-  await port.answerQuestion({ requestId: pending.requestId, action: "accept", values: { answer: { answers: ["Use another source"] } } });
-  assert.deepEqual(await reply, { answer: "Use another source" });
+  await port.answerQuestion({ requestId: pending.requestId, action: "accept", values: { answer: { answers: ["Use another source", "user_note: First is stale"] } } });
+  assert.deepEqual(await reply, { answer: "Use another source\nuser_note: First is stale" });
   assert.ok(events.some(event => event.type === "question.closed"));
   const cancelled = port.askDirector("Try again?", ["A", "B"]);
   await port.cancelPending();

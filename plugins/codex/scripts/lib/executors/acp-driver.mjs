@@ -99,11 +99,16 @@ function permissionQuestion(entry) {
     expiresAt: entry.payload.expiresAt ?? null };
 }
 
-function elicitationContent(values, fields) {
+// A string field holds one value, so a note after the choice joins it on a new
+// line. An agent's own option list keeps the choice alone to stay valid; the
+// options of an ask-director question only label the answer.
+function elicitationContent(values, fields, freeText = false) {
   return Object.fromEntries(Object.entries(values ?? {}).map(([id, value]) => {
     if (!Array.isArray(value?.answers)) return [id, value];
     const field = fields.find((item) => item.id === id);
-    return [id, field?.rawSchema.type === "array" ? value.answers : value.answers[0]];
+    if (field?.rawSchema.type === "array") return [id, value.answers];
+    const joined = field?.rawSchema.type === "string" && (freeText || !field.options);
+    return [id, joined ? value.answers.join("\n") : value.answers[0]];
   }));
 }
 
@@ -953,7 +958,8 @@ export class AcpExecutorJobPort {
     this.questions.delete(String(request.requestId));
     clearTimeout(pending.timer);
     const response = request.action === "accept"
-      ? { action: "accept", content: elicitationContent(request.values, pending.payload.fields) } : { action: request.action };
+      ? { action: "accept", content: elicitationContent(request.values, pending.payload.fields,
+        pending.method === "executor/ask-director") } : { action: request.action };
     pending.resolve(response);
     await this.adapter.emit("question.resolved", { requestId: pending.requestId, action: request.action,
       values: request.values ?? null }, { requestId: pending.requestId }, response, pending.method);
