@@ -15,6 +15,7 @@ import { DirectorChannel } from "../plugins/codex/scripts/director-channel.mjs";
 import { acceptDirectorEvents, eventFromRef, eventPaths } from "../plugins/codex/scripts/lib/director-delivery.mjs";
 import { ObservationClient } from "../plugins/codex/scripts/lib/observation-client.mjs";
 import { listJobs, writeJobFile, upsertJob, readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { threadRecordPaths } from "../plugins/codex/scripts/lib/thread-records.mjs";
 import { createJobLogFile, createProgressReporter, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run, runCompanionInProcess, waitFor, within } from "./helpers.mjs";
 import { createFakeAcpProcess } from "./fake-acp-agent.mjs";
@@ -125,6 +126,7 @@ test("interruption drains a late load replay before replacement and closes a loa
     upsertJob(cwd, job);
     const port = await AcpExecutorJobPort.open({ cwd, job, command: process.execPath, args: [AGENT],
       cancelTimeoutMs: stall ? 10 : 1000, env: { ...process.env, HOME: cwd, ACP_FAKE_AGENT_NAME: "Antigravity ACP Server" } });
+    port.backgroundReplayQuietMs = 20;
     try {
       await port.startSession({ modelId: "efficient" });
       const turn = await port.startTurn({ sessionId: port.sessionId, prompt: [{ type: "text", text: "task" }] });
@@ -149,6 +151,118 @@ test("interruption drains a late load replay before replacement and closes a loa
         assert.equal(JSON.stringify(terminal).includes("OLD REPLAY"), false);
       }
     } finally { await port.close(); }
+  }
+});
+
+test("agy filters load replay after the response and finishes its continuation before the queued job", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  initGitRepo(cwd);
+  const prompts = [];
+  const events = [];
+  const command = { sessionUpdate: "tool_call", toolCallId: "background-command", title: "npm test", kind: "execute" };
+  const message = text => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  let agent, port, releaseLoad, loadReturned, originalJobId, originalView;
+  useInProcessAgent(t, fake => {
+    agent = fake;
+    agent.prompt = async ({ sessionId, prompt }) => {
+      const text = prompt[0].text;
+      prompts.push(text);
+      if (text === "task") {
+        await agent.update(sessionId, message("Waiting for npm test"));
+        await agent.update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Before continuation" } });
+        await agent.update(sessionId, { ...command, status: "in_progress" });
+      } else if (text.startsWith("你启动的后台命令已结束")) {
+        await agent.update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "After continuation" } });
+        await agent.update(sessionId, message("Final report"));
+        await agent.update(sessionId, { sessionUpdate: "usage_update", used: 12, size: 100 });
+      } else {
+        assert.equal(text, "Queued follow-up");
+        assert.equal(readJobFile(resolveJobFile(cwd, originalJobId)).result.rawOutput, "Final report");
+        await agent.update(sessionId, message("Queued report"));
+      }
+      return { stopReason: "end_turn" };
+    };
+    agent.loadSession = async ({ sessionId }) => {
+      await new Promise(resolve => { releaseLoad = resolve; });
+      await agent.update(sessionId, { ...command, status: "completed" });
+      return {};
+    };
+  });
+  const open = AcpExecutorJobPort.open.bind(AcpExecutorJobPort);
+  t.mock.method(AcpExecutorJobPort, "open", async options => {
+    port = await open(options);
+    originalJobId = port.job.id;
+    port.backgroundReplayQuietMs = 200;
+    const push = port.queue.push.bind(port.queue);
+    t.mock.method(port.queue, "push", event => {
+      events.push(event);
+      return push(event);
+    });
+    const load = port.connection.loadSession.bind(port.connection);
+    t.mock.method(port.connection, "loadSession", async params => {
+      const response = await load(params);
+      loadReturned = true;
+      return response;
+    });
+    const startQueuedRound = port.startQueuedRound.bind(port);
+    t.mock.method(port, "startQueuedRound", async (...args) => {
+      assert.equal(port.activeTurn, null);
+      await agent.update(port.sessionId, message("POST-TURN REPLAY"));
+      await new Promise(setImmediate);
+      await port.updateTail;
+      assert.doesNotMatch(JSON.stringify([...port.adapter.messages.values()]), /POST-TURN REPLAY/);
+      const stateDir = path.dirname(path.dirname(resolveJobFile(cwd, originalJobId)));
+      originalView = fs.readFileSync(threadRecordPaths(stateDir, port.recordId).liveView, "utf8");
+      return startQueuedRound(...args);
+    });
+    return port;
+  });
+  const running = runCompanionInProcess(SCRIPT,
+    ["task", "--cwd", cwd, "--executor", "acp", "--executor-command", process.execPath, "--executor-args",
+      JSON.stringify([AGENT]), "--executor-model", "efficient", "--json", "task"],
+    { cwd, env: { ...process.env, HOME: cwd, ACP_FAKE_AGENT_NAME: "Antigravity ACP Server" } });
+  const finished = Promise.race([running.then(() => { throw new Error("Task finished before load replay"); }),
+    waitFor(() => releaseLoad, "pending load")]);
+  try {
+    await finished;
+    const { queuedJobId } = await port.queuePrompt({ turnId: port.activeTurn.turnId,
+      prompt: [{ type: "text", text: "Queued follow-up" }] });
+    releaseLoad();
+    await waitFor(() => loadReturned, "load response");
+    assert.deepEqual(prompts, ["task"]);
+    for (const update of [
+      message("OLD REPLAY"),
+      { ...command, toolCallId: "old-command", title: "OLD REPLAY COMMAND", status: "in_progress" },
+      { sessionUpdate: "usage_update", used: 999, size: 1000 },
+      { ...command, status: "in_progress" },
+      { ...command, status: "completed" }
+    ]) await agent.update(port.sessionId, update);
+
+    const result = await running;
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).rawOutput, "Final report");
+    assert.equal(prompts.length, 3);
+    assert.equal(prompts[2], "Queued follow-up");
+    const job = readJobFile(resolveJobFile(cwd, originalJobId));
+    const messages = job.result.terminal.finalMessages;
+    assert.deepEqual(messages.filter(item => item.role === "assistant").map(item => item.text), ["Waiting for npm test", "Final report"]);
+    assert.deepEqual(events.filter(event => event.type === "reasoning.completed").map(event => event.payload.message.text),
+      ["Before continuation", "After continuation"]);
+    assert.equal(events.filter(event => event.type === "command.completed").length, 1);
+    assert.deepEqual(events.filter(event => event.type === "usage.updated").map(event => event.payload.usage.contextUsed), [12]);
+    assert.equal(readJobFile(resolveJobFile(cwd, queuedJobId)).result.rawOutput, "Queued report");
+    const log = fs.readFileSync(job.logFile, "utf8");
+    assert.equal([...log.matchAll(/\$ npm test \(exit \?\)/g)].length, 1);
+    assert.doesNotMatch(log, /OLD REPLAY|POST-TURN REPLAY/);
+    assert.doesNotMatch(originalView, /OLD REPLAY|old-command|POST-TURN REPLAY/);
+    const view = JSON.parse(originalView);
+    assert.equal(view.usage.contextUsed, 12);
+    assert.equal(view.lastMessage.text, "Final report");
+  } finally {
+    releaseLoad?.();
+    await port?.close();
+    await running.catch(() => {});
   }
 });
 

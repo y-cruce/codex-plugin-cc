@@ -300,6 +300,12 @@ export class AcpEventAdapter {
       { messageId }, null, "session/prompt");
   }
 
+  async startContinuation() {
+    await this.flushMessage("assistant");
+    await this.flushMessage("reasoning");
+    this.speaker += 1;
+  }
+
   async contentUpdate(notification, role) {
     const update = notification.update;
     // An agent that sends no message id has every chunk of a turn fall into

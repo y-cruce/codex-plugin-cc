@@ -242,6 +242,8 @@ export class AcpExecutorJobPort {
     this.updateTail = Promise.resolve();
     this.backgroundTimeoutMs = 30 * 60 * 1000;
     this.backgroundPollMs = 1000;
+    // agy 1.5.14 can keep emitting load updates over a second after response preparation.
+    this.backgroundReplayQuietMs = 2000;
     this.scheduleQuietMs = 25_000;
   }
 
@@ -346,24 +348,31 @@ export class AcpExecutorJobPort {
   }
 
   acceptSessionUpdate(params) {
+    const active = this.activeTurn;
+    if (!active || params.sessionId !== this.sessionId) return Promise.resolve();
     const update = params.update;
+    const commandSnapshot = this.backgroundSnapshot && !active.scheduleWait;
     if (this.backgroundSnapshot) {
+      if (commandSnapshot) active.lastUpdateAt = Date.now();
       if (!["tool_call", "tool_call_update"].includes(update.sessionUpdate) ||
           !this.backgroundSnapshot.has(String(update.toolCallId))) return Promise.resolve();
       params = { ...params, update: { ...update, sessionUpdate: "tool_call_update" } };
     } else {
-      const active = this.noteSessionActivity(params.sessionId);
-      if (active && update.sessionUpdate === "tool_call" && update.name === "schedule") {
+      if (this.noteSessionActivity(params.sessionId) && update.sessionUpdate === "tool_call" && update.name === "schedule") {
         active.scheduleStarts.set(String(update.toolCallId), active.lastUpdateAt);
       }
-      const schedule = active?.scheduleWait;
+      const schedule = active.scheduleWait;
       if (schedule) {
         if (update.sessionUpdate === "agent_message_chunk" && update.content?.text?.trim()) schedule.answered = true;
         if (["agent_thought_chunk", "tool_call"].includes(update.sessionUpdate) ||
             (update.sessionUpdate === "tool_call_update" && update.name === "schedule")) schedule.answered = false;
       }
     }
-    this.updateTail = this.updateTail.then(() => this.adapter.accept(params));
+    this.updateTail = this.updateTail.then(() => {
+      const tool = commandSnapshot ? this.adapter.tools.get(String(update.toolCallId)) : null;
+      if (tool?.status === "completed" || tool?.status === "failed") return;
+      return this.adapter.accept(params);
+    });
     return this.updateTail;
   }
 
@@ -633,6 +642,7 @@ export class AcpExecutorJobPort {
     const schedule = scheduled ? { answered: false } : null;
     active.scheduleWait = schedule;
     active.waitingForBackgroundWork = true;
+    if (!scheduled) this.backgroundSnapshot = new Set(commands.map(tool => String(tool.toolCallId)));
     this.onProgress?.({ message: scheduled ? "agy 本轮已结束，正在等待定时接续和后台工具完成。" :
       "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
     const stopped = () => active.interrupting || active.cancelling;
@@ -640,7 +650,7 @@ export class AcpExecutorJobPort {
     try {
       while (!stopped()) {
         await this.updateTail;
-        if (stopped()) return "stopped";
+        if (stopped()) break;
         const pending = this.pendingTools();
         const running = pending.filter(tool => tool.kind === "execute");
         // agy resumes a fired timer on its own and streams updates without a
@@ -649,10 +659,15 @@ export class AcpExecutorJobPort {
           Date.now() - active.lastUpdateAt < this.scheduleQuietMs);
         let outcome;
         if (!scheduleActive) {
-          if (!running.length) return resumeCommands;
+          if (!running.length) break;
           if (scheduled && !resumeCommands.length) resumeCommands = running;
-          outcome = await this.loadBackgroundCommands(active, running);
-          if (outcome === "stopped" || stopped()) return "stopped";
+          if (scheduled) this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+          try {
+            outcome = await this.loadBackgroundCommands(active);
+          } finally {
+            if (scheduled) this.backgroundSnapshot = null;
+          }
+          if (outcome === "stopped" || stopped()) break;
           if (outcome !== "timeout" && !this.pendingTools().some(tool => tool.kind === "execute")) continue;
         }
         if (outcome !== "timeout") {
@@ -669,8 +684,11 @@ export class AcpExecutorJobPort {
             unfinished.map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")), { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
         }
       }
-      return "stopped";
+      if (!stopped() && resumeCommands.length) await this.adapter.startContinuation();
+      if (!scheduled && !active.cancelling) await this.waitForBackgroundReplay(active);
+      return stopped() ? "stopped" : resumeCommands;
     } finally {
+      this.backgroundSnapshot = null;
       if (scheduled) {
         clearTimeout(active.backgroundTimer);
         active.backgroundExpired = null;
@@ -680,31 +698,39 @@ export class AcpExecutorJobPort {
     }
   }
 
-  async loadBackgroundCommands(active, running) {
-    this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+  async waitForBackgroundReplay(active) {
+    const startedAt = Date.now();
+    const deadline = startedAt + this.backgroundReplayQuietMs + this.cancelTimeoutMs;
+    while (!active.cancelling) {
+      const now = Date.now();
+      const quietAt = Math.max(startedAt, active.lastUpdateAt) + this.backgroundReplayQuietMs;
+      if (now >= quietAt || now >= deadline) return;
+      await new Promise(resolve => setTimeout(resolve, Math.min(quietAt, deadline) - now));
+    }
+  }
+
+  async loadBackgroundCommands(active) {
     const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
       if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
       throw error;
     });
-    try {
-      const outcome = await Promise.race([load, active.backgroundStopped, active.backgroundExpired]);
-      if (outcome === "stopped") {
-        let timer;
-        try {
-          await Promise.race([load, new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Timed out waiting for the in-flight session/load.")), this.cancelTimeoutMs);
-          })]);
-        } catch (error) {
-          this.proc.kill("SIGKILL");
-          await this.connection.closed.catch(() => {});
-          throw Object.assign(new Error(
-            `ACP session/load did not settle after interruption; connection closed and replacement prompt was not delivered: ${error.message}`,
-            { cause: error }), { code: "TRANSPORT_CLOSED" });
-        } finally { clearTimeout(timer); }
-      }
-      await this.updateTail;
-      return outcome;
-    } finally { this.backgroundSnapshot = null; }
+    const outcome = await Promise.race([load, active.backgroundStopped, active.backgroundExpired]);
+    if (outcome === "stopped") {
+      let timer;
+      try {
+        await Promise.race([load, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Timed out waiting for the in-flight session/load.")), this.cancelTimeoutMs);
+        })]);
+      } catch (error) {
+        this.proc.kill("SIGKILL");
+        await this.connection.closed.catch(() => {});
+        throw Object.assign(new Error(
+          `ACP session/load did not settle after interruption; connection closed and replacement prompt was not delivered: ${error.message}`,
+          { cause: error }), { code: "TRANSPORT_CLOSED" });
+      } finally { clearTimeout(timer); }
+    }
+    await this.updateTail;
+    return outcome;
   }
 
   promptResponse(prompt, sessionId = this.sessionId) {
