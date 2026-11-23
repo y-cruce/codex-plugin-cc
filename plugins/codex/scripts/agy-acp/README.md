@@ -1,9 +1,9 @@
 # agy CLI ACP
 
-The CLI can return `end_turn` while a background command is running, including
-without steering. In the isolated wakeup probe, it sent no `session/update`
-for 84 seconds after the command's final output was written. Keeping the ACP
-connection open alone is insufficient to collect the completed result.
+The CLI can return `end_turn` while a background command is running. In a
+direct stdio probe, agy 1.5.14 pushed the command's terminal update 13.47
+seconds after `end_turn` and streamed its own reply 3.31 seconds later. The
+client sent one prompt and kept the same connection open throughout.
 
 Dispatch uses the installed `agy acp` server (verified with 1.5.6). It reuses
 the CLI login, settings and MCP configuration. No separate ACP installation,
@@ -40,11 +40,24 @@ Queue, interrupt, cancel and continue retain the usual director controls.
 
 Steering works while agy's prompt is active, including while commands run.
 When agy returns `end_turn` with unfinished commands or a pending `schedule`,
-the job stays running. The driver checks command statuses with `session/load`,
-filters history replay, and sends a continuation prompt once the commands
-finish. For a scheduled follow-up, it keeps the ACP connection open and
-collects agy's native updates in the same job and turn. It defers command
-snapshots during the native follow-up to keep replay separate from live output.
+the job stays running and keeps receiving ACP updates. For a command wait,
+the driver tracks new tools as agy continues. It infers completion when
+all tools have reached terminal status, agy has answered after the latest
+work, and the session has sent no update for 25 seconds. If agy shows no
+sign of resuming after the commands finish and that quiet period passes,
+the driver sends a continuation prompt in the same turn. Progress and
+the final reply are separate messages.
+
+For a pending command, `session/load` checks its status after 60 seconds
+without a session update. This interval keeps history loads infrequent.
+In an active session, agy 1.5.14 was observed restarting its update stream
+on each load and timing out while waiting for the history stream. The
+driver filters replay to known command IDs during the load and the
+existing 2-second quiet window that follows it.
+
+For a scheduled follow-up, the driver collects native updates in the same
+job and turn. It defers command snapshots during the native follow-up to
+keep replay separate from live output.
 Command-only waits share a cumulative 30-minute limit. A scheduled follow-up
 times out after 30 minutes without a live session event once all pending
 timers have reached their deadlines. A timer's deadline is its tool start
@@ -97,7 +110,9 @@ instead of the new preset.
 派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 gemini-pro-orchestrator-neon（没有思考强度选项），
 显式选其他模型默认 high，Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的
 新 prompt，等待最新响应后结束原任务。提前 `end_turn` 时，原任务继续等待
-后台命令或 `schedule`。仅有后台命令时累计等待上限为 30 分钟。定时接续在连续
+后台命令或 `schedule`。后台命令依靠实时更新追踪，60 秒无更新才读取状态快照，
+累计等待上限为 30 分钟。工具结束后若收到 agy 自唤醒的回复，驱动在 25 秒静默后完成任务。
+工具结束后若静默 25 秒且 agy 未开始接续，驱动发送接续提示。定时接续在连续
 30 分钟未收到会话事件且没有未到点的定时任务时超时。agy 自行执行定时接续，驱动在同一
 job 收取输出，并根据工具状态、助手输出和 25 秒无新事件推断结束。回退时一起撤销插件和调度规则的迁移
 提交，恢复旧代理和预设；旧安装及启动器保留在原处。

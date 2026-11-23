@@ -158,12 +158,15 @@ function backgroundPort(options = {}) {
   port.connection = {
     prompt: async ({ prompt }) => {
       prompts.push(prompt);
-      if (prompts.length <= (options.rounds ?? 1)) await update({
+      if (prompts.length === 1) await update({
         sessionUpdate: "tool_call", toolCallId: `command-${prompts.length}`, title: "npm test", kind: "execute",
         status: "in_progress", rawInput: { IsDaemon: Boolean(options.daemon) }
       });
       else await update({
         sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Full result" }
+      });
+      if (options.initialReply) await update({
+        sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.initialReply }
       });
       if (options.schedule && prompts.length === 1) await update({
         sessionUpdate: "tool_call", toolCallId: "schedule-1", name: "schedule", title: "Run schedule",
@@ -184,19 +187,20 @@ function backgroundPort(options = {}) {
 
 test("agy resumes commands and native schedules in the same turn and times out idle schedules", async (t) => {
   for (const [options, prompts, loads, finalText] of [
-    [{ rounds: 2 }, 3, 2, "Full result"],
     [{ daemon: true }, 1, 0, null],
+    [{ initialReply: "Waiting for npm test" }, 1, 0, "Full result"],
     [{ schedule: true }, 1, 0, "Checking…\nFull result"],
     [{ schedule: true, idle: true }, 1, 0, null]
   ]) {
     const h = backgroundPort(options);
-    if (options.schedule) {
+    if (!options.daemon) {
       t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
-      h.port.backgroundTimeoutMs = 100;
-      h.port.scheduleQuietMs = 30;
+      if (options.schedule) h.port.backgroundTimeoutMs = 100;
+      h.port.nativeContinuationQuietMs = 30;
+      h.port.backgroundLoadIdleMs = 100;
     }
     const turn = await h.port.startTurn({ sessionId: "session", prompt: [{ type: "text", text: "task" }] });
-    if (options.schedule) {
+    if (!options.daemon) {
       const advance = async ms => {
         t.mock.timers.tick(ms);
         await new Promise(setImmediate);
@@ -206,29 +210,47 @@ test("agy resumes commands and native schedules in the same turn and times out i
       const status = (toolCallId, fields) => h.update({ sessionUpdate: "tool_call_update", toolCallId, ...fields });
       const say = text => h.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
       const usage = () => h.update({ sessionUpdate: "usage_update" });
-      await advance(950);
-      assert.equal(h.port.activeTurn?.turnId, turn.turnId, "an unexpired timer protects an idle session");
-      await usage();
-      await advance(50);
-      if (options.idle) {
-        await advance(49);
-        assert.equal(h.port.activeTurn?.turnId, turn.turnId);
-        await advance(1);
-      } else {
-        await status("schedule-1", { name: "schedule", status: "completed" });
-        await say("Checking…");
-        await usage();
-        await h.update({ sessionUpdate: "tool_call", toolCallId: "read-1", kind: "read", status: "in_progress" });
+      if (!options.schedule) {
+        await advance(60);
+        assert.equal(h.loads(), 0);
         await status("command-1", { status: "completed" });
-        for (let i = 0; i < 3; i++) {
-          await advance(60);
-          assert.equal(h.port.activeTurn?.turnId, turn.turnId, "ongoing events reset the idle deadline");
+        await say("Running a second check");
+        await h.update({ sessionUpdate: "tool_call", toolCallId: "command-2", kind: "execute", status: "in_progress" });
+        await advance(60);
+        assert.equal(h.port.activeTurn?.turnId, turn.turnId);
+        assert.equal(h.loads(), 0);
+        await status("command-2", { status: "completed" });
+        await h.update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Review the check" } });
+        await advance(60);
+        assert.equal(h.prompts.length, 1);
+        assert.equal(h.port.activeTurn?.turnId, turn.turnId);
+        await say("Full result");
+        await advance(h.port.nativeContinuationQuietMs);
+      } else {
+        await advance(950);
+        assert.equal(h.port.activeTurn?.turnId, turn.turnId, "an unexpired timer protects an idle session");
+        await usage();
+        await advance(50);
+        if (options.idle) {
+          await advance(49);
+          assert.equal(h.port.activeTurn?.turnId, turn.turnId);
+          await advance(1);
+        } else {
+          await status("schedule-1", { name: "schedule", status: "completed" });
+          await say("Checking…");
           await usage();
+          await h.update({ sessionUpdate: "tool_call", toolCallId: "read-1", kind: "read", status: "in_progress" });
+          await status("command-1", { status: "completed" });
+          for (let i = 0; i < 3; i++) {
+            await advance(60);
+            assert.equal(h.port.activeTurn?.turnId, turn.turnId, "ongoing events reset the idle deadline");
+            await usage();
+          }
+          await status("read-1", { status: "completed" });
+          await say("\nFull result");
+          assert.equal(h.events.some(event => event.type === "turn.completed"), false);
+          await advance(h.port.nativeContinuationQuietMs);
         }
-        await status("read-1", { status: "completed" });
-        await say("\nFull result");
-        assert.equal(h.events.some(event => event.type === "turn.completed"), false);
-        await advance(h.port.scheduleQuietMs);
       }
     }
     if (options.idle) {
@@ -238,11 +260,14 @@ test("agy resumes commands and native schedules in the same turn and times out i
       const terminal = await turn.done;
       assert.equal(terminal.status, "completed");
       if (finalText) assert.equal(terminal.finalMessages.at(-1).text, finalText);
+      if (!options.daemon && !options.schedule) assert.deepEqual(
+        terminal.finalMessages.filter(item => item.role === "assistant").map(item => item.text),
+        ["Waiting for npm test", "Running a second check", "Full result"]);
     }
     assert.equal(h.prompts.length, prompts);
     assert.equal(h.loads(), loads);
     assert.equal(h.events.filter(event => event.type === "turn.started").length, 1);
-    if (options.schedule) t.mock.timers.reset();
+    if (!options.daemon) t.mock.timers.reset();
   }
 });
 
@@ -283,11 +308,11 @@ test("Qoder validates steering, fails on rejection before root completion and ig
     { sessionId: port.sessionId, turnId: "stale", prompt },
     { sessionId: port.sessionId, turnId: turn.turnId, prompt: [] }
   ]) await assert.rejects(port.steerPrompt(request));
-  port.questions.set("question", {});
-  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /pending question/i);
+  port.questions.set("question", { requestId: "question", payload: { message: "Choose", fields: [] } });
+  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /question is pending/i);
   port.questions.clear();
-  port.permissions.set("permission", {});
-  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /pending question/i);
+  port.permissions.set("permission", { requestId: "permission", payload: { tool: { title: "Allow command" }, options: [] } });
+  await assert.rejects(port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt }), /question is pending/i);
   port.permissions.clear();
   assert.equal(responses.length, 1);
   await port.steerPrompt({ sessionId: port.sessionId, turnId: turn.turnId, prompt });

@@ -127,6 +127,8 @@ test("interruption drains a late load replay before replacement and closes a loa
     const port = await AcpExecutorJobPort.open({ cwd, job, command: process.execPath, args: [AGENT],
       cancelTimeoutMs: stall ? 10 : 1000, env: { ...process.env, HOME: cwd, ACP_FAKE_AGENT_NAME: "Antigravity ACP Server" } });
     port.backgroundReplayQuietMs = 20;
+    port.backgroundLoadIdleMs = 25;
+    port.backgroundPollMs = 10;
     try {
       await port.startSession({ modelId: "efficient" });
       const turn = await port.startTurn({ sessionId: port.sessionId, prompt: [{ type: "text", text: "task" }] });
@@ -194,6 +196,9 @@ test("agy filters load replay after the response and finishes its continuation b
     port = await open(options);
     originalJobId = port.job.id;
     port.backgroundReplayQuietMs = 200;
+    port.backgroundLoadIdleMs = 100;
+    port.backgroundPollMs = 10;
+    port.nativeContinuationQuietMs = 50;
     const push = port.queue.push.bind(port.queue);
     t.mock.method(port.queue, "push", event => {
       events.push(event);

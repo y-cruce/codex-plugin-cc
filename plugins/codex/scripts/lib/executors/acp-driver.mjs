@@ -242,9 +242,10 @@ export class AcpExecutorJobPort {
     this.updateTail = Promise.resolve();
     this.backgroundTimeoutMs = 30 * 60 * 1000;
     this.backgroundPollMs = 1000;
+    this.backgroundLoadIdleMs = 60_000;
     // agy 1.5.14 can keep emitting load updates over a second after response preparation.
     this.backgroundReplayQuietMs = 2000;
-    this.scheduleQuietMs = 25_000;
+    this.nativeContinuationQuietMs = 25_000;
   }
 
   static async open(options) {
@@ -371,6 +372,7 @@ export class AcpExecutorJobPort {
     this.updateTail = this.updateTail.then(() => {
       const tool = commandSnapshot ? this.adapter.tools.get(String(update.toolCallId)) : null;
       if (tool?.status === "completed" || tool?.status === "failed") return;
+      if (active.commandWait) return this.acceptBackgroundUpdate(active.commandWait, params, commandSnapshot);
       return this.adapter.accept(params);
     });
     return this.updateTail;
@@ -590,7 +592,8 @@ export class AcpExecutorJobPort {
         const commands = tools.filter(tool => tool.kind === "execute");
         const scheduled = tools.some(tool => tool.name === "schedule");
         if (!commands.length && !scheduled) break;
-        const resumeCommands = await this.waitForBackgroundWork(active, commands, scheduled);
+        const resumeCommands = scheduled ? await this.waitForScheduledWork(active) :
+          await this.waitForBackgroundCommands(active, commands);
         if (resumeCommands === "stopped") { value = { stopReason: "cancelled" }; break; }
         if (!resumeCommands.length) break;
         active.response = this.promptResponse([{ type: "text", text:
@@ -616,6 +619,88 @@ export class AcpExecutorJobPort {
       !(tool.kind === "execute" && tool.rawInput?.IsDaemon === true));
   }
 
+  async acceptBackgroundUpdate(wait, params, snapshot) {
+    const update = params.update;
+    const type = update.sessionUpdate;
+    const text = type === "agent_message_chunk" || type === "agent_thought_chunk";
+    if (!snapshot && (text || type === "tool_call" || type === "plan" || type === "plan_update")) {
+      wait.started = true;
+      if (type !== "agent_message_chunk") wait.answered = false;
+      else if (update.content?.text?.trim()) wait.answered = true;
+      if (text && wait.newMessage) {
+        await this.adapter.startContinuation();
+        wait.newMessage = false;
+      }
+    }
+    const id = String(update.toolCallId);
+    const previous = this.adapter.tools.get(id);
+    await this.adapter.accept(params);
+    if (previous?.kind === "execute" && previous.rawInput?.IsDaemon !== true &&
+        !["completed", "failed"].includes(previous.status) && ["completed", "failed"].includes(update.status)) {
+      // The completion can wake agy again. Keep the next reply separate from the
+      // progress it sent before the command finished.
+      wait.started = false;
+      wait.answered = false;
+      wait.newMessage = true;
+    }
+  }
+
+  async waitForBackgroundCommands(active, commands) {
+    if (!active.backgroundExpired) active.backgroundExpired = new Promise(resolve => {
+      active.backgroundTimer = setTimeout(() => resolve("timeout"), this.backgroundTimeoutMs);
+    });
+    const wait = { started: false, answered: false, newMessage: true };
+    active.commandWait = wait;
+    active.waitingForBackgroundWork = true;
+    this.onProgress?.({ message: "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
+    const stopped = () => active.interrupting || active.cancelling;
+    try {
+      while (!stopped()) {
+        await this.updateTail;
+        if (stopped()) break;
+        if (active.error) throw active.error;
+        if (this.exit) throw Object.assign(this.exitError ?? new Error("ACP process exited during background command recovery."),
+          { code: "TRANSPORT_CLOSED", retryable: true });
+        const pending = this.pendingTools();
+        if (pending.some(tool => tool.name === "schedule")) {
+          active.commandWait = null;
+          return await this.waitForScheduledWork(active);
+        }
+        const idleMs = Date.now() - active.lastUpdateAt;
+        if (!pending.length && !this.questions.size && !this.permissions.size && idleMs >= this.nativeContinuationQuietMs) {
+          if (wait.answered) return [];
+          if (!wait.started) {
+            await this.adapter.startContinuation();
+            return stopped() ? "stopped" : commands;
+          }
+        }
+        let outcome;
+        const running = pending.filter(tool => tool.kind === "execute");
+        if (running.length && idleMs >= this.backgroundLoadIdleMs) {
+          this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+          try {
+            outcome = await this.loadBackgroundCommands(active);
+            if (outcome !== "timeout" && !active.cancelling) await this.waitForBackgroundReplay(active);
+            active.lastUpdateAt = Date.now();
+          } finally { this.backgroundSnapshot = null; }
+        } else {
+          let timer;
+          outcome = await Promise.race([new Promise(resolve => { timer = setTimeout(resolve, this.backgroundPollMs); }),
+            active.backgroundStopped, active.backgroundExpired]);
+          clearTimeout(timer);
+        }
+        if (outcome === "timeout") throw Object.assign(new Error(
+          "agy 结束本轮时仍有后台命令在运行，等待已达到 30 分钟上限。请 continue 此会话核对结果。\n" +
+          this.pendingTools().map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")),
+        { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
+      }
+      return "stopped";
+    } finally {
+      active.commandWait = null;
+      active.waitingForBackgroundWork = false;
+    }
+  }
+
   waitForScheduleIdle(active) {
     return new Promise(resolve => {
       const check = () => {
@@ -632,21 +717,15 @@ export class AcpExecutorJobPort {
     });
   }
 
-  async waitForBackgroundWork(active, commands, scheduled) {
-    if (scheduled) {
-      clearTimeout(active.backgroundTimer);
-      active.backgroundExpired = this.waitForScheduleIdle(active);
-    } else if (!active.backgroundExpired) active.backgroundExpired = new Promise(resolve => {
-      active.backgroundTimer = setTimeout(() => resolve("timeout"), this.backgroundTimeoutMs);
-    });
-    const schedule = scheduled ? { answered: false } : null;
+  async waitForScheduledWork(active) {
+    clearTimeout(active.backgroundTimer);
+    active.backgroundExpired = this.waitForScheduleIdle(active);
+    const schedule = { answered: false };
     active.scheduleWait = schedule;
     active.waitingForBackgroundWork = true;
-    if (!scheduled) this.backgroundSnapshot = new Set(commands.map(tool => String(tool.toolCallId)));
-    this.onProgress?.({ message: scheduled ? "agy 本轮已结束，正在等待定时接续和后台工具完成。" :
-      "agy 本轮已结束，正在等待后台命令完成后接续任务。", phase: "running" });
+    this.onProgress?.({ message: "agy 本轮已结束，正在等待定时接续和后台工具完成。", phase: "running" });
     const stopped = () => active.interrupting || active.cancelling;
-    let resumeCommands = scheduled ? [] : commands;
+    let resumeCommands = [];
     try {
       while (!stopped()) {
         await this.updateTail;
@@ -655,17 +734,17 @@ export class AcpExecutorJobPort {
         const running = pending.filter(tool => tool.kind === "execute");
         // agy resumes a fired timer on its own and streams updates without a
         // prompt response. Keep history replay out of that live update stream.
-        const scheduleActive = schedule && (!schedule.answered || pending.some(tool => tool.kind !== "execute") ||
-          Date.now() - active.lastUpdateAt < this.scheduleQuietMs);
+        const scheduleActive = !schedule.answered || pending.some(tool => tool.kind !== "execute") ||
+          Date.now() - active.lastUpdateAt < this.nativeContinuationQuietMs;
         let outcome;
         if (!scheduleActive) {
           if (!running.length) break;
-          if (scheduled && !resumeCommands.length) resumeCommands = running;
-          if (scheduled) this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
+          if (!resumeCommands.length) resumeCommands = running;
+          this.backgroundSnapshot = new Set(running.map(tool => String(tool.toolCallId)));
           try {
             outcome = await this.loadBackgroundCommands(active);
           } finally {
-            if (scheduled) this.backgroundSnapshot = null;
+            this.backgroundSnapshot = null;
           }
           if (outcome === "stopped" || stopped()) break;
           if (outcome !== "timeout" && !this.pendingTools().some(tool => tool.kind === "execute")) continue;
@@ -677,22 +756,16 @@ export class AcpExecutorJobPort {
           clearTimeout(timer);
         }
         if (outcome === "timeout") {
-          const unfinished = this.pendingTools().filter(tool => scheduled || tool.kind === "execute");
-          const message = scheduled ? "agy 定时接续尚未完成，已空闲 30 分钟且没有待触发的定时任务。" :
-            "agy 结束本轮时仍有后台命令在运行，等待已达到 30 分钟上限。";
-          throw Object.assign(new Error(message + "请 continue 此会话核对结果。\n" +
-            unfinished.map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")), { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
+          throw Object.assign(new Error("agy 定时接续尚未完成，已空闲 30 分钟且没有待触发的定时任务。请 continue 此会话核对结果。\n" +
+            this.pendingTools().map(tool => `${tool.toolCallId}: ${tool.title}`).join("\n")), { code: "AGY_BACKGROUND_COMMANDS_TIMEOUT" });
         }
       }
       if (!stopped() && resumeCommands.length) await this.adapter.startContinuation();
-      if (!scheduled && !active.cancelling) await this.waitForBackgroundReplay(active);
       return stopped() ? "stopped" : resumeCommands;
     } finally {
       this.backgroundSnapshot = null;
-      if (scheduled) {
-        clearTimeout(active.backgroundTimer);
-        active.backgroundExpired = null;
-      }
+      clearTimeout(active.backgroundTimer);
+      active.backgroundExpired = null;
       active.waitingForBackgroundWork = false;
       active.scheduleWait = null;
     }
