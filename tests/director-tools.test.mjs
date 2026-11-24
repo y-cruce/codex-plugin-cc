@@ -132,6 +132,10 @@ test("message writes the correction to a file and passes the delivery as dispatc
     assert.deepEqual(h.runs[1].argv, ["rm", "-f", argv[4]], "the file is removed once dispatch.sh has read it");
   }
   assert.deepEqual(await h.call("message", { job: "j", cwd: "/repo", text: "x", delivery: "now" }), { deny: "delivery must be queue, steer or interrupt" });
+  h.runs.length = 0;
+  await h.call("message", { job: "task-a-b", cwd: "/repo", message: "Via message alias." });
+  assert.equal(h.writes.get(h.runs[0].argv[4]), "Via message alias.");
+  assert.deepEqual(await h.call("message", { job: "task-a-b", cwd: "/repo" }), { deny: "text is empty" });
 });
 
 test("concurrent messages each send their own text", async () => {
@@ -399,7 +403,7 @@ test("job tools and continue/fork prefer unique session-indexed cwd, fall back t
   await startDirectorTools(h.$, h.tools);
   const byName = Object.fromEntries(h.registered.map(spec => [spec.name, spec.inputSchema]));
   assert.deepEqual([byName.dispatch.required, byName.message.required, byName.answer.required, byName.result.required, byName.status.required, byName.cancel.required],
-    [["mode", "name", "brief"], ["job", "text"], ["job", "request", "answers"], ["job"], undefined, ["job"]]);
+    [["mode", "name", "brief"], ["job"], ["job", "request", "answers"], ["job"], undefined, ["job"]]);
 
   for (const [label, tool, input, expectedCwd] of [
     ["indexed job ignores wrong cwd on message", "message", { job: "job-1", cwd: "/gone", text: "Fix." }, repoA],

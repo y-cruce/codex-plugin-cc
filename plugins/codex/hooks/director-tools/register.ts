@@ -76,10 +76,11 @@ const TOOLS = [
       type: 'object',
       properties: {
         job: JOB, cwd: JOB_CWD,
-        text: { type: 'string', description: 'The correction for the running agent.' },
+        text: { type: 'string', description: 'The correction for the running agent (alias: message).' },
+        message: { type: 'string', description: 'Alias for text.' },
         delivery: { type: 'string', enum: ['steer', 'queue', 'interrupt'], default: 'steer' },
       },
-      required: ['job', 'text'],
+      required: ['job'],
     },
   },
   {
@@ -264,11 +265,12 @@ async function serve($: EngineInterface, context: Context, name: string, input: 
     case 'message': {
       const flags = DELIVERY[input.delivery === undefined ? 'steer' : text(input.delivery)]
       if (!flags) return { deny: 'delivery must be queue, steer or interrupt' }
-      if (!text(input.text).trim()) return { deny: 'text is empty' }
+      const body = text(input.text).trim() ? text(input.text) : text(input.message)
+      if (!body.trim()) return { deny: 'text is empty' }
       if (!job) return { deny: 'job is required' }
       const picked = await pickCwd($, context, '--job-cwd', job, cwd, 'job')
       if ('deny' in picked) return picked
-      const file = await scratch($, context, '.md', text(input.text))
+      const file = await scratch($, context, '.md', body)
       return run($, context, ['bash', context.worker, 'message', job, file, '--cwd', picked.cwd, ...flags], picked.cwd, 300_000)
         .finally(() => discard($, file))
     }
