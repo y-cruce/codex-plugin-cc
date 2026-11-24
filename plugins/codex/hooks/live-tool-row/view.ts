@@ -80,7 +80,7 @@ export function isOver(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundI
 export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'activeRoundId' | 'compactingSince'>): boolean {
   return !isOver(view) && Boolean(view.compactingSince)
 }
-const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/
+const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress|job\.(failed|cancelled))/
 // Nonzero exits keep a visible command row.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
   || (event.type === 'command.completed' && event.status !== 'failed' && (event.exitCode == null || event.exitCode === 0)))

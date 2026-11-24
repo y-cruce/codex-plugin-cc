@@ -1223,4 +1223,16 @@ describe('transcript block spacing', () => {
     data.subAgents = [];
     assert.deepEqual(render(), ['Checking the change']);
   });
+  test('wraps failure reasons in red instead of clipping them to one row', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const reason = 'Job failed: ACP connection closed (signal SIGTERM)\nShutdown timed out after 3s, forcing exit.';
+    data.tail = [{ seq: '1', at: data.startedAt, type: 'job.failed', text: reason }];
+    const nodes = rowsOf(liveTree($.ui.resolve(row()), data, 40, Date.parse(data.startedAt)));
+    const failure = nodes.find(node => textOf(node).startsWith('Job failed:'));
+    assert.equal(textOf(failure), reason);
+    assert.equal(failure.props.color, 'red');
+    assert.equal(failure.props.wrap, 'wrap');
+  });
 });

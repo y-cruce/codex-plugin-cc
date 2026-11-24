@@ -715,3 +715,43 @@ test("ACP fork branches session context and re-applies mode/model/effort when ad
     }
   }
 });
+
+test("ACP transport close waits briefly for process exit and surfaces signal, code, and stderr tail", async (t) => {
+  isolateTestEnvironment(t);
+  for (const row of [
+    { name: "signal exit", code: null, signal: "SIGTERM", stderr: "", expected: /ACP connection closed \(signal SIGTERM\)/ },
+    { name: "code exit with stderr", code: 1, signal: null, stderr: "Shutdown timed out after 3s, forcing exit.\n",
+      expected: /ACP connection closed \(exit 1\)\nShutdown timed out after 3s, forcing exit\./ }
+  ]) {
+    let activeChild;
+    useInProcessAgent(t, agent => {
+      agent.prompt = () => new Promise(() => {
+        activeChild.stdout.end();
+        setTimeout(() => {
+          if (row.stderr) activeChild.stderr.write(row.stderr);
+          activeChild.exitCode = row.code;
+          activeChild.emit("exit", row.code, row.signal);
+        }, 20);
+      });
+    });
+    const origSpawn = childProcess.spawn;
+    t.mock.method(childProcess, "spawn", (...args) => {
+      activeChild = origSpawn(...args);
+      return activeChild;
+    });
+    syncBuiltinESMExports();
+    const cwd = fs.realpathSync(makeTempDir());
+    const job = { id: `acp-exit-${row.name.replace(/\s+/g, "-")}`, executor: "acp", workspaceRoot: cwd, status: "running" };
+    writeJobFile(cwd, job.id, job);
+    upsertJob(cwd, job);
+    const events = [];
+    const error = await runAcpTurn(cwd, {
+      jobId: job.id, prompt: "basic", command: process.execPath, args: [AGENT],
+      onExecutorEvent: event => events.push(event)
+    }).then(() => null, err => err);
+    assert.equal(error?.code, "TRANSPORT_CLOSED", row.name);
+    assert.match(error?.message ?? "", row.expected, row.name);
+    const failed = events.find(event => event.type === "job.failed");
+    assert.match(failed?.payload?.error?.message ?? "", row.expected, row.name);
+  }
+});

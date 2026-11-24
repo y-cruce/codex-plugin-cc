@@ -246,6 +246,7 @@ export class AcpExecutorJobPort {
     // agy 1.5.14 can keep emitting load updates over a second after response preparation.
     this.backgroundReplayQuietMs = 2000;
     this.nativeContinuationQuietMs = 25_000;
+    this.transportExitWaitMs = 200;
   }
 
   static async open(options) {
@@ -659,8 +660,9 @@ export class AcpExecutorJobPort {
         await this.updateTail;
         if (stopped()) break;
         if (active.error) throw active.error;
-        if (this.exit) throw Object.assign(this.exitError ?? new Error("ACP process exited during background command recovery."),
-          { code: "TRANSPORT_CLOSED", retryable: true });
+        if (this.exit) throw await this.decorateTransportError(
+          Object.assign(this.exitError ?? new Error("ACP process exited during background command recovery."),
+            { code: "TRANSPORT_CLOSED", retryable: true }));
         const pending = this.pendingTools();
         if (pending.some(tool => tool.name === "schedule")) {
           active.commandWait = null;
@@ -782,11 +784,42 @@ export class AcpExecutorJobPort {
     }
   }
 
+  exitSummary() {
+    if (this.exit?.signal) return `signal ${this.exit.signal}`;
+    if (this.exit?.code != null) return `exit ${this.exit.code}`;
+    return null;
+  }
+
+  stderrTail(limit = 500) {
+    const raw = this.stderr.slice(this.activeTurn?.stderrOffset ?? 0).trim() || this.stderr.trim();
+    if (!raw) return "";
+    return raw.length > limit ? `…${raw.slice(-limit)}` : raw;
+  }
+
+  async decorateTransportError(error) {
+    const isTransport = error?.code === "TRANSPORT_CLOSED" || /connection closed|transport|stream/i.test(error?.message ?? "");
+    if (!isTransport) return error;
+    if (!this.exit && !this.exitError && this.exitPromise) {
+      let timer;
+      await Promise.race([this.exitPromise, new Promise((resolve) => {
+        timer = setTimeout(resolve, this.transportExitWaitMs);
+        timer.unref?.();
+      })]);
+      clearTimeout(timer);
+    }
+    if (this.exitError) return Object.assign(this.exitError, { code: "TRANSPORT_CLOSED", retryable: true });
+    const base = error?.message || "ACP connection closed";
+    const exited = this.exitSummary();
+    const withExit = exited && !base.includes(exited) ? `${base} (${exited})` : base;
+    const stderr = this.stderrTail();
+    const message = stderr && !withExit.includes(stderr) ? `${withExit}\n${stderr}` : withExit;
+    if (message === error?.message) return Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
+    return Object.assign(new Error(message, { cause: error }), { code: "TRANSPORT_CLOSED", retryable: true });
+  }
+
   async loadBackgroundCommands(active) {
-    const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] }).catch(error => {
-      if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
-      throw error;
-    });
+    const load = this.connection.loadSession({ sessionId: this.sessionId, cwd: this.cwd, mcpServers: [] })
+      .catch(async (error) => { throw await this.decorateTransportError(error); });
     const outcome = await Promise.race([load, active.backgroundStopped, active.backgroundExpired]);
     if (outcome === "stopped") {
       let timer;
@@ -809,12 +842,9 @@ export class AcpExecutorJobPort {
   promptResponse(prompt, sessionId = this.sessionId) {
     const response = Promise.resolve().then(() => this.connection.prompt({ sessionId, prompt: structuredClone(prompt) }));
     return Promise.race([response, this.exitPromise.then(() => {
-      throw Object.assign(this.exitError ?? new Error(`ACP process exited before the prompt completed.${this.stderr ? `\n${this.stderr.trim()}` : ""}`),
+      throw Object.assign(this.exitError ?? new Error("ACP process exited before the prompt completed."),
         { code: "TRANSPORT_CLOSED", retryable: true });
-    })]).catch((error) => {
-      if (/connection closed|transport|stream/i.test(error?.message ?? "")) Object.assign(error, { code: "TRANSPORT_CLOSED", retryable: true });
-      throw error;
-    });
+    })]).catch(async (error) => { throw await this.decorateTransportError(error); });
   }
 
   async steerPrompt(request) {

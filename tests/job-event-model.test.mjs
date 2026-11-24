@@ -739,3 +739,27 @@ test("a question's event line carries its request id and the ids its answer is k
     payload: { requestId: "2", message: "Which scope?", mode: "form", fields: [{ id: "scope" }], url: null, openedAt: "2026-10-17T00:00:00.000Z", expiresAt: null } };
   assert.match(renderJobEvent(event), /Question request=2 ids=scope: Which scope\?/);
 });
+
+test("terminal failure and cancellation events carry their reason in logs and live tail", () => {
+  for (const { type, payload, line, tail } of [
+    { type: "job.failed", payload: { status: "failed", error: { message: "ACP connection closed (signal SIGTERM)\nfatal stderr" }, reason: { message: "fallback" } },
+      line: "Job failed: ACP connection closed (signal SIGTERM) ⏎ fatal stderr",
+      tail: "Job failed: ACP connection closed (signal SIGTERM)\nfatal stderr" },
+    { type: "job.cancelled", payload: { status: "cancelled", error: null, reason: { message: "Cancelled by user." } },
+      line: "Job cancelled: Cancelled by user.",
+      tail: "Job cancelled: Cancelled by user." },
+    { type: "job.failed", payload: { status: "failed", error: null, reason: null },
+      line: "Job failed", tail: "Job failed" },
+    { type: "job.completed", payload: { status: "completed", error: null, reason: { message: "end_turn" } },
+      line: "Job completed", tail: "Job completed" }
+  ]) {
+    const view = createLiveView({ id: "job-1" });
+    const event = createCanonicalEvent({ job: { id: "job-1" }, type,
+      identity: { sessionId: "thread-1", turnId: "turn-1" },
+      payload: { completedAt: "2026-10-17T00:00:00.000Z", finalMessages: [], ...payload } });
+    event.seq = "1";
+    assert.equal(renderJobEvent(event), line, type);
+    applyJobEvent(view, event);
+    assert.equal(view.tail[0].text, tail, type);
+  }
+});

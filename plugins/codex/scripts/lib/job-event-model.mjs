@@ -55,7 +55,7 @@ export function pendingQuestionSteerMessage(questions) {
   return `Steer is unavailable while a question is pending; answer it with answer, or resend message with delivery: "queue" (next turn) or delivery: "interrupt" (cancel this turn).${detail ? ` ${detail}` : ""}`;
 }
 
-const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress)/;
+const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress|job\.(failed|cancelled))/;
 const isDelta = (event) => event.type.endsWith(".delta") || event.type === "reasoning.summary.part";
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 
@@ -134,7 +134,12 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
   switch (event.type) {
     case "agent.activity": text = `⇢ sub-agent ${p.path} ${p.status}`; break;
     case "job.started": text = "Job started"; break;
-    case "job.completed": case "job.failed": case "job.cancelled": text = `Job ${event.type.slice(4)}`; break;
+    case "job.completed": text = "Job completed"; break;
+    case "job.failed": case "job.cancelled": {
+      const detail = trimmed(p.error?.message) ?? trimmed(p.reason?.message);
+      text = detail ? `Job ${event.type.slice(4)}: ${detail}` : `Job ${event.type.slice(4)}`;
+      break;
+    }
     case "turn.started": text = verbose ? `Turn started ${event.identity.turnId ?? ""}` : "Turn started"; break;
     case "turn.completed": text = `Turn ${p.status}${verbose ? ` ${event.identity.turnId ?? ""}` : ""}`; break;
     case "command.started": text = `$ ${tail ? unwrapCommand(p.command) : p.command ?? ""}`; break;
