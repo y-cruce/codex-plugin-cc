@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { resolveTaskExecutor } from "../plugins/codex/scripts/codex-companion.mjs";
+import { handleTask, resolveTaskExecutor } from "../plugins/codex/scripts/codex-companion.mjs";
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { readJobFile, resolveJobFile, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
@@ -233,5 +236,84 @@ test("legacy custom ACP launchers have unknown presets, distinct from explicit g
         assert.deepEqual(resolved.previous, request);
       }
     }
+  }
+});
+
+test("cca continue re-applies the thread's latest confirmed effort while other executors keep null", async (t) => {
+  isolateTestEnvironment(t);
+  t.mock.method(childProcess, "spawn", () => {
+    const worker = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+    process.nextTick(() => worker.emit("spawn"));
+    return worker;
+  });
+  syncBuiltinESMExports();
+  let output = "";
+  t.mock.method(console, "log", (text) => { output = String(text); });
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  const cases = [
+    {
+      name: "cca restores latest confirmed effort over older and unconfirmed rounds",
+      jobs: [
+        { id: "cca-1", updatedAt: "2026-11-24T01:00:00Z", executorEffort: "max", request: { executorPreset: "cca", executorCommand: "/bin/cc-acp", executorArgs: [] } },
+        { id: "cca-2", updatedAt: "2026-11-24T02:00:00Z", executorEffort: "low", request: { executorPreset: "cca", executorCommand: "/bin/cc-acp", executorArgs: [] } },
+        { id: "cca-3", updatedAt: "2026-11-24T03:00:00Z", request: { executorPreset: "cca", executorCommand: "/bin/cc-acp", executorArgs: [], executorEffort: "high" } }
+      ],
+      expected: "low"
+    },
+    {
+      name: "cca explicit effort overrides restored effort",
+      jobs: [
+        { id: "cca-ov", updatedAt: "2026-11-24T01:00:00Z", executorEffort: "max", request: { executorPreset: "cca", executorCommand: "/bin/cc-acp", executorArgs: [] } }
+      ],
+      extraArgs: ["--executor-effort", "medium"],
+      expected: "medium"
+    },
+    {
+      name: "cca ignores unconfirmed request effort when no confirmed effort exists",
+      jobs: [
+        { id: "cca-unconfirmed", updatedAt: "2026-11-24T01:00:00Z", request: { executorPreset: "cca", executorCommand: "/bin/cc-acp", executorArgs: [], executorEffort: "xhigh" } }
+      ],
+      expected: null
+    },
+    {
+      name: "dsh continue keeps null effort",
+      jobs: [
+        { id: "dsh-1", updatedAt: "2026-11-24T01:00:00Z", executorEffort: "high", request: { executorPreset: "dsh", executorCommand: "/bin/dsh", executorArgs: ["--profile", "acp"] } }
+      ],
+      expected: null
+    },
+    {
+      name: "agy continue keeps null effort",
+      jobs: [
+        { id: "agy-1", updatedAt: "2026-11-24T01:00:00Z", executorEffort: "medium", request: { executorPreset: "agy", executorCommand: "/bin/agy", executorArgs: ["acp"] } }
+      ],
+      expected: null
+    },
+    {
+      name: "generic acp continue keeps null effort",
+      jobs: [
+        { id: "acp-1", updatedAt: "2026-11-24T01:00:00Z", executorEffort: "high", request: { executorPreset: "acp", executorCommand: "/bin/cc-acp", executorArgs: [] } }
+      ],
+      expected: null
+    }
+  ];
+
+  for (const row of cases) {
+    const cwd = makeTempDir();
+    const threadId = `thread-${row.jobs[0].id}`;
+    for (const seed of row.jobs) {
+      const job = { ...seed, workspaceRoot: cwd, executor: "acp", threadId, executorSessionId: threadId, status: "completed" };
+      upsertJob(cwd, job);
+      writeJobFile(cwd, job.id, job);
+    }
+    output = "";
+    await handleTask(["--cwd", cwd, "--thread", threadId, "--background", "--json", ...(row.extraArgs ?? []), "continue"]);
+    const { jobId } = JSON.parse(output);
+    const queued = readJobFile(resolveJobFile(cwd, jobId));
+    assert.equal(queued.request.executorEffort, row.expected, row.name);
   }
 });

@@ -424,7 +424,7 @@ function ensureForkSourceIdle(workspaceRoot, forkThreadId) {
 
 function executorPreset(value) {
   if (value == null) return null;
-  if (!["codex", "acp", "qoder", "dsh", "antigravity", "agy"].includes(value)) throw new Error(`Unknown executor: ${value}`);
+  if (!["codex", "acp", "qoder", "dsh", "antigravity", "agy", "cca"].includes(value)) throw new Error(`Unknown executor: ${value}`);
   return value === "agy" ? "antigravity" : value;
 }
 
@@ -465,6 +465,7 @@ export function resolveTaskExecutor(workspaceRoot, threadId, options) {
     executorMode: pick((item) => item.request?.executorMode ?? item.executorMode),
     executorModel: pick((item) => item.request?.executorModel ?? item.executorModel),
     executorEffort: pick((item) => item.executorEffort ?? item.request?.executorEffort),
+    confirmedExecutorEffort: pick((item) => item.executorEffort),
     executorPermissions: pick((item) => item.request?.executorPermissions)
   };
   const original = trackedPreset(job, previous);
@@ -1014,7 +1015,7 @@ async function handleReview(argv) {
   });
 }
 
-async function handleTask(argv) {
+export async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "fork-thread", "sandbox", "label", "executor", "executor-preset", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
@@ -1077,7 +1078,7 @@ async function handleTask(argv) {
       : previous ? requestedModel : process.env.CODEX_COMPANION_ACP_MODEL) ?? null;
     executorEffort = options["executor-effort"] ?? (forkThreadId
       ? requestedEffort ?? (previous ? inherited?.executorEffort : process.env.CODEX_COMPANION_ACP_EFFORT)
-      : previous ? null : process.env.CODEX_COMPANION_ACP_EFFORT) ?? null;
+      : previous ? (preset === "cca" ? inherited?.confirmedExecutorEffort : null) : process.env.CODEX_COMPANION_ACP_EFFORT) ?? null;
     executorPermissions = options["executor-permissions"] ?? (previous ? inherited?.executorPermissions ?? previous.executorPermissions : process.env.CODEX_COMPANION_ACP_PERMISSIONS) ?? null;
     if (executorPermissions !== null && !["ask", "allow-once"].includes(executorPermissions)) {
       throw new Error("--executor-permissions must be ask or allow-once.");

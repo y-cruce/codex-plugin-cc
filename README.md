@@ -614,6 +614,12 @@ Keep the new runtime's credentials and sessions in its own home. Credentials can
 
 新版凭据和会话保存在独立 home；凭据可从现有安装拷贝，会话存储单独使用。回退新派单时，将程序指定为原 `dsh` 路径，参数设为 `["--profile","acp"]`。已有线程继续使用记录的启动器，两套 home 的会话分别管理。
 
+## Claude Code ACP executor / CCA 执行器
+
+Dispatch with `executor: "cca"` runs Claude Code over ACP (`@agentclientprotocol/claude-agent-acp`). Executable lookup checks explicit `executor_command`, executable `~/.local/bin/cc-acp`, then `claude-agent-acp` on PATH. Default launch arguments are `[]`, default `executor_mode` is `bypassPermissions`, and default `executor_permissions` is `allow-once`. The ACP driver recognizes `effort` (`category: "thought_level"`): new `cca` sessions without an explicit effort default to `max` for DeepSeek Flash (from the active model's `name`, or `description` on `default` rows) and `high` for GLM-5.4 or other models. Continuing a `cca` thread without an explicit effort re-applies the thread's last confirmed `executorEffort`. `cca` supports `session/fork`, `_session/steering`, and native `AskUserQuestion` forms.
+
+派单传 `executor: "cca"` 可通过 ACP 运行 Claude Code（`@agentclientprotocol/claude-agent-acp`）。启动程序依次查找显式 `executor_command`、可执行的 `~/.local/bin/cc-acp`、PATH 上的 `claude-agent-acp`；默认参数 `[]`，默认模式 `bypassPermissions`，默认权限 `allow-once`。ACP 驱动识别 `effort`（`category: "thought_level"`）：新建 `cca` 会话未显式指定 effort 时，按当前模型选项的 `name`（`default` 行读 `description`）自动选择——DeepSeek Flash 默认 `max`，GLM-5.4 及其他模型默认 `high`。续跑 `cca` 线程未指定 effort 时，自动重新应用该线程上次确认生效的 `executorEffort`。支持 `session/fork`、`_session/steering` 与原生 `AskUserQuestion` 提问。
+
 ## ACP director controls
 
 Omitting dispatch's executor uses `CODEX_DIRECTOR_EXECUTOR`, else Codex. Select `executor: "codex"` explicitly when needed. Review ignores this default; continue restores its thread and rejects an executor or launch-configuration mismatch. New agy sessions default in the driver to gemini-pro-orchestrator-neon (no effort option); explicitly chosen models default to high, Opus to medium; continuation preserves the existing effort unless explicitly supplied.
@@ -628,7 +634,7 @@ A shell sends a nonempty note of at most 400 characters with:
 node "$CODEX_ACP_COMPANION_PATH" notify-director "Decision or blocker requiring director action"
 ```
 
-It returns after publishing `director.notified` and continues work. Codex keeps its native `notify_director` tool. agy uses native form questions that always wait for the director, including under allow-once. Qoder's native questions use elicitation and also wait under yolo. DSH or another ACP agent without a native question tool uses:
+It returns after publishing `director.notified` and continues work. Codex keeps its native `notify_director` tool. agy uses native form questions that always wait for the director, including under allow-once. Qoder and cca native questions use elicitation and wait for the director under bypass modes. DSH or another ACP agent without a native question tool uses:
 
 ```bash
 node "$CODEX_ACP_COMPANION_PATH" ask-director --question "Choose a source" --options '["First","Second"]'
@@ -640,7 +646,7 @@ ACP and Codex refuse steer while a question is pending; queue is allowed. Active
 
 The pane's existing poll detects confirmed-dead ACP owner PIDs and publishes a stable failure event to their owning session. Check `ownerAlive` and `lastProgressAt` after fifteen minutes of silence. Periodic question reminders exist only in Monitor mode. Cancellation reason wording, Monitor DONE summaries, missing-message-id assistant grouping, execution cwd normalization and missing partial file lists retain their current behavior. There is no ACP `session/load` fallback or numeric/boolean form conversion; transcript transfer remains Codex-only.
 
-省略执行器受 `CODEX_DIRECTOR_EXECUTOR` 控制；需要 Codex 时显式填写，review 与 continue 不受该默认值影响。ACP 用上述命令通知和提问；agy/Qoder 保留原生提问，dsh 使用阻塞命令。超时、取消均不能作为授权。只读意图、排队 job id、interrupt 信息范围和 Monitor 提醒规则以上述实际行为为准。
+省略执行器受 `CODEX_DIRECTOR_EXECUTOR` 控制；需要 Codex 时显式填写，review 与 continue 不受该默认值影响。ACP 用上述命令通知和提问；agy/Qoder/cca 保留原生提问，dsh 使用阻塞命令。超时、取消均不能作为授权。只读意图、排队 job id、interrupt 信息范围和 Monitor 提醒规则以上述实际行为为准。
 
 Real-agent smoke is opt-in and excluded from `npm test`:
 

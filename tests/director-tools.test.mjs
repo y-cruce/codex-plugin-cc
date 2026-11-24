@@ -78,7 +78,7 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   const dispatchSchema = installed.registered.find(spec => spec.name === "dispatch").inputSchema.properties;
   assert.ok(dispatchSchema.mode.enum.includes("fork"));
   const executors = dispatchSchema.executor.enum;
-  assert.ok(["antigravity", "agy"].every(name => executors.includes(name)));
+  assert.ok(["antigravity", "agy", "cca"].every(name => executors.includes(name)));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });
 
   const missing = harness({ files: [COMPANION] });

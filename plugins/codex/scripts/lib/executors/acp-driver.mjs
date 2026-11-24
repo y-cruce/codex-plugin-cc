@@ -38,6 +38,10 @@ function isAntigravity(response) {
   return ["antigravity-acp", "Antigravity ACP Server"].includes(response?.agentInfo?.name);
 }
 
+function isClaudeCodeAcp(response) {
+  return response?.agentInfo?.name === "@agentclientprotocol/claude-agent-acp";
+}
+
 function nodeWritable(node) {
   return new WritableStream({
     write(chunk) {
@@ -74,9 +78,12 @@ function mapMcpServers(servers = []) {
   return servers.map((server) => structuredClone(server));
 }
 
+function selectOptions(option) {
+  return (option?.options ?? []).flatMap((entry) => Array.isArray(entry.options) ? entry.options : [entry]);
+}
+
 function selectOptionValues(option) {
-  return (option.options ?? []).flatMap((entry) => Array.isArray(entry.options) ? entry.options : [entry])
-    .map((entry) => entry.value);
+  return selectOptions(option).map((entry) => entry.value);
 }
 
 function findModelOption(configOptions = []) {
@@ -84,9 +91,18 @@ function findModelOption(configOptions = []) {
     configOptions.find((option) => option.type === "select" && option.category === "model") ?? null;
 }
 
+function currentModelLabel(configOptions = []) {
+  const option = findModelOption(configOptions);
+  if (!option) return "";
+  const active = selectOptions(option).find((entry) => entry.value === option.currentValue);
+  return [active?.name, active?.value, active?.value === "default" ? active?.description : null]
+    .filter(Boolean).join(" ");
+}
+
 function findReasoningEffortOption(configOptions = []) {
   return configOptions.find((option) => option.type === "select" && option.id === "reasoning_effort") ??
-    configOptions.find((option) => option.type === "select" && ["thinking_level", "thought_level"].includes(option.id)) ?? null;
+    configOptions.find((option) => option.type === "select" &&
+      (["thinking_level", "thought_level", "effort"].includes(option.id) || option.category === "thought_level")) ?? null;
 }
 
 const REASONING_EFFORT_FALLBACKS = ["xhigh", "max", "high"];
@@ -516,8 +532,11 @@ export class AcpExecutorJobPort {
     const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-pro-orchestrator-neon" : null);
     await this.applyModel(response.sessionId, response, modelId);
     // Orchestrator models expose no thought_level; default effort only where the model offers one.
-    const defaultEffort = antigravity && findReasoningEffortOption(response.configOptions)
-      ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null;
+    const defaultEffort = !findReasoningEffortOption(response.configOptions) ? null
+      : antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high")
+      : isClaudeCodeAcp(this.initializeResponse)
+        ? (/deepseek.*flash/i.test(currentModelLabel(response.configOptions)) ? "max" : "high")
+      : null;
     const effortId = await this.applyReasoningEffort(response.sessionId, response,
       request.effortId ?? this.effortId ?? defaultEffort);
     return { ...await this.sessionResult(response.sessionId, response), effortId };

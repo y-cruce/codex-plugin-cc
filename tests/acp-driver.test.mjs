@@ -114,6 +114,54 @@ test("new Antigravity sessions default to the orchestrator without effort, named
   }
 });
 
+test("new cca sessions pick default effort from the active model name, honor overrides, skip missing options and leave resume untouched unless given", async () => {
+  for (const row of [
+    { name: "default sonnet (dsf)", effort: "max", requests: 1 },
+    { name: "explicit haiku (dsf)", overrides: { modelId: "haiku" }, model: "haiku", effort: "max", requests: 2 },
+    { name: "explicit opus (glm)", overrides: { modelId: "opus" }, model: "opus", effort: "high", requests: 2 },
+    { name: "default row dsf via description", currentModel: "default", defaultDesc: "deepseek-v4.1-flash-1017", model: "default", effort: "max", requests: 1 },
+    { name: "default row unrecognized model", currentModel: "default", defaultDesc: "Sonnet 4.6", model: "default", effort: "high", requests: 1 },
+    { name: "missing model option", omitModel: true, effort: "high", requests: 1 },
+    { name: "explicit effort override", overrides: { effortId: "low" }, effort: "low", requests: 1 },
+    { name: "missing effort option", omitEffort: true, effort: null, requests: 0 },
+    { name: "resume with restored effort", resume: true, overrides: { effortId: "max" }, effort: "max", requests: 1 },
+    { name: "resume without effort", resume: true, effort: null, requests: 0 }
+  ]) {
+    const configOptions = [];
+    if (!row.omitModel) {
+      configOptions.push({
+        type: "select", id: "model", category: "model", currentValue: row.currentModel ?? "sonnet",
+        options: [
+          { value: "default", name: "Default (recommended)", description: row.defaultDesc ?? "Sonnet" },
+          { value: "sonnet", name: "deepseek-v4.1-flash-1017 (sonnet)", description: "Default model" },
+          { value: "haiku", name: "deepseek-v4.1-flash-1017 (haiku)", description: "Fast model" },
+          { value: "opus", name: "glm-5.4", description: "Opus alias" }
+        ]
+      });
+    }
+    if (!row.omitEffort) {
+      configOptions.push({
+        type: "select", id: "effort", category: "thought_level", currentValue: "default",
+        options: ["default", "low", "medium", "high", "xhigh", "max"].map((value) => ({ value, name: value }))
+      });
+    }
+    const h = recordingPort(configOptions, row.overrides);
+    h.port.initializeResponse = { agentInfo: { name: "@agentclientprotocol/claude-agent-acp" } };
+    h.port.connection.newSession = async () => ({ sessionId: "session-1", ...h.response });
+    h.port.connection.resumeSession = async () => h.response;
+    h.port.sessionResult = async (sessionId, response) => ({ sessionId, configOptions: response.configOptions });
+    const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession({});
+    if (!row.omitModel) {
+      assert.equal(result.configOptions.find((option) => option.id === "model").currentValue, row.model ?? "sonnet", row.name);
+    }
+    assert.equal(result.effortId, row.effort, row.name);
+    const effortReq = h.requests.find((entry) => entry.params.configId === "effort");
+    assert.equal(effortReq?.params.value ?? null, row.effort, row.name);
+    assert.equal(h.requests.length, row.requests, row.name);
+    assert.equal(h.progress.length, 0, row.name);
+  }
+});
+
 test("ACP model selection keeps the agent default unless a model is named", async () => {
   for (const row of [
     { id: "default", expected: null },
