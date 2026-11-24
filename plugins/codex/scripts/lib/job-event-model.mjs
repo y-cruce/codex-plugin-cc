@@ -666,7 +666,9 @@ export function applyJobEvent(view, event, options = {}) {
       else if (event.type === "tool.completed") view.compactingSince = null;
     }
     if (["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.compactingSince = null;
-    if (event.type === "reasoning.started") view.thinkingSince ??= event.occurredAt;
+    if (event.type === "reasoning.started" || event.type === "reasoning.text.delta" || event.type === "reasoning.summary.delta") {
+      view.thinkingSince ??= event.occurredAt;
+    }
     else if ((text != null && !event.type.startsWith("reasoning.") && event.type !== "agent.activity")
       || ["turn.completed", "job.completed", "job.failed", "job.cancelled"].includes(event.type)) view.thinkingSince = null;
   }

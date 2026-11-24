@@ -838,3 +838,26 @@ test("executorView maps ACP launcher commands including cc-acp and claude-agent-
   }
   assert.equal(executorView({ executor: "acp", request: { executorCommand: "cc-acp" } }).label.toLowerCase(), "cca");
 });
+
+test("reasoning deltas after a tool call restore thinkingSince without a fresh reasoning.started", () => {
+  const job = { id: "job-think", executor: "acp", threadId: "session-1" };
+  const view = createLiveView(job);
+  const push = (seq, type, at, payload) => {
+    const event = createCanonicalEvent({
+      job, executor: "acp", type,
+      identity: { sessionId: "session-1", turnId: "turn-1", messageId: "reasoning:turn-1/reasoning/0" },
+      occurredAt: at, receivedAt: at, payload,
+    });
+    event.seq = String(seq);
+    applyJobEvent(view, event);
+  };
+  push(1, "reasoning.started", "2026-11-24T14:53:15.000Z", { summaryIndex: null });
+  assert.equal(view.thinkingSince, "2026-11-24T14:53:15.000Z");
+  push(2, "tool.completed", "2026-11-24T14:55:29.000Z", { tool: { name: "read_file", title: "File a.py", status: "completed" } });
+  assert.equal(view.thinkingSince, null);
+  push(3, "reasoning.text.delta", "2026-11-24T14:55:39.000Z", { delta: "analyzing...", summaryIndex: null });
+  push(4, "reasoning.text.delta", "2026-11-24T14:56:10.000Z", { delta: "more...", summaryIndex: null });
+  assert.equal(view.thinkingSince, "2026-11-24T14:55:39.000Z");
+  push(5, "message.delta", "2026-11-24T15:00:05.000Z", { role: "assistant", block: { type: "text", text: "Done." } });
+  assert.equal(view.thinkingSince, null);
+});
