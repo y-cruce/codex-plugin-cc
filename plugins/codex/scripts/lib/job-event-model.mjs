@@ -242,7 +242,8 @@ export function executorView(job) {
   const command = String(job?.request?.executorCommand ?? "").replace(/\\/g, "/").split("/").at(-1);
   const acpLabel = /^dsh(?:-[\w-]+)?(?:\.(?:exe|cmd))?$/i.test(command) ? "DSH"
     : /^qoder(?:cli)?(?:\.(?:exe|cmd))?$/i.test(command) ? "Qoder"
-    : /^agy(?:_acp_server)?(?:\.(?:par|exe))?$/i.test(command) ? "Antigravity" : "ACP";
+    : /^agy(?:_acp_server)?(?:\.(?:par|exe))?$/i.test(command) ? "Antigravity"
+    : /^(?:cc-acp|claude-agent-acp)(?:\.(?:mjs|js|exe|cmd))?$/i.test(command) ? "CCA" : "ACP";
   return { kind: executor, label: executor === "acp" ? acpLabel : "Codex" };
 }
 
@@ -475,12 +476,16 @@ export function applyJobEvent(view, event, options = {}) {
         text = null;
       }
       break;
-    case "command.started":
-      Object.assign(state, { command: unwrapCommand(p.command), cwd: p.cwd, turnId: identity.turnId });
-      view.activeCommands.push({ itemId: identity.toolCallId, command: state.command, cwd: p.cwd, startedAt: event.occurredAt, _key: key,
+    case "command.started": {
+      const command = unwrapCommand(p.command);
+      Object.assign(state, { command, commandKnown: p.commandKnown !== false, cwd: p.cwd, turnId: identity.turnId });
+      const active = view.activeCommands.find((entry) => entry._key === key);
+      if (active) Object.assign(active, { command, cwd: p.cwd ?? active.cwd });
+      else view.activeCommands.push({ itemId: identity.toolCallId, command, cwd: p.cwd, startedAt: event.occurredAt, _key: key,
         ...(child ? { agentThreadId: event.agent.id } : {}) });
       tailKey = key;
       break;
+    }
     case "command.output.delta":
       if (!state.outputPreviewTruncated) {
         state.output = `${String(state.output ?? "").slice(0, 242)}${String(p.delta ?? "").slice(0, 242)}`.slice(0, 242);
@@ -494,15 +499,17 @@ export function applyJobEvent(view, event, options = {}) {
       text = `$ ${state.command ?? ""}`;
       tailKey = key;
       break;
-    case "command.completed":
+    case "command.completed": {
       view.activeCommands = view.activeCommands.filter((command) => command._key !== key);
-      text = `$ ${state?.command ?? unwrapCommand(p.command)}`;
+      const completed = unwrapCommand(p.command);
+      text = `$ ${p.commandKnown !== false && completed ? completed : state?.command ?? completed}`;
       // Output that never streamed as deltas arrives whole at completion.
       if (state && !state.outputPreview && p.outputText) {
         state.outputPreview = preview(String(p.outputText).replace(/\r\n?/g, "\n"), 120, true);
       }
       tailKey = key;
       break;
+    }
     case "tool.started": case "tool.updated": case "tool.completed":
       tailKey = key;
       break;

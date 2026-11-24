@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
 import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
 import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
-import { renderJobEvent, createLiveView, applyJobEvent, jobConfig, questionIds } from "../plugins/codex/scripts/lib/job-event-model.mjs";
+import { renderJobEvent, createLiveView, applyJobEvent, executorView, jobConfig, questionIds } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
 
 function harness(job = {}) {
@@ -762,4 +762,79 @@ test("terminal failure and cancellation events carry their reason in logs and li
     applyJobEvent(view, event);
     assert.equal(view.tail[0].text, tail, type);
   }
+});
+
+test("command lifecycle updates placeholder commands in place and prefers known completed commands", () => {
+  const cases = [
+    {
+      name: "placeholder start overwritten by known completion (history replay)",
+      events: [
+        { type: "command.started", at: "2026-11-24T10:00:00.000Z", payload: { command: "Terminal", commandKnown: false, cwd: null, startedAt: "2026-11-24T10:00:00.000Z" } },
+        { type: "command.completed", at: "2026-11-24T10:00:02.000Z", payload: { command: "pwd", commandKnown: true, cwd: "/repo", status: "completed", exitCode: null, signal: null, durationMs: null, output: [], outputText: null } },
+      ],
+      finalActive: [],
+      finalText: "$ pwd",
+    },
+    {
+      name: "same-key command.started updates activeCommands and tail in place keeping initial startedAt",
+      events: [
+        { type: "command.started", at: "2026-11-24T10:00:00.000Z", payload: { command: "Terminal", commandKnown: false, cwd: null, startedAt: "2026-11-24T10:00:00.000Z" } },
+        { type: "command.started", at: "2026-11-24T10:00:01.000Z", payload: { command: "ls -la", commandKnown: true, cwd: "/repo", startedAt: "2026-11-24T10:00:01.000Z" } },
+      ],
+      finalActive: [{ itemId: "cmd-1", command: "ls -la", cwd: "/repo", startedAt: "2026-11-24T10:00:00.000Z", _key: JSON.stringify(["session-1", "turn-1", "cmd-1"]) }],
+      finalText: "$ ls -la",
+    },
+    {
+      name: "known start preserved when completion carries unknown placeholder or empty command",
+      events: [
+        { type: "command.started", at: "2026-11-24T10:00:00.000Z", payload: { command: "npm test", commandKnown: true, cwd: "/repo", startedAt: "2026-11-24T10:00:00.000Z" } },
+        { type: "command.completed", at: "2026-11-24T10:00:02.000Z", payload: { command: "Terminal", commandKnown: false, cwd: null, status: "completed", exitCode: 0, signal: null, durationMs: 5, output: [], outputText: null } },
+      ],
+      finalActive: [],
+      finalText: "$ npm test",
+    },
+    {
+      name: "known start preserved when completion has empty command string",
+      events: [
+        { type: "command.started", at: "2026-11-24T10:00:00.000Z", payload: { command: "npm test", commandKnown: true, cwd: "/repo", startedAt: "2026-11-24T10:00:00.000Z" } },
+        { type: "command.completed", at: "2026-11-24T10:00:02.000Z", payload: { command: "", commandKnown: true, cwd: null, status: "completed", exitCode: 0, signal: null, durationMs: 5, output: [], outputText: null } },
+      ],
+      finalActive: [],
+      finalText: "$ npm test",
+    },
+  ];
+  for (const c of cases) {
+    const job = { id: "job-cmd", executor: "acp", threadId: "session-1" };
+    const view = createLiveView(job);
+    c.events.forEach((step, index) => {
+      const event = createCanonicalEvent({
+        job, executor: "acp", type: step.type,
+        identity: { sessionId: "session-1", turnId: "turn-1", toolCallId: "cmd-1" },
+        occurredAt: step.at, receivedAt: step.at, payload: step.payload,
+      });
+      event.seq = String(index + 1);
+      applyJobEvent(view, event);
+    });
+    assert.deepEqual(view.activeCommands, c.finalActive, c.name);
+    assert.equal(view.tail.length, 1, c.name);
+    assert.equal(view.tail[0].text, c.finalText, c.name);
+  }
+});
+
+test("executorView maps ACP launcher commands including cc-acp and claude-agent-acp", () => {
+  const cases = [
+    [{ executor: "acp", request: { executorCommand: "/Users/test/.local/bin/cc-acp" } }, { kind: "acp", label: "CCA" }],
+    [{ executor: "acp", request: { executorCommand: "cc-acp.mjs" } }, { kind: "acp", label: "CCA" }],
+    [{ executor: "acp", request: { executorCommand: "/usr/local/bin/claude-agent-acp" } }, { kind: "acp", label: "CCA" }],
+    [{ executor: "acp", request: { executorCommand: "claude-agent-acp.cmd" } }, { kind: "acp", label: "CCA" }],
+    [{ executor: "acp", request: { executorCommand: "dsh-acp" } }, { kind: "acp", label: "DSH" }],
+    [{ executor: "acp", request: { executorCommand: "qodercli" } }, { kind: "acp", label: "Qoder" }],
+    [{ executor: "acp", request: { executorCommand: "agy_acp_server.par" } }, { kind: "acp", label: "Antigravity" }],
+    [{ executor: "acp", request: { executorCommand: "other-agent" } }, { kind: "acp", label: "ACP" }],
+    [{ executor: "codex" }, { kind: "codex", label: "Codex" }],
+  ];
+  for (const [job, expected] of cases) {
+    assert.deepEqual(executorView(job), expected, JSON.stringify(job));
+  }
+  assert.equal(executorView({ executor: "acp", request: { executorCommand: "cc-acp" } }).label.toLowerCase(), "cca");
 });

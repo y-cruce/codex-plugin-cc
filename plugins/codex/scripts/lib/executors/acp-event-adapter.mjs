@@ -110,6 +110,13 @@ function manageTaskTitle(input) {
   return null;
 }
 
+function titleIncludesPath(title, filePath) {
+  if (!title || !filePath) return false;
+  const normalized = filePath.replace(/\\/g, "/");
+  if (title.includes(filePath) || title.includes(normalized)) return true;
+  return title.split(/\s+/u).some((token) => token.length > 0 && normalized.endsWith(`/${token.replace(/\\/g, "/")}`));
+}
+
 // A shell tool arrives titled with the agent's own word for it -- DSH sends
 // "bash" -- and the command it runs in rawInput. A row that shows the title
 // alone says only "bash"; the command joins it the way a Codex command row
@@ -127,6 +134,7 @@ function toolTitle(tool) {
   if (tool.kind === "read" && typeof input?.file_path === "string" && input.file_path) {
     const range = Number.isInteger(input.start_line) && Number.isInteger(input.end_line)
       ? ` (lines ${input.start_line}–${input.end_line})` : "";
+    if (titleIncludesPath(title, input.file_path)) return `${title}${range}`;
     return `${title ?? String(tool.toolCallId)}: ${input.file_path}${range}`;
   }
   const command = typeof tool.rawInput?.command === "string" ? tool.rawInput.command.trim() : "";
@@ -395,21 +403,32 @@ export class AcpEventAdapter {
       return;
     }
     if (tool.kind === "execute") {
-      if (created) await this.emit("command.started", { command: commandText(tool), commandKnown: typeof tool.rawInput?.command === "string",
-        cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);
+      const commandKnown = typeof tool.rawInput?.command === "string";
+      const refined = !created && !terminal && tool._commandKnown === false && commandKnown;
+      if (created || refined) {
+        tool._commandKnown = commandKnown;
+        await this.emit("command.started", { command: commandText(tool), commandKnown,
+          cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);
+      }
       if (terminal) await this.emit("command.completed", commandPayload(tool), identity, notification);
       return;
     }
-    // Whether this tool changes files is settled when it is created and kept
-    // for its whole life: its completion replaces the diff with a result, and
-    // deciding again there would send a fileChange.completed for a tool whose
-    // start was never reported as one.
-    if (!Object.hasOwn(tool, "_files")) tool._files = toolFiles(tool).length > 0;
+    // Whether this tool changes files is settled once it carries input or a
+    // diff, and kept for its whole life so completion cannot turn a phantom
+    // edit (like Qoder's empty-diff task call) into a file change. A streamed
+    // tool call that starts empty waits for its arguments before deciding.
+    const emptyStart = created && !(tool.content?.length) && !(tool.locations?.length) && !Object.keys(tool.rawInput ?? {}).length;
+    const wasFiles = tool._files === true;
+    if (!wasFiles && tool._files !== false && (!emptyStart || terminal)) {
+      const hasFiles = toolFiles(tool).length > 0;
+      if (hasFiles || created || terminal) tool._files = hasFiles;
+    }
     if (tool._files && ["edit", "delete", "move"].includes(tool.kind)) {
       const payload = { status: terminal ? (tool.status === "failed" ? "failed" : "completed") : "in_progress", files: toolFiles(tool) };
-      if (created) await this.emit("fileChange.started", payload, identity, notification);
+      const started = created || !wasFiles;
+      if (started) await this.emit("fileChange.started", payload, identity, notification);
       if (terminal) await this.emit("fileChange.completed", payload, identity, notification);
-      else if (!created) await this.emit("fileChange.patch.updated", payload, identity, notification);
+      else if (!started) await this.emit("fileChange.patch.updated", payload, identity, notification);
       return;
     }
     const payload = { tool: toolSnapshot(tool) };

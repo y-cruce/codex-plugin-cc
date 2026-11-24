@@ -65,6 +65,125 @@ test("ACP submitted steering, accepted queue and interrupt messages use director
   }
 });
 
+test("ACP streamed execute, read and edit tool calls update in place without duplicating paths or losing file changes", async () => {
+  // Streamed execute: placeholder title refined mid-run, refined only at completion, or already known on first frame.
+  const commandCases = [
+    {
+      name: "cca refines command while running",
+      updates: [
+        ["tool_call", { toolCallId: "cmd-1", kind: "execute", title: "Terminal", rawInput: {}, status: "pending" }],
+        ["tool_call_update", { toolCallId: "cmd-1", title: "ls -la", rawInput: { command: "ls -la", cwd: "/repo" }, status: "in_progress" }],
+        ["tool_call_update", { toolCallId: "cmd-1", title: "ls -la", status: "in_progress" }],
+      ],
+      runningCmd: "ls -la",
+      runningCwd: "/repo",
+      startedCount: 2,
+      finish: { toolCallId: "cmd-1", status: "completed" },
+      finalText: "$ ls -la",
+    },
+    {
+      name: "cca sends command only at completion",
+      updates: [
+        ["tool_call", { toolCallId: "cmd-2", kind: "execute", title: "Terminal", rawInput: {}, status: "pending" }],
+      ],
+      runningCmd: "Terminal",
+      runningCwd: null,
+      startedCount: 1,
+      finish: { toolCallId: "cmd-2", title: "git status", rawInput: { command: "git status" }, status: "completed" },
+      finalText: "$ git status",
+    },
+    {
+      name: "initial command avoids duplicate started event",
+      updates: [
+        ["tool_call", { toolCallId: "cmd-3", kind: "execute", title: "pwd", rawInput: { command: "pwd", cwd: "/repo" }, status: "pending" }],
+        ["tool_call_update", { toolCallId: "cmd-3", rawInput: { command: "pwd", cwd: "/repo" }, status: "in_progress" }],
+      ],
+      runningCmd: "pwd",
+      runningCwd: "/repo",
+      startedCount: 1,
+      finish: { toolCallId: "cmd-3", status: "completed" },
+      finalText: "$ pwd",
+    },
+  ];
+  for (const c of commandCases) {
+    let tick = Date.parse("2026-10-23T00:00:00Z");
+    const h = harness({ receiveTime: () => new Date((tick += 1000)) });
+    await h.adapter.startTurn("turn", []);
+    for (const [kind, body] of c.updates) await h.update(kind, body);
+    const firstStartedAt = h.events.find((e) => e.type === "command.started").occurredAt;
+    assert.equal(h.events.filter((e) => e.type === "command.started").length, c.startedCount, c.name);
+    assert.equal(h.view.activeCommands.length, 1, c.name);
+    assert.equal(h.view.activeCommands[0].command, c.runningCmd, c.name);
+    assert.equal(h.view.activeCommands[0].cwd, c.runningCwd, c.name);
+    assert.equal(h.view.activeCommands[0].startedAt, firstStartedAt, c.name);
+    assert.equal(h.view.tail.length, 1, c.name);
+    assert.equal(h.view.tail[0].text, `$ ${c.runningCmd}`, c.name);
+    await h.update("tool_call_update", c.finish);
+    assert.equal(h.view.activeCommands.length, 0, c.name);
+    assert.equal(h.view.tail.length, 1, c.name);
+    assert.equal(h.view.tail[0].text, c.finalText, c.name);
+  }
+
+  // Read title deduplication across cca (absolute/relative) and agy (view_file).
+  const readCases = [
+    ["cca absolute path", "Read /Users/test/SKILL.md", { file_path: "/Users/test/SKILL.md" }, "Read /Users/test/SKILL.md"],
+    ["cca relative path", "Read skills/sls/SKILL.md", { file_path: "/Users/test/repo/skills/sls/SKILL.md" }, "Read skills/sls/SKILL.md"],
+    ["cca path with explicit line range", "Read /repo/a.ts", { file_path: "/repo/a.ts", start_line: 10, end_line: 20 }, "Read /repo/a.ts (lines 10–20)"],
+    ["agy view_file keeps path and range", "Running view_file", { file_path: "/repo/src/App.jsx", start_line: 0, end_line: 99 }, "Running view_file: /repo/src/App.jsx (lines 0–99)"],
+  ];
+  for (const [name, title, rawInput, expected] of readCases) {
+    const h = harness();
+    await h.adapter.startTurn("turn", []);
+    await h.update("tool_call", { toolCallId: "read", kind: "read", title, rawInput, status: "pending" });
+    await h.update("tool_call_update", { toolCallId: "read", status: "completed" });
+    assert.equal(h.events.at(-1).payload.tool.title, expected, name);
+  }
+
+  // Streamed Write/Edit starts empty then transitions to fileChange.*; Qoder empty diff at creation remains tool.*.
+  const editCases = [
+    {
+      name: "cca streamed Write",
+      updates: [
+        ["tool_call", { toolCallId: "w1", kind: "edit", title: "Preparing file…", rawInput: {}, content: [], locations: [], status: "pending", _meta: { claudeCode: { toolName: "Write" } } }],
+        ["tool_call_update", { toolCallId: "w1", title: "Write /repo/note.md", rawInput: { file_path: "/repo/note.md" }, content: [{ type: "diff", path: "/repo/note.md", oldText: null }], locations: [{ path: "/repo/note.md" }], status: "pending" }],
+        ["tool_call_update", { toolCallId: "w1", rawInput: { file_path: "/repo/note.md", content: "# hi\n" }, content: [{ type: "diff", path: "/repo/note.md", oldText: null, newText: "# hi\n" }], status: "pending" }],
+        ["tool_call_update", { toolCallId: "w1", status: "completed" }],
+      ],
+      expectedTypes: ["tool.started", "tool.updated", "fileChange.started", "fileChange.completed"],
+      expectedFiles: [{ path: "/repo/note.md", kind: "add", additions: null, deletions: null }],
+    },
+    {
+      name: "cca streamed Edit",
+      updates: [
+        ["tool_call", { toolCallId: "e1", kind: "edit", title: "Edit", rawInput: {}, content: [], locations: [], status: "pending", _meta: { claudeCode: { toolName: "Edit" } } }],
+        ["tool_call_update", { toolCallId: "e1", title: "Edit /repo/note.md", rawInput: { file_path: "/repo/note.md" }, locations: [{ path: "/repo/note.md" }], status: "pending" }],
+        ["tool_call_update", { toolCallId: "e1", rawInput: { file_path: "/repo/note.md", old_string: "hi", new_string: "bye" }, content: [{ type: "diff", path: "/repo/note.md", oldText: "hi", newText: "bye" }], status: "pending" }],
+        ["tool_call_update", { toolCallId: "e1", status: "completed" }],
+      ],
+      expectedTypes: ["tool.started", "fileChange.started", "fileChange.patch.updated", "fileChange.completed"],
+      expectedFiles: [{ path: "/repo/note.md", kind: "update", additions: null, deletions: null }],
+    },
+    {
+      name: "qoder empty diff at creation stays non-file tool",
+      updates: [
+        ["tool_call", { toolCallId: "q1", kind: "edit", title: "Edit file", content: [{ type: "diff", path: "file", oldText: "", newText: "" }], locations: [{ path: "file" }], rawInput: { subject: "task" }, _meta: { qoder: { toolName: "TaskCreate" } }, status: "pending" }],
+        ["tool_call_update", { toolCallId: "q1", status: "completed", content: [{ type: "content", content: { type: "text", text: "ok" } }] }],
+      ],
+      expectedTypes: ["tool.started", "tool.completed"],
+      expectedFiles: [],
+    },
+  ];
+  for (const c of editCases) {
+    const h = harness();
+    await h.adapter.startTurn("turn", []);
+    for (const [kind, body] of c.updates) await h.update(kind, body);
+    const emitted = h.events.filter((e) => e.type !== "turn.started").map((e) => e.type);
+    assert.deepEqual(emitted, c.expectedTypes, c.name);
+    assert.deepEqual(h.view.files, c.expectedFiles, c.name);
+    assert.equal(h.view.tail.length, c.expectedFiles.length ? 1 : 0, c.name);
+  }
+});
+
 test("ACP shell lifecycle renders one command or tool row, including legacy progress and failures without exit codes", async () => {
   for (const [kind, status] of [["execute", "completed"], ["other", "completed"], ["execute", "failed"]]) {
     const h = harness();
