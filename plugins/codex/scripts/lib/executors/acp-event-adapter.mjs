@@ -404,8 +404,17 @@ export class AcpEventAdapter {
     }
     if (tool.kind === "execute") {
       const commandKnown = typeof tool.rawInput?.command === "string";
+      // A streamed call (claude-agent-acp) opens with an empty rawInput and a
+      // placeholder title, and its command follows a moment later, before it
+      // runs. Wait for the command instead of showing the placeholder row.
+      if (created && !terminal && !Object.keys(tool.rawInput ?? {}).length) {
+        tool._commandKnown = false;
+        tool._shown = false;
+        return;
+      }
       const refined = !created && !terminal && tool._commandKnown === false && commandKnown;
-      if (created || refined) {
+      if (created || refined || (tool._shown === false && terminal)) {
+        tool._shown = true;
         tool._commandKnown = commandKnown;
         await this.emit("command.started", { command: commandText(tool), commandKnown,
           cwd: typeof tool.rawInput?.cwd === "string" ? tool.rawInput.cwd : null, startedAt: this.receiveTime().toISOString() }, identity, notification);

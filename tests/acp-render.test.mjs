@@ -77,7 +77,7 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
       ],
       runningCmd: "ls -la",
       runningCwd: "/repo",
-      startedCount: 2,
+      startedCount: 1,
       finish: { toolCallId: "cmd-1", status: "completed" },
       finalText: "$ ls -la",
     },
@@ -86,9 +86,9 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
       updates: [
         ["tool_call", { toolCallId: "cmd-2", kind: "execute", title: "Terminal", rawInput: {}, status: "pending" }],
       ],
-      runningCmd: "Terminal",
+      runningCmd: null,
       runningCwd: null,
-      startedCount: 1,
+      startedCount: 0,
       finish: { toolCallId: "cmd-2", title: "git status", rawInput: { command: "git status" }, status: "completed" },
       finalText: "$ git status",
     },
@@ -110,14 +110,20 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
     const h = harness({ receiveTime: () => new Date((tick += 1000)) });
     await h.adapter.startTurn("turn", []);
     for (const [kind, body] of c.updates) await h.update(kind, body);
-    const firstStartedAt = h.events.find((e) => e.type === "command.started").occurredAt;
     assert.equal(h.events.filter((e) => e.type === "command.started").length, c.startedCount, c.name);
-    assert.equal(h.view.activeCommands.length, 1, c.name);
-    assert.equal(h.view.activeCommands[0].command, c.runningCmd, c.name);
-    assert.equal(h.view.activeCommands[0].cwd, c.runningCwd, c.name);
-    assert.equal(h.view.activeCommands[0].startedAt, firstStartedAt, c.name);
-    assert.equal(h.view.tail.length, 1, c.name);
-    assert.equal(h.view.tail[0].text, `$ ${c.runningCmd}`, c.name);
+    if (c.runningCmd === null) {
+      // No placeholder row before the command is known.
+      assert.equal(h.view.activeCommands.length, 0, c.name);
+      assert.equal(h.view.tail.length, 0, c.name);
+    } else {
+      const firstStartedAt = h.events.find((e) => e.type === "command.started").occurredAt;
+      assert.equal(h.view.activeCommands.length, 1, c.name);
+      assert.equal(h.view.activeCommands[0].command, c.runningCmd, c.name);
+      assert.equal(h.view.activeCommands[0].cwd, c.runningCwd, c.name);
+      assert.equal(h.view.activeCommands[0].startedAt, firstStartedAt, c.name);
+      assert.equal(h.view.tail.length, 1, c.name);
+      assert.equal(h.view.tail[0].text, `$ ${c.runningCmd}`, c.name);
+    }
     await h.update("tool_call_update", c.finish);
     assert.equal(h.view.activeCommands.length, 0, c.name);
     assert.equal(h.view.tail.length, 1, c.name);
