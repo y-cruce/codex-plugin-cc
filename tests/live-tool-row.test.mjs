@@ -805,6 +805,10 @@ describe('live row polish', () => {
     data.tail = [{ seq: 'c', type: 'command.completed', text: '$ ls', exitCode: 0 }, edit('1', '/r/a.ts'), edit('2', '/r/b.ts', 'failed'), edit('3', '/r/a.ts')]
     const rendered = rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf)
     assert.deepEqual(rendered.slice(-2), ['● Editing 2 files +4 -2, running 1 shell command · failed…', '  ⎿  a.ts'])
+    // A retried edit that later succeeds on the same file clears the group's failed tag.
+    data.tail = [...data.tail, edit('4', '/r/b.ts', 'completed')]
+    assert.deepEqual(rowsOf(liveTree($.ui.resolve(row()), data, 80, 0, 48)).map(textOf).slice(-2),
+      ['● Editing 2 files +4 -2, running 1 shell command…', '  ⎿  b.ts'])
     // Nonzero commands retain their own row without output.
     const run = (seq, text, exitCode = 0) => ({ seq, type: 'command.completed', text, exitCode, durationMs: 1000 })
     data.tail = [run('1', '$ ls'), run('2', '$ pwd'), { ...run('3', '$ false', 1), output: 'boom' }, run('4', '$ date'), run('5', '$ id')]

@@ -520,9 +520,10 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       separate(false)
       const commands = items.filter(isQuietCommand)
       const edits = items.filter(isFileRow)
-      const files = edits.flatMap(item => item.files!).reduce<NonNullable<TailRow['files']>>((seen, file) =>
-        [...seen.filter(previous => previous.path !== file.path), file], [])
-      const failed = edits.some(item => item.status === 'failed')
+      const latestEdits = new Map<string, { file: NonNullable<TailRow['files']>[number]; failed: boolean }>()
+      for (const item of edits) for (const file of item.files!) latestEdits.set(file.path, { file, failed: item.status === 'failed' })
+      const files = [...latestEdits.values()].map(entry => entry.file)
+      const failed = [...latestEdits.values()].some(entry => entry.failed)
       const active = index === grouped.length - 1 && !isOver(data)
       const known = files.filter(file => file.additions != null)
       const added = known.reduce((sum, file) => sum + file.additions!, 0)

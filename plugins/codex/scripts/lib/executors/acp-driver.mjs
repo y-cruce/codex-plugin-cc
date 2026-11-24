@@ -530,11 +530,11 @@ export class AcpExecutorJobPort {
     const response = await this.connection.newSession(params);
     this.startupPhase = "ready";
     await this.applyMode(response.sessionId, response, request.modeId ?? this.modeId);
-    const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || "gemini-pro-orchestrator-neon" : null);
+    const modelId = request.modelId ?? this.modelId ?? (antigravity ? process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL || null : null);
     await this.applyModel(response.sessionId, response, modelId);
-    // Orchestrator models expose no thought_level; default effort only where the model offers one.
+    // Without a model override, agy keeps the model and effort from ~/.gemini/antigravity-cli/settings.json.
     const defaultEffort = !findReasoningEffortOption(response.configOptions) ? null
-      : antigravity ? (modelId.startsWith("claude-opus-") ? "medium" : "high")
+      : antigravity ? (modelId ? (modelId.startsWith("claude-opus-") ? "medium" : "high") : null)
       : isClaudeCodeAcp(this.initializeResponse)
         ? (/deepseek.*flash/i.test(currentModelLabel(response.configOptions)) ? "max" : "high")
       : null;

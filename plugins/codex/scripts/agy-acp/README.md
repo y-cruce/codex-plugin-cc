@@ -20,10 +20,12 @@ node plugins/codex/scripts/codex-companion.mjs task \
   --json "Inspect the project"
 ```
 
-New sessions default to `gemini-pro-orchestrator-neon`, which exposes no thinking
-level. Other explicit models default to high thinking, Opus to medium; explicit model/effort options take priority. The
-server exposes effort as `thought_level`. Continued sessions retain their
-existing settings unless explicitly overridden.
+New sessions use `$CODEX_COMPANION_ANTIGRAVITY_MODEL` if set, otherwise follow
+`~/.gemini/antigravity-cli/settings.json` without overriding model or effort.
+Explicit models default to high thinking, Opus to medium (when the model exposes
+an effort option); explicit model/effort options take priority. The server
+exposes effort as `thought_level`. Continued sessions retain their existing
+settings unless explicitly overridden.
 
 agy asks native questions through `elicitation/create`, since the driver
 advertises form elicitation. Each question `qN` is a string field whose `oneOf`
@@ -107,8 +109,9 @@ launcher is backed up as `launch.sh.before-standalone-proxy-20261112`.
 Existing jobs keep their recorded command and arguments; continue uses those
 instead of the new preset.
 
-派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。默认 gemini-pro-orchestrator-neon（没有思考强度选项），
-显式选其他模型默认 high，Opus 默认 medium；显式 model/effort 优先。运行中纠偏使用同一会话的
+派单使用 CLI 自带的 `agy acp`，复用现有登录和 MCP 配置。未设 `$CODEX_COMPANION_ANTIGRAVITY_MODEL`
+且未显式指定模型时，直接沿用 `~/.gemini/antigravity-cli/settings.json` 中的模型与思考强度；
+显式选其他模型默认 high，Opus 默认 medium（模型提供思考强度选项时）；显式 model/effort 优先。运行中纠偏使用同一会话的
 新 prompt，等待最新响应后结束原任务。提前 `end_turn` 时，原任务继续等待
 后台命令或 `schedule`。后台命令依靠实时更新追踪，60 秒无更新才读取状态快照，
 累计等待上限为 30 分钟。工具结束后若收到 agy 自唤醒的回复，驱动在 25 秒静默后完成任务。

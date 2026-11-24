@@ -68,11 +68,13 @@ function recordingPort(configOptions, options = {}) {
   return { port, requests, progress, response: { configOptions } };
 }
 
-test("new Antigravity sessions default to the orchestrator without effort, named models to high or Opus medium, honor overrides and preserve resumed sessions", async () => {
+test("new Antigravity sessions follow settings.json by default, apply effort defaults on explicit models, honor overrides and preserve resumed sessions", async () => {
   const home = makeTempDir();
   for (const row of [
-    { agent: "antigravity-acp", model: "gemini-pro-orchestrator-neon", effort: null, requests: 1 },
-    { agent: "Antigravity ACP Server", model: "gemini-pro-orchestrator-neon", effort: null, requests: 1 },
+    { agent: "antigravity-acp", model: "gemini-3.8-flash", effort: "low", effortId: null, requests: 0 },
+    { agent: "Antigravity ACP Server", model: "gemini-3.8-flash", effort: "low", effortId: null, requests: 0 },
+    { agent: "Antigravity ACP Server", overrides: { effortId: "high" }, model: "gemini-3.8-flash", effort: "high", requests: 1 },
+    { agent: "Antigravity ACP Server", overrides: { modelId: "gemini-pro-orchestrator-neon" }, model: "gemini-pro-orchestrator-neon", effort: null, requests: 1 },
     { agent: "antigravity-acp", overrides: { modelId: "gemini-4-neon" }, model: "gemini-4-neon", effort: "high" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "Antigravity ACP Server", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
@@ -81,8 +83,8 @@ test("new Antigravity sessions default to the orchestrator without effort, named
     { agent: "antigravity-acp", request: { modelId: "claude-opus-5-5" }, model: "claude-opus-5-5", effort: "medium" },
     { agent: "antigravity-acp", overrides: { modelId: "claude-opus-5-5", effortId: "high" }, model: "claude-opus-5-5", effort: "high" },
     { agent: "antigravity-acp", overrides: { modelId: "gemini-3.8-flash", effortId: "low" }, model: "gemini-3.8-flash", effort: "low" },
-    { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low" },
-    { agent: "other-acp", model: "gemini-3.8-flash", effort: "low" }
+    { agent: "antigravity-acp", resume: true, model: "gemini-3.8-flash", effort: "low", effortId: null, requests: 0 },
+    { agent: "other-acp", model: "gemini-3.8-flash", effort: "low", effortId: null, requests: 0 }
   ]) {
     const effortOption = row.agent === "Antigravity ACP Server" ? "thought_level" : "thinking_level";
     const h = recordingPort([
@@ -105,11 +107,10 @@ test("new Antigravity sessions default to the orchestrator without effort, named
     else delete process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL;
     const result = row.resume ? await h.port.resumeSession({ sessionId: "session-1" }) : await h.port.startSession(row.request ?? {});
     delete process.env.CODEX_COMPANION_ANTIGRAVITY_MODEL;
-    const configured = Boolean(row.overrides) || ["antigravity-acp", "Antigravity ACP Server"].includes(row.agent) && !row.resume;
     assert.equal(result.configOptions.find(option => option.id === "model").currentValue, row.model);
     assert.equal(result.configOptions.find(option => option.id === effortOption)?.currentValue ?? null, row.effort);
-    assert.equal(result.effortId, configured ? row.effort : null);
-    assert.equal(h.requests.length, row.requests ?? (configured ? 2 : 0));
+    assert.equal(result.effortId, "effortId" in row ? row.effortId : row.effort);
+    assert.equal(h.requests.length, row.requests ?? 2);
     assert.equal(h.progress.length, 0);
   }
 });
