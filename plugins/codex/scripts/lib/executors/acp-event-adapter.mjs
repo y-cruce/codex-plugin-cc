@@ -487,18 +487,35 @@ export class AcpEventAdapter {
   }
 }
 
+// A titled enum option as the pane holds it: the adapter sends the option's
+// own trade-off in `description` (dist/elicitation.js), and the director
+// answers from that text alone.
+function enumOption(entry) {
+  return { value: String(entry.const), label: entry.title ?? String(entry.const),
+    ...(entry.description ? { description: entry.description } : {}) };
+}
+
 export function normalizeAcpQuestion(params, requestId, receivedAt) {
   const schema = params.requestedSchema ?? params.schema ?? {};
   const required = new Set(schema.required ?? []);
   const fields = Object.entries(schema.properties ?? {}).map(([id, field]) => {
-    const options = field.oneOf?.map((entry) => ({ value: String(entry.const), label: entry.title ?? String(entry.const) })) ??
+    const options = field.oneOf?.map(enumOption) ??
       field.enum?.map((value) => ({ value: String(value), label: String(value) })) ??
+      field.items?.anyOf?.map(enumOption) ??
       field.items?.enum?.map((value) => ({ value: String(value), label: String(value) }));
     return { id, title: field.title ?? null, description: field.description ?? null, required: required.has(id),
       kind: field.type === "array" ? "multi_select" : field.type === "string" && options ? "single_select"
         : ["string", "number", "integer", "boolean"].includes(field.type) ? (field.type === "string" ? "text" : field.type) : "unknown",
       ...(options ? { options } : {}), rawSchema: structuredClone(field) };
   });
+  // claude-agent-acp's AskUserQuestion bridge names its question fields
+  // `question_<n>` with a `question_<n>_custom` companion (dist/elicitation.js).
+  // A form with one question carries that question's text only in `message`
+  // and leaves the field's description empty, so the reader would show the
+  // short header alone. Other agents' forms keep the wording they send.
+  const asked = fields.filter((field) => /^question_\d+$/.test(field.id));
+  if (asked.length === 1 && asked[0].description == null && schema.properties?.[`${asked[0].id}_custom`] &&
+      typeof params.message === "string" && params.message.trim()) asked[0].description = params.message.trim();
   return { requestId, message: params.message ?? "", mode: params.mode === "form" ? "form" : params.mode === "url" ? "url" : "custom",
     fields, url: params.url ?? null, openedAt: receivedAt, expiresAt: null };
 }

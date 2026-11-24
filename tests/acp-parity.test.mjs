@@ -7,6 +7,7 @@ import { resolveTaskExecutor } from "../plugins/codex/scripts/codex-companion.mj
 import { runAcpTurn } from "../plugins/codex/scripts/lib/acp.mjs";
 import { AcpExecutorJobPort } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
 import { readJobFile, resolveJobFile, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { questionText } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
@@ -130,6 +131,61 @@ test("an agy form answer sends the option value and the note in its other field"
   await port.answerQuestion({ requestId: pending.requestId, action: "accept",
     values: { q1: { answers: ["A (Recommended)"] }, q1_other: { answers: ["keep the old path"] } } });
   assert.deepEqual(await reply, { action: "accept", content: { q1: "1", q1_other: "keep the old path" } });
+});
+
+// A claude-agent-acp AskUserQuestion form, as `askUserQuestionsToCreateRequest`
+// builds it (dist/elicitation.js): field ids are `question_<n>` with a
+// `question_<n>_custom` companion, a lone question's text is carried only by
+// `message`, and multi-select options live under `items.anyOf`.
+function askUserQuestionForm(questions) {
+  return { mode: "form", sessionId: "session", toolCallId: "toolu_question",
+    message: questions.length === 1 ? questions[0].question : "Please answer the following questions.",
+    requestedSchema: { type: "object", properties: Object.fromEntries(questions.flatMap((question, index) => {
+      const options = question.options.map((option) => ({ const: option.label, title: option.label,
+        ...(option.description ? { description: option.description } : {}) }));
+      // A lone question's text is left to `message`; each field of a multi-question form repeats it.
+      const description = questions.length === 1 ? {} : { description: question.question };
+      return [
+        [`question_${index}`, question.multiSelect
+          ? { type: "array", title: question.header, ...description, items: { anyOf: options } }
+          : { type: "string", title: question.header, ...description, oneOf: options }],
+        [`question_${index}_custom`, { type: "string", title: "Other", description: question.multiSelect
+          ? "Type your own answer to add to your selection above (optional)."
+          : "Type your own answer, or add a note to the option you chose above (optional)." }]
+      ];
+    })) } };
+}
+
+test("claude-agent-acp questions reach the director with the full text, options and descriptions", async () => {
+  const cases = [
+    { name: "one single-select question", questions: [{ question: "Which library should we use for date formatting?",
+      header: "Library", options: [{ label: "date-fns", description: "Tree-shakeable and small" },
+        { label: "Luxon", description: "Bundles time zones" }] }] },
+    { name: "several questions", questions: [
+      { question: "Which package manager?", header: "Manager", options: [{ label: "npm", description: "Ships with Node" },
+        { label: "pnpm", description: "Shares one store" }] },
+      { question: "Which test runner?", header: "Tests", options: [{ label: "node:test", description: "Built in" },
+        { label: "Vitest", description: "Watch mode" }] }] },
+    { name: "one multi-select question", questions: [{ question: "Which features do you want to enable?",
+      header: "Features", multiSelect: true, options: [{ label: "Lint", description: "Static checks" },
+        { label: "Coverage", description: "Line coverage" }] }] }
+  ];
+  for (const { name, questions } of cases) {
+    const { port, events } = portFixture();
+    const reply = port.createElicitation(askUserQuestionForm(questions));
+    const [pending] = port.questions.values();
+    const opened = events.find((event) => event.type === "question.opened");
+    const text = questionText(opened.payload.fields, opened.payload.message, Infinity);
+    for (const question of questions) {
+      assert.ok(text.includes(question.question), `${name}: the question text is missing from: ${text}`);
+      for (const option of question.options) {
+        assert.ok(text.includes(option.label), `${name}: option ${option.label} is missing from: ${text}`);
+        assert.ok(text.includes(option.description), `${name}: option ${option.label} lost its description in: ${text}`);
+      }
+    }
+    await port.answerQuestion({ requestId: pending.requestId, action: "accept", values: {} });
+    await reply;
+  }
 });
 
 test("agy session scope keeps additional roots and HOME and names the shell directory", () => {
