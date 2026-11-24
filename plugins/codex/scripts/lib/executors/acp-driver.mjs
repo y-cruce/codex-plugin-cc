@@ -347,6 +347,7 @@ export class AcpExecutorJobPort {
     }), stream);
     this.initializeResponse = await this.connection.initialize({ protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { elicitation: { form: {} }, plan: {} }, clientInfo: { name: "codex-companion", version: "1" } });
+    this.adapter.streamedToolInput = isClaudeCodeAcp(this.initializeResponse);
     const sessionCaps = this.initializeResponse.agentCapabilities?.sessionCapabilities ?? {};
     this.capabilities.resumeSession = Boolean(sessionCaps.resume);
     this.capabilities.forkSession = Boolean(sessionCaps.fork);

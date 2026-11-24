@@ -20,7 +20,7 @@ function harness(options = {}) {
     events.push(event);
     applyJobEvent(view, event);
   };
-  const adapter = new AcpEventAdapter(record, { job, receiveTime: options.receiveTime });
+  const adapter = new AcpEventAdapter(record, { job, receiveTime: options.receiveTime, streamedToolInput: options.streamedToolInput });
   adapter.bindSession("session");
   const update = (sessionUpdate, content) => adapter.accept({ sessionId: "session", update: { sessionUpdate, ...content } });
   const draw = (open = false, now = Date.now()) => textOf(liveTree(ui, { ...view, activeCommands: [] }, 160, now, 48,
@@ -93,6 +93,17 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
       finalText: "$ git status",
     },
     {
+      name: "cca call stopped before its command arrives leaves no row",
+      updates: [
+        ["tool_call", { toolCallId: "cmd-4", kind: "execute", title: "Terminal", rawInput: {}, status: "pending" }],
+      ],
+      runningCmd: null,
+      runningCwd: null,
+      startedCount: 0,
+      finish: { toolCallId: "cmd-4", status: "failed" },
+      finalText: null,
+    },
+    {
       name: "initial command avoids duplicate started event",
       updates: [
         ["tool_call", { toolCallId: "cmd-3", kind: "execute", title: "pwd", rawInput: { command: "pwd", cwd: "/repo" }, status: "pending" }],
@@ -107,7 +118,7 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
   ];
   for (const c of commandCases) {
     let tick = Date.parse("2026-10-23T00:00:00Z");
-    const h = harness({ receiveTime: () => new Date((tick += 1000)) });
+    const h = harness({ receiveTime: () => new Date((tick += 1000)), streamedToolInput: true });
     await h.adapter.startTurn("turn", []);
     for (const [kind, body] of c.updates) await h.update(kind, body);
     assert.equal(h.events.filter((e) => e.type === "command.started").length, c.startedCount, c.name);
@@ -126,8 +137,8 @@ test("ACP streamed execute, read and edit tool calls update in place without dup
     }
     await h.update("tool_call_update", c.finish);
     assert.equal(h.view.activeCommands.length, 0, c.name);
-    assert.equal(h.view.tail.length, 1, c.name);
-    assert.equal(h.view.tail[0].text, c.finalText, c.name);
+    assert.equal(h.view.tail.length, c.finalText === null ? 0 : 1, c.name);
+    if (c.finalText !== null) assert.equal(h.view.tail[0].text, c.finalText, c.name);
   }
 
   // Read title deduplication across cca (absolute/relative) and agy (view_file).

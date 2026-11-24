@@ -236,6 +236,8 @@ export class AcpEventAdapter {
     this.record = record;
     this.receiveTime = options.receiveTime ?? (() => new Date());
     this.job = options.job;
+    // claude-agent-acp streams a tool's arguments after the tool_call that opens it.
+    this.streamedToolInput = options.streamedToolInput === true;
     this.sessionId = null;
     this.turnId = null;
     this.messages = new Map();
@@ -407,11 +409,13 @@ export class AcpEventAdapter {
       // A streamed call (claude-agent-acp) opens with an empty rawInput and a
       // placeholder title, and its command follows a moment later, before it
       // runs. Wait for the command instead of showing the placeholder row.
-      if (created && !terminal && !Object.keys(tool.rawInput ?? {}).length) {
+      if (this.streamedToolInput && created && !terminal && !Object.keys(tool.rawInput ?? {}).length) {
         tool._commandKnown = false;
         tool._shown = false;
         return;
       }
+      // A call stopped before its command arrived never ran: leave no row.
+      if (tool._shown === false && terminal && !commandKnown) return;
       const refined = !created && !terminal && tool._commandKnown === false && commandKnown;
       if (created || refined || (tool._shown === false && terminal)) {
         tool._shown = true;
