@@ -1,5 +1,5 @@
 import type { Elements, TextProps } from 'claude-code'
-import { clean, clip, duration, elapsed, shortPath, tailLimit, tokens, waiting } from './format.ts'
+import { clean, clip, contextWindow, duration, elapsed, shortPath, tailLimit, tokens, waiting } from './format.ts'
 import type { Terminal } from './format.ts'
 import { markdown } from './markdown.ts'
 export { clip } from './format.ts'
@@ -236,7 +236,7 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   const counted = usage.inputTokens > 0 || usage.outputTokens > 0 || usage.cachedInputTokens > 0
   const { contextUsed, contextSize } = data.usage
   const context = contextUsed == null ? '' : ` · ${headingLast ? '' : 'ctx '}${tokens(contextUsed)}${contextSize != null && contextSize > 0
-    ? `/${tokens(contextSize)} (${Math.round(contextUsed / contextSize * 100)}%)` : ''}`
+    ? `/${contextWindow(contextSize)} (${Math.round(contextUsed / contextSize * 100)}%)` : ''}`
   const footerOnlyTime = headingLast && status === 'running' && !data.activitySummary
   const header = [
     { text: headingLast ? '● ' : `● ${executor} · ` },

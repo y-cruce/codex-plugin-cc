@@ -199,7 +199,15 @@ function commandPayload(tool) {
   };
 }
 
-function usagePayload(update, complete = false) {
+const AGY_512K_MODEL = /^(?:gemini-4-(?:neon|carbon)|gemini-pro-orchestrator)|(?:gemini 4 (?:neon|carbon)|orchestrator)/i;
+
+function effectiveContextSize(size, model) {
+  if (typeof size !== "number") return null;
+  if (size >= 1048576 && model && AGY_512K_MODEL.test(model)) return 524288;
+  return size;
+}
+
+function usagePayload(update, complete = false, model = null) {
   return {
     inputTokens: complete ? update.inputTokens ?? null : null,
     outputTokens: complete ? update.outputTokens ?? null : null,
@@ -207,7 +215,7 @@ function usagePayload(update, complete = false) {
     thoughtTokens: complete ? update.thoughtTokens ?? null : null,
     totalTokens: complete ? update.totalTokens ?? null : null,
     contextUsed: complete ? null : update.used ?? null,
-    contextSize: complete ? null : update.size ?? null,
+    contextSize: complete ? null : effectiveContextSize(update.size, model),
     cost: update.cost ? { amount: update.cost.amount, currency: update.cost.currency } : null,
     basis: complete ? "turn" : "context",
     complete
@@ -239,6 +247,7 @@ export class AcpEventAdapter {
     // claude-agent-acp streams a tool's arguments after the tool_call that opens it.
     this.streamedToolInput = options.streamedToolInput === true;
     this.sessionId = null;
+    this.model = options.model ?? null;
     this.turnId = null;
     this.messages = new Map();
     this.currentMessages = new Map();
@@ -249,8 +258,9 @@ export class AcpEventAdapter {
     this.speaker = 0;
   }
 
-  bindSession(sessionId) {
+  bindSession(sessionId, model) {
     this.sessionId = sessionId;
+    if (model !== undefined) this.model = model;
   }
 
   startTurn(turnId, prompt) {
@@ -476,10 +486,15 @@ export class AcpEventAdapter {
         this.plan = { entries: [], markdown: null, uri: null };
         await this.emit("plan.updated", this.plan, {}, notification);
         break;
-      case "usage_update": await this.emit("usage.updated", { usage: usagePayload(update) }, {}, notification); break;
+      case "usage_update": await this.emit("usage.updated", { usage: usagePayload(update, false, this.model) }, {}, notification); break;
+      case "config_option_update": {
+        const opt = (update.configOptions ?? []).find((item) => item?.type === "select" && (item.id === "model" || item.category === "model"));
+        if (opt?.currentValue) this.model = String(opt.currentValue);
+        await this.emit("source.unknown", { method: `session/update:${update.sessionUpdate ?? "unknown"}`, data: structuredClone(update) }, {}, notification);
+        break;
+      }
       case "available_commands_update":
       case "current_mode_update":
-      case "config_option_update":
       case "session_info_update":
       case "compaction_update":
       case "compaction_summary_chunk":

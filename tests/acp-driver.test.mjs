@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import { AcpExecutorJobPort, openAcpExecutorJob } from "../plugins/codex/scripts/lib/executors/acp-driver.mjs";
+import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
 import { listJobs, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { createJobRecord, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { BROKER_READY_MS, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
@@ -272,4 +273,28 @@ test("ACP model and reasoning effort metadata follow flags and environment", (t)
       assert.match(fs.readFileSync(job.logFile, "utf8"), /reasoning effort xhigh is unavailable; using max/i);
     }
   }
+});
+
+test("AcpEventAdapter normalizes agy 512K model context size and follows config_option_update", async () => {
+  for (const [model, reported, expected] of [
+    ["gemini-4-neon-high", 1048576, 524288],
+    ["Gemini 4 Neon (High)", 1048576, 524288],
+    ["gemini-4-carbon-high", 1048576, 524288],
+    ["gemini-pro-orchestrator-neon", 1048576, 524288],
+    ["gemini-3.8-flash-high", 1048576, 1048576],
+    ["claude-opus-5-5-medium", 200000, 200000],
+  ]) {
+    const events = [];
+    const adapter = new AcpEventAdapter(async (event) => { events.push(event); }, { job: { id: "job-ctx" } });
+    adapter.bindSession("session-1", model);
+    await adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "usage_update", used: 418105, size: reported } });
+    assert.equal(events.at(-1).payload.usage.contextSize, expected, model);
+  }
+  const events = [];
+  const adapter = new AcpEventAdapter(async (event) => { events.push(event); }, { job: { id: "job-ctx" } });
+  adapter.bindSession("session-1", "gemini-3.8-flash-high");
+  await adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "config_option_update",
+    configOptions: [{ type: "select", id: "model", currentValue: "gemini-4-neon-high" }] } });
+  await adapter.accept({ sessionId: "session-1", update: { sessionUpdate: "usage_update", used: 418105, size: 1048576 } });
+  assert.equal(events.at(-1).payload.usage.contextSize, 524288);
 });

@@ -565,6 +565,10 @@ describe('live row polish', () => {
     data.status = 'running';
     data.usage.contextUsed = 0;
     assert.match(footer(), / · 0\/1000k \(0%\)/);
+    data.usage = { ...data.usage, contextUsed: 418105, contextSize: 524288 };
+    assert.match(footer(), / · 418\.1k\/512k \(80%\)$/);
+    data.usage = { ...data.usage, contextUsed: 243000, contextSize: 1048576 };
+    assert.match(footer(), / · 243k\/1M \(23%\)$/);
     data.usage = { ...data.usage, contextUsed: 700000, contextSize: null };
     assert.match(footer(), / · 700k$/);
     for (const context of [{}, { contextSize: 1000000 }]) {

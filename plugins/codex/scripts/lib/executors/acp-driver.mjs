@@ -402,10 +402,11 @@ export class AcpExecutorJobPort {
     this.sessionId = sessionId;
     const binding = await this.runtime.bind(this.owner, this.cwd, this.job.id, sessionId);
     this.recordId = binding.recordId ?? this.job.id;
-    this.adapter.bindSession(sessionId);
     this.modes = response.modes ?? null;
     this.capabilities.sessionModes = Boolean(this.modes);
     this.configOptions = response.configOptions ?? [];
+    this.activeModel = findModelOption(this.configOptions)?.currentValue || currentModelLabel(this.configOptions) || null;
+    this.adapter.bindSession(sessionId, this.activeModel);
     return { sessionId, modes: this.modes, configOptions: this.configOptions };
   }
 
@@ -425,7 +426,7 @@ export class AcpExecutorJobPort {
     this.onProgress = onProgress;
     await this.bindQueuedRound(entry);
     this.adapter = this.createAdapter(this.job);
-    this.adapter.bindSession(this.sessionId);
+    this.adapter.bindSession(this.sessionId, this.activeModel ?? null);
     this.control.jobId = this.job.id;
     this.notifications = [];
   }

@@ -51,6 +51,12 @@ export function tokens(count: number): string {
   return count < 1000 ? String(count) : `${Number((count / 1000).toFixed(1))}k`
 }
 
+export function contextWindow(size: number): string {
+  if (size >= 1048576 && size % 1048576 === 0) return `${size / 1048576}M`
+  if (size >= 1024 && size % 1024 === 0) return `${size / 1024}k`
+  return tokens(size)
+}
+
 export function shortPath(path: string, columns: number): string {
   if (clip(path, columns) === path) return path
   return `…${Array.from(clip(Array.from(path).reverse().join(''), Math.max(0, columns - 1))).reverse().join('')}`
