@@ -1258,4 +1258,35 @@ describe('transcript block spacing', () => {
     assert.match(rendered, /Model rerouted: gpt-5\.4 → gpt-5\.3 \(highRiskCyberActivity\)/);
     assert.match(rendered, /Codex · gpt-5\.3/);
   });
+  test('folds command.interaction stdin writes with shell commands and cleans up expanded stdin rows', ($, on) => {
+    world($, on);
+    const ui = $.ui.resolve(row());
+    const data = fixture();
+    data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const at = data.startedAt;
+    data.tail = [
+      { seq: '1', at, type: 'command.started', text: '$ python3 -B -i -q' },
+      { seq: '2', at, type: 'command.interaction', text: 'stdin 89995: exec("\\nimport runpy, pathlib\\nprint(1)\\n") ⏎ ' },
+      { seq: '3', at, type: 'command.interaction', text: 'stdin 89995:  ⏎ import os ⏎ print(os.getcwd()) ⏎ ' },
+      { seq: '4', at, type: 'command.completed', text: '$ echo done', exitCode: 0, durationMs: 1000 },
+    ];
+    // Collapsed while running: merged into one group, active preview shows clean latest command.
+    const collapsed = rowsOf(liveTree(ui, data, 120, Date.parse(at), 48)).map(textOf).slice(1);
+    assert.deepEqual(collapsed, [' ', '● Running 4 shell commands…', '  ⎿  $ echo done']);
+    // When stdin is the newest active item, preview strips PID/escapes and avoids "$ stdin ...".
+    const activeStdin = { ...data, tail: data.tail.slice(0, 2) };
+    const stdinPreview = rowsOf(liveTree(ui, activeStdin, 120, Date.parse(at), 48)).map(textOf).slice(1);
+    assert.deepEqual(stdinPreview, [' ', '● Running 2 shell commands…', '  ⎿  stdin › exec(" import runpy, pathlib print(1) ")']);
+    // Expanded fold renders clean stdin › lines without double "$ stdin <pid>:" prefix.
+    const fold = { Button: props => ({ type: 'Button', props, children: [props.label] }), isOpen: () => true, toggle: () => {} };
+    const expanded = rowsOf(liveTree(ui, { ...data, status: 'completed', endedAt: at }, 120, Date.parse(at), 48, undefined, undefined, false, fold)).map(textOf).slice(1);
+    assert.deepEqual(expanded, [
+      ' ',
+      '● Ran 4 shell commands ▾',
+      '    $ python3 -B -i -q',
+      '    stdin › exec(" import runpy, pathlib print(1) ")',
+      '    stdin › import os …',
+      '    ● $ echo done · 1s',
+    ]);
+  });
 });

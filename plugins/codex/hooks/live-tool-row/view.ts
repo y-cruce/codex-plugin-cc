@@ -83,6 +83,7 @@ export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'active
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress|job\.(failed|cancelled))/
 // Nonzero exits keep a visible command row.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
+  || event.type === 'command.interaction'
   || (event.type === 'command.completed' && event.status !== 'failed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)
 const isToolRow = (event: TailRow) => event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed'
@@ -94,6 +95,13 @@ const failedTool = (event: TailRow) => event.status === 'failed' || /^\S+ failed
 const commandText = (text: string) => {
   const [first, ...rest] = clean(text).replace(/^\$\s*/, '').split(/\n| ⏎ /)
   return rest.some(part => part.trim()) ? `${first!.trimEnd()} …` : first!
+}
+const interactionText = (text: string) => {
+  const body = clean(text).replace(/^stdin(?:\s+\S+)?:\s*/, '')
+  const lines = body.split(/\n|\s*⏎\s*/).map(line => line.trim()).filter(Boolean)
+  if (!lines.length) return body.trim()
+  const first = lines[0]!.replace(/(?:\\r\\n|\\n|\\t)+/g, ' ').replace(/\s+/g, ' ').trim()
+  return lines.length > 1 ? `${first} …` : first
 }
 const isSleepCommand = (event: TailRow) => isQuietCommand(event)
   && /^(?:cd \S+ && )?sleep \d+(?:\.\d+)?(?: && date '[^']*')?$/.test(commandText(event.text).trim())
@@ -429,14 +437,15 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
   // where its own stretch begins. An inline row keeps that short event preview.
   const from = newest >= 0 ? Number(grouped[newest]!.from ?? 0) : 0
   const commandRow = (event: TailRow, indent = '') => {
+    const interaction = event.type === 'command.interaction'
     const completed = event.type === 'command.completed'
     const failed = event.status === 'failed'
     const color = completed ? failed ? 'red' : event.exitCode == null ? 'gray' : event.exitCode === 0 ? 'green' : 'red' : undefined
     const suffix = completed && event.durationMs != null ? ` · ${duration(event.durationMs)}` : ''
     lines.push(Text({ wrap: 'truncate-middle', children: [
       Text({ color, children: `${indent}${completed ? '● ' : ''}` }),
-      Text({ dimColor: true, children: '$ ' }),
-      Text({ children: commandText(event.text) }),
+      Text({ dimColor: true, children: interaction ? 'stdin › ' : '$ ' }),
+      Text({ children: interaction ? interactionText(event.text) : commandText(event.text) }),
       ...(completed && event.exitCode != null && event.exitCode !== 0
         ? [Text({ color: 'red', children: ` · exit ${event.exitCode}` })]
         : failed ? [Text({ color: 'red', children: ' · failed' })] : []),
@@ -556,8 +565,9 @@ export function liveTree(ui: Pick<Elements['terminal'], 'Box' | 'Text' | 'Markdo
       }
       else if (active) {
         const newest = items.at(-1)!
-        const detail = isQuietCommand(newest) ? `$ ${commandText(newest.text)}` : isFileRow(newest)
-          ? newest.files!.map(file => file.path.split('/').at(-1)).reverse().join(', ') : toolTitle(newest.text, columns)
+        const detail = isQuietCommand(newest)
+          ? newest.type === 'command.interaction' ? `stdin › ${interactionText(newest.text)}` : `$ ${commandText(newest.text)}`
+          : isFileRow(newest) ? newest.files!.map(file => file.path.split('/').at(-1)).reverse().join(', ') : toolTitle(newest.text, columns)
         lines.push(Text({ dimColor: true, wrap: 'truncate-middle', children: clip(`  ⎿  ${detail}`, columns) }))
       }
       return
