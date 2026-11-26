@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
+import { readAntigravitySwarmSnapshot } from "./executors/antigravity-session.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { executorKeyFor, THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
@@ -206,7 +207,10 @@ function inferLegacyJobPhase(job, progressPreview = []) {
 export function enrichJob(job, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
   const active = job.status === "queued" || job.status === "running";
-  const progressAt = active ? lastJobProgressAt(job) : null;
+  const swarm = active && (job.executor ?? job.request?.executor) === "acp"
+    ? readAntigravitySwarmSnapshot(job, options)
+    : null;
+  const progressAt = active ? Math.max(lastJobProgressAt(job), swarm?.lastActivityAt ?? 0) : null;
   const enriched = {
     ...job,
     ...(active ? {
@@ -214,6 +218,7 @@ export function enrichJob(job, options = {}) {
       lastProgressAt: new Date(progressAt).toISOString(),
       progressAgeMinutes: Math.max(0, Math.floor((Date.now() - progressAt) / 60000))
     } : {}),
+    ...(swarm ? { swarm } : {}),
     kindLabel: getJobTypeLabel(job),
     progressPreview:
       job.status === "queued" || job.status === "running" || job.status === "failed"

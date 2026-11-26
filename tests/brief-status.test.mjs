@@ -33,3 +33,24 @@ test("the brief job status carries what the director can act on and clips the re
   assert.ok(lines[6].length <= 162 && lines[6].endsWith("…"));
   assert.match(renderBriefJobStatus(finished(1, { errorMessage: "boom" })), /^task-1 completed · task · 3m · error: boom\nOutput: result task-1\n$/);
 });
+
+test("brief status includes active agy swarm summary and recent board posts", () => {
+  const swarmJob = {
+    id: "task-s", label: "large refactor", status: "running", kindLabel: "task", phase: "running", elapsed: "8m",
+    progressAgeMinutes: 0, progressPreview: ["Swarm status"],
+    swarm: {
+      title: "parser rewrite",
+      members: [{ name: "writer-a", state: "running" }, { name: "verifier", state: "waiting" }],
+      boardHead: 6,
+      recentPosts: [
+        { seq: 5, agent: "writer-a", text: "@verifier [done] updated parser" },
+        { seq: 6, agent: "verifier", text: "running test suite\nnow" }
+      ]
+    }
+  };
+  const list = renderBriefStatusReport({ workspaceRoot: "/r", threads: [swarmJob] });
+  assert.match(list, /task-s \[large refactor\] running · task · 8m · last progress 0m ago · swarm 2w #6/);
+  const detail = renderBriefJobStatus(swarmJob);
+  assert.match(detail, /Swarm: parser rewrite · 2 member\(s\) \(writer-a: running, verifier: waiting\)/);
+  assert.match(detail, /Board \(#6\):\n  #5 writer-a: @verifier \[done\] updated parser\n  #6 verifier: running test suite now/);
+});

@@ -99,6 +99,88 @@ function argumentDetail(tool, title) {
   return null;
 }
 
+const SWARM_TOOLS = new Set(["swarm", "post_message", "read_board", "swarm_wait"]);
+
+function compactText(value, limit = DETAIL_MAX) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(/\s+/gu, " ").trim();
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function swarmAddedMembers(input) {
+  const base = typeof input?.name === "string" ? input.name.trim() : "";
+  if (!base) return [];
+  const shared = compactText(input.brief);
+  const model = typeof input.model === "string" && input.model.trim() ? `[${input.model.trim()}] ` : "";
+  if (Array.isArray(input.tasks) && input.tasks.length) {
+    return input.tasks.map((task, index) => ({
+      name: `${base}-${index + 1}`,
+      detail: compactText(`${model}${typeof task === "string" && task.trim() ? task : shared}`, 200) || null
+    }));
+  }
+  if (Number.isInteger(input.n) && input.n > 1) {
+    return Array.from({ length: input.n }, (_, index) => ({
+      name: `${base}-${index + 1}`,
+      detail: compactText(`${model}${shared}`, 200) || null
+    }));
+  }
+  return [{ name: base, detail: compactText(`${model}${shared}`, 200) || null }];
+}
+
+function swarmToolTitle(name, input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  if (name === "swarm") {
+    const action = typeof input.action === "string" ? input.action.trim() : "";
+    if (action === "title") {
+      const title = compactText(input.title);
+      return title ? `Swarm title: ${title}` : null;
+    }
+    if (action === "add") {
+      const base = typeof input.name === "string" ? input.name.trim() : "";
+      if (!base) return null;
+      const count = Array.isArray(input.tasks) && input.tasks.length ? input.tasks.length
+        : Number.isInteger(input.n) && input.n > 1 ? input.n : 0;
+      const target = count > 0 ? `${base}-1..${count}` : base;
+      const model = typeof input.model === "string" && input.model.trim() ? ` (${input.model.trim()})` : "";
+      const brief = compactText(input.brief, 100);
+      return `Swarm add ${target}${model}${brief ? `: ${brief}` : ""}`;
+    }
+    if (action === "kill") {
+      const target = typeof input.name === "string" ? input.name.trim() : "";
+      return target ? `Swarm kill ${target}` : null;
+    }
+    if (action === "model") {
+      const target = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "coordinator";
+      const model = typeof input.model === "string" && input.model.trim() ? ` → ${input.model.trim()}` : "";
+      return `Swarm model ${target}${model}`;
+    }
+    if (action === "status") return "Swarm status";
+    if (action === "models") return "Swarm models";
+    if (action === "channel") {
+      const detail = [input.op, input.channel, input.name].filter((part) => typeof part === "string" && part.trim()).join(" ");
+      return detail ? `Swarm channel ${detail}` : "Swarm channel";
+    }
+    return null;
+  }
+  if (name === "post_message") {
+    const text = compactText(input.text);
+    if (!text) return null;
+    const channel = typeof input.channel === "string" && input.channel.trim() ? ` #${input.channel.trim()}` : "";
+    return `Post${channel}: ${text}`;
+  }
+  if (name === "read_board") {
+    const channel = typeof input.channel === "string" && input.channel.trim() ? ` (#${input.channel.trim()})` : "";
+    if (input.status === true) return `Read board status${channel}`;
+    if (input.since != null) return `Read board since #${input.since}${channel}`;
+    return `Read board${channel}`;
+  }
+  if (name === "swarm_wait") {
+    return input.since != null ? `Wait on board after #${input.since}` : "Wait on board";
+  }
+  return null;
+}
+
 function manageTaskTitle(input) {
   if (!input || typeof input !== "object") return null;
   if (input.Action === "list") return "List background tasks";
@@ -130,7 +212,9 @@ function toolTitle(tool) {
   // Antigravity's view_file title names only the tool; its input carries the
   // file and requested range. Keep the range in the agent's own line numbers.
   const input = tool.rawInput;
-  if (toolName(tool) === "manage_task") return manageTaskTitle(input) ?? title ?? String(tool.toolCallId);
+  const resolvedName = toolName(tool);
+  if (resolvedName === "manage_task") return manageTaskTitle(input) ?? title ?? String(tool.toolCallId);
+  if (SWARM_TOOLS.has(resolvedName)) return swarmToolTitle(resolvedName, input) ?? title ?? String(tool.toolCallId);
   if (tool.kind === "read" && typeof input?.file_path === "string" && input.file_path) {
     const range = Number.isInteger(input.start_line) && Number.isInteger(input.end_line)
       ? ` (lines ${input.start_line}–${input.end_line})` : "";
@@ -255,6 +339,7 @@ export class AcpEventAdapter {
     this.plan = null;
     this.planWritten = null;
     this.subagent = null;
+    this.swarmMembers = new Set();
     this.speaker = 0;
   }
 
@@ -271,6 +356,7 @@ export class AcpEventAdapter {
     this.plan = null;
     this.planWritten = null;
     this.subagent = null;
+    this.swarmMembers.clear();
     this.speaker = 0;
     return this.emit("turn.started", { ordinal: 0, prompt }, { turnId });
   }
@@ -369,6 +455,58 @@ export class AcpEventAdapter {
     const tool = this.mergeTool(notification.update);
     const identity = { toolCallId: String(tool.toolCallId) };
     const terminal = TERMINAL_TOOL_STATUSES.has(tool.status);
+    const name = toolName(tool);
+    // Swarm wakeups happen inside one ACP turn without message IDs; flush open
+    // assistant text before swarm board/management calls so earlier interim
+    // messages stay separate from the final delivery.
+    if (created && SWARM_TOOLS.has(name) && this.currentMessages.size > 0) {
+      await this.startContinuation();
+    }
+    if (name === "swarm" && ["add", "kill", "model"].includes(tool.rawInput?.action)) {
+      const action = tool.rawInput.action;
+      if (action === "add" || action === "kill") {
+        if (!terminal) return;
+        if (tool.status !== "failed") {
+          if (action === "add") {
+            const members = swarmAddedMembers(tool.rawInput);
+            if (members.length) {
+              for (const member of members) {
+                this.swarmMembers.add(member.name);
+                const agentId = `swarm:${member.name}`;
+                await this.emit("agent.activity", { agentId, parentAgentId: null, path: `swarm/${member.name}`,
+                  status: "started", detail: member.detail }, { agentId }, notification);
+              }
+              return;
+            }
+          } else {
+            const target = typeof tool.rawInput?.name === "string" ? tool.rawInput.name.trim() : "";
+            if (target) {
+              const matched = [...this.swarmMembers].filter((member) => member === target || member.startsWith(`${target}-`));
+              const names = matched.length ? matched : [target];
+              for (const member of names) {
+                this.swarmMembers.delete(member);
+                const agentId = `swarm:${member}`;
+                await this.emit("agent.activity", { agentId, parentAgentId: null, path: `swarm/${member}`,
+                  status: "completed", detail: "killed" }, { agentId }, notification);
+              }
+              return;
+            }
+          }
+        }
+      } else {
+        const target = typeof tool.rawInput?.name === "string" ? tool.rawInput.name.trim() : "";
+        const model = typeof tool.rawInput?.model === "string" ? tool.rawInput.model.trim() : "";
+        if (target && model && this.swarmMembers.has(target)) {
+          if (!terminal) return;
+          if (tool.status !== "failed") {
+            const agentId = `swarm:${target}`;
+            await this.emit("agent.activity", { agentId, parentAgentId: null, path: `swarm/${target}`,
+              status: "interacted", detail: `model → ${model}` }, { agentId }, notification);
+            return;
+          }
+        }
+      }
+    }
     // A sub-agent is not a tool row. Qoder sends one as a tool call named
     // "Agent" whose input names the agent and what it was asked for, and the
     // row drew the word "Agent" and nothing else; the pane already has a
@@ -510,6 +648,16 @@ export class AcpEventAdapter {
     await this.flushMessage("reasoning");
     await this.flushMessage("assistant");
     if (this.plan) await this.emit("plan.completed", { entries: this.plan.entries }, {}, null, "session/prompt");
+    const status = terminalStatus(response.stopReason, options.interrupting);
+    if (this.swarmMembers.size > 0) {
+      const memberStatus = status === "completed" ? "completed" : "interrupted";
+      for (const member of [...this.swarmMembers]) {
+        const agentId = `swarm:${member}`;
+        await this.emit("agent.activity", { agentId, parentAgentId: null, path: `swarm/${member}`,
+          status: memberStatus, detail: null }, { agentId }, null, "session/prompt");
+      }
+      this.swarmMembers.clear();
+    }
     const finalMessages = [...this.messages.entries()].map(([messageId, message]) => ({
       messageId,
       role: message.role,
@@ -518,7 +666,7 @@ export class AcpEventAdapter {
     }));
     const usage = response.usage ? usagePayload(response.usage, true) : null;
     const terminal = { turnId: this.turnId, sessionId: this.sessionId,
-      status: terminalStatus(response.stopReason, options.interrupting),
+      status,
       reason: terminalReason(response.stopReason, options.interrupting), finalMessages, usage };
     if (usage) await this.emit("usage.updated", { usage }, {}, response, "session/prompt");
     await this.emit("turn.completed", { status: terminal.status, reason: terminal.reason, finalMessages, usage }, {}, response, "session/prompt");

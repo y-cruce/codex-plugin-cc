@@ -205,11 +205,13 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
 // travels in a file and the trace starts at what the agent did. The worker
 // prepends a fixed note to every brief and marks where the brief begins, so
 // the note stays out of the row.
-function briefOf(job) {
+export function briefOf(job) {
   const prompt = job.request?.prompt;
   if (typeof prompt !== "string" || !prompt.trim()) return null;
   const marker = prompt.lastIndexOf("---- Brief ----");
-  return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
+  if (marker >= 0) return prompt.slice(marker + "---- Brief ----".length).trim() || null;
+  const note = prompt.indexOf("\n---- Director note ----");
+  return (note < 0 ? prompt : prompt.slice(0, note)).trim() || null;
 }
 
 function emptyUsage(complete = true) {

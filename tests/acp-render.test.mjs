@@ -485,3 +485,75 @@ test("Antigravity sleep-and-check polling collapses into one wait row and splits
     }
   }
 });
+
+test("Antigravity swarm calls render readable titles, track members in subAgents, split wakeup replies, and trim trailing director notes", async () => {
+  const swarmView = createLiveView({ id: "j", executor: "acp",
+    request: { prompt: "/swarm Split work across modules.\n\n---- Director note ----\nInternal note." } });
+  assert.equal(swarmView.prompt, "/swarm Split work across modules.");
+
+  const h = harness();
+  await h.adapter.startTurn("turn", []);
+  const runTool = async (id, name, title, rawInput, status = "completed") => {
+    await h.update("tool_call", { toolCallId: id, name, title, kind: "other", rawInput, status: "in_progress" });
+    await h.update("tool_call_update", { toolCallId: id, status });
+  };
+  await runTool("t-title", "swarm", "Run swarm", { action: "title", title: "parser rewrite" });
+  await runTool("t-add-1", "swarm", "Run swarm", { action: "add", name: "alpha", brief: "Read a.txt\nand report." });
+  await runTool("t-add-2", "swarm", "Run swarm", { action: "add", name: "fix", model: "gemini-4-carbon", tasks: ["Fix pkg A", "Fix pkg B"] });
+  await runTool("t-add-fail", "swarm", "Run swarm", { action: "add", name: "bad", brief: "Fails" }, "failed");
+  await runTool("t-model-w", "swarm", "Run swarm", { action: "model", name: "alpha", model: "gemini-4-neon" });
+  await runTool("t-model-c", "swarm", "Run swarm", { action: "model", model: "gemini-4-neon" });
+  await runTool("t-status", "swarm", "Run swarm", { action: "status" });
+  await runTool("t-fallback", "swarm", "Run swarm", { action: "unknown" });
+
+  // First wakeup interim text before board reads.
+  await h.update("agent_message_chunk", { content: { type: "text", text: "Started workers.\n\nRun /swarm board to inspect." } });
+  assert.equal(h.view.subAgents.map((a) => `${a.path}:${a.status}`).join(","), "swarm/alpha:started,swarm/fix-1:started,swarm/fix-2:started");
+  assert.match(h.draw(true), /⇢ swarm\/alpha · running · Read a\.txt and report\./);
+  assert.match(h.draw(true), /model → gemini-4-neon/);
+  assert.match(h.draw(true), /⇢ swarm\/fix-1 · running · \[gemini-4-carbon\] Fix pkg A/);
+
+  await runTool("t-read", "read_board", "Run read_board", { since: 2 });
+  await runTool("t-kill", "swarm", "Run swarm", { action: "kill", name: "fix" });
+  await runTool("t-wait", "swarm_wait", "Run swarm_wait", { since: 4 });
+  await runTool("t-post", "post_message", "Run post_message", { text: "[done] sum=42" });
+  await h.update("agent_message_chunk", { content: { type: "text", text: "FINAL_SUM=42" } });
+
+  const terminal = await h.adapter.completeTurn({ stopReason: "end_turn" });
+  const assistantMessages = terminal.finalMessages.filter((m) => m.role === "assistant");
+  assert.deepEqual(assistantMessages.map((m) => m.text), ["Started workers.\n\nRun /swarm board to inspect.", "FINAL_SUM=42"]);
+  assert.equal(h.view.lastMessage.text, "FINAL_SUM=42");
+  assert.deepEqual(h.view.subAgents.map((a) => [a.path, a.status, a.lastActivity ?? null]), [
+    ["swarm/alpha", "completed", "model → gemini-4-neon"],
+    ["swarm/fix-1", "completed", "killed"],
+    ["swarm/fix-2", "completed", "killed"],
+  ]);
+
+  h.view.status = "completed";
+  const drawn = h.draw(true);
+  for (const expected of [
+    "● Swarm title: parser rewrite",
+    "● Swarm add bad: Fails",
+    "● Swarm model coordinator → gemini-4-neon",
+    "● Swarm status",
+    "● Run swarm",
+    "● Read board since #2",
+    "● Wait on board after #4",
+    "● Post: [done] sum=42",
+    "⇢ swarm/alpha · done",
+    "⇢ swarm/fix-1 · done",
+    "FINAL_SUM=42",
+  ]) {
+    assert.ok(drawn.includes(expected), `missing "${expected}" in:\n${drawn}`);
+  }
+  assert.doesNotMatch(drawn, /● Swarm add alpha/);
+
+  // Cancelled turn marks remaining swarm members as failed/interrupted.
+  const h2 = harness();
+  await h2.adapter.startTurn("turn-2", []);
+  await h2.update("tool_call", { toolCallId: "a1", name: "swarm", title: "Run swarm", kind: "other",
+    rawInput: { action: "add", name: "worker", n: 2, brief: "Do work" }, status: "completed" });
+  await h2.adapter.completeTurn({ stopReason: "cancelled" });
+  assert.deepEqual(h2.view.subAgents.map((a) => [a.path, a.status]), [["swarm/worker-1", "interrupted"], ["swarm/worker-2", "interrupted"]]);
+  assert.match(h2.draw(true), /⇢ swarm\/worker-1 · failed/);
+});

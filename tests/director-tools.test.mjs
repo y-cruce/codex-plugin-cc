@@ -57,6 +57,10 @@ test("dispatchInput writes the headers dispatch.sh reads, then the brief", () =>
     "MODE: fork\nNAME: fork x\nCWD: /repo\nTHREAD: t-source\nWRITE: yes\n\nBranch it.\n",
   );
   assert.equal(dispatchInput({ mode: "investigate", name: "n", cwd: "/r", brief: "b\n", write: false, base: "" }), "MODE: investigate\nNAME: n\nCWD: /r\n\nb\n");
+  assert.equal(
+    dispatchInput({ mode: "implement", name: "swarm build", cwd: "/r", brief: "Build it.", executor: "agy", swarm: true }),
+    "MODE: implement\nNAME: swarm build\nCWD: /r\nEXECUTOR: agy\nSWARM: yes\n\nBuild it.\n",
+  );
   const dsh = dispatchInput({ mode: "continue", name: "next", cwd: "/repo", brief: "Recall it.", thread: "session-1",
     executor: "dsh", executor_command: "/custom/dsh", executor_args: ["--profile", "acp", "line\nbreak"], executor_permissions: "ask" });
   assert.match(dsh, /EXECUTOR: dsh\n/);
@@ -77,6 +81,7 @@ test("the tools are registered in the prompt's tool list only where dispatch.sh 
   assert.ok(installed.registered.every((spec) => spec.isDeferred === false));
   const dispatchSchema = installed.registered.find(spec => spec.name === "dispatch").inputSchema.properties;
   assert.ok(dispatchSchema.mode.enum.includes("fork"));
+  assert.equal(dispatchSchema.swarm.type, "boolean");
   const executors = dispatchSchema.executor.enum;
   assert.ok(["antigravity", "agy", "cca"].every(name => executors.includes(name)));
   assert.deepEqual(installed.tools.context, { worker: WORKER, companion: COMPANION, tmp: "/tmp", data: null });

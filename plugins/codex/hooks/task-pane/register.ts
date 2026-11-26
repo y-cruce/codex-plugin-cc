@@ -25,6 +25,14 @@ type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
 type Hold = { armedAt: number; checkedAt?: number; taskId?: string }
 type Delivery = 'steer' | 'queue' | 'interrupt'
 type Notice = { text: string; error?: boolean }
+
+function briefText(prompt: string | undefined): string | null {
+  if (typeof prompt !== 'string' || !prompt.trim()) return null
+  const marker = prompt.lastIndexOf('---- Brief ----')
+  if (marker >= 0) return prompt.slice(marker + '---- Brief ----'.length).trim() || null
+  const note = prompt.indexOf('\n---- Director note ----')
+  return (note < 0 ? prompt : prompt.slice(0, note)).trim() || null
+}
 type State = {
   cwd: string
   home: string
@@ -808,7 +816,7 @@ async function scanRoots($: EngineInterface, state: State) {
           state.views.set(job.id, {
             schemaVersion: 1, jobId: job.id, label: job.label ?? job.title ?? job.id, status: job.status,
             startedAt: job.startedAt ?? job.createdAt ?? new Date(now).toISOString(), endedAt: job.completedAt ?? null,
-            threadId: null, turnId: null, prompt: job.request?.prompt?.split('---- Brief ----').at(-1)?.trim() ?? null, activeCommands: [], lastMessage: null,
+            threadId: null, turnId: null, prompt: briefText(job.request?.prompt), activeCommands: [], lastMessage: null,
             files: [], usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: false },
             pendingQuestion: null, history: { continuity: 'legacy', committedSeq: '0' }, tail: [],
           })
@@ -1568,7 +1576,7 @@ function visibleThreads(state: State): PaneView[] {
       const queuedPrompts = [...(view.queuedPrompts ?? [])]
       for (const job of pending) {
         if (queuedPrompts.some(prompt => prompt.jobId === job.id)) continue
-        const text = job.request?.prompt?.split('---- Brief ----').at(-1)?.trim()
+        const text = briefText(job.request?.prompt)
         if (text) queuedPrompts.push({ jobId: job.id, text })
       }
       return { ...view, activitySummary: state.summaries ? activityText(state.activities, view) : undefined,

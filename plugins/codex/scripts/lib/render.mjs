@@ -192,6 +192,9 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push("  Review changes: /codex:review --wait");
     lines.push("  Stricter review: /codex:adversarial-review --wait");
   }
+  if (job.status === "running" && job.swarm) {
+    lines.push(...swarmSummaryLines(job.swarm, "  "));
+  }
   if (job.progressPreview?.length) {
     lines.push("  Progress:");
     for (const line of job.progressPreview) {
@@ -540,6 +543,25 @@ function briefClip(text, limit) {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
+function swarmSummaryLines(swarm, indent = "") {
+  if (!swarm) return [];
+  const lines = [];
+  const head = [swarm.title ? briefClip(swarm.title, 80) : null,
+    swarm.members?.length ? `${swarm.members.length} member(s)` : null].filter(Boolean).join(" · ");
+  const roster = (swarm.members ?? []).map((member) => `${member.name}: ${member.state}`).join(", ");
+  if (head || roster) {
+    lines.push(`${indent}Swarm: ${head}${roster ? `${head ? " " : ""}(${briefClip(roster, 200)})` : ""}`);
+  }
+  if (swarm.recentPosts?.length) {
+    lines.push(`${indent}Board${swarm.boardHead != null ? ` (#${swarm.boardHead})` : ""}:`);
+    for (const post of swarm.recentPosts) {
+      const seq = post.seq != null ? `#${post.seq} ` : "";
+      lines.push(`${indent}  ${seq}${post.agent || "unknown"}: ${briefClip(post.text, 140)}`);
+    }
+  }
+  return lines;
+}
+
 function briefJobLine(job) {
   const active = job.status === "queued" || job.status === "running";
   const parts = [`${formatJobId(job)} ${job.status || "unknown"}`];
@@ -548,6 +570,11 @@ function briefJobLine(job) {
   const time = active ? job.elapsed : job.duration;
   if (time) parts.push(time);
   if (active && job.progressAgeMinutes != null) parts.push(`last progress ${job.progressAgeMinutes}m ago`);
+  if (active && job.swarm) {
+    const count = job.swarm.members?.length ?? 0;
+    const head = job.swarm.boardHead != null ? ` #${job.swarm.boardHead}` : "";
+    parts.push(`swarm ${count}w${head}`);
+  }
   if (job.ownerAlive === false && active) parts.push("owner exited");
   const live = job.live && !job.live.unavailable ? job.live : null;
   for (const question of live?.questions ?? []) parts.push(`waiting for answer request=${question.requestId}`);
@@ -584,6 +611,9 @@ export function renderBriefJobStatus(job) {
       lines.push(`Pending message ${message.id} (${message.status}): ${briefClip((message.input ?? []).map((item) => item.text).join(" "), 160)}`);
     }
     if (job.live.error) lines.push(briefClip(job.live.error, 300));
+  }
+  if (active && job.swarm) {
+    lines.push(...swarmSummaryLines(job.swarm));
   }
   if (active && job.progressPreview?.length) {
     lines.push("Recent:", ...job.progressPreview.slice(-3).map((line) => `  ${briefClip(line, 160)}`));

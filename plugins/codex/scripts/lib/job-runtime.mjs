@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { JobEventStore, readHistory, readRecordHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
 import { createCanonicalEvent } from "./executor-events.mjs";
-import { createLiveView, applyJobEvent, jobConfig } from "./job-event-model.mjs";
+import { createLiveView, applyJobEvent, briefOf, jobConfig } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
 import { stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir, writeJobFile, upsertJob } from "./state.mjs";
@@ -15,13 +15,6 @@ const terminal = (status) => ["completed", "failed", "cancelled"].includes(statu
 const immediateEvents = new Set(["control.message.updated", "question.opened", "question.resolved", "question.closed", "director.notified",
   "job.completed", "job.failed", "job.cancelled"]);
 const TERMINAL_EVENTS = new Set(["job.completed", "job.failed", "job.cancelled"]);
-
-function roundPrompt(job) {
-  const prompt = job.request?.prompt;
-  if (typeof prompt !== "string" || !prompt.trim()) return null;
-  const marker = prompt.lastIndexOf("---- Brief ----");
-  return (marker < 0 ? prompt : prompt.slice(marker + "---- Brief ----".length)).trim() || null;
-}
 
 function jobEvent(job, type, threadRecord = false) {
   job = jobForPersistence(job);
@@ -36,7 +29,7 @@ function jobEvent(job, type, threadRecord = false) {
     occurredAt: type === "job.started" ? job.startedAt ?? job.createdAt : completedAt,
     payload: type === "job.started"
       ? { label: job.label ?? job.title ?? job.id, startedAt: job.startedAt ?? job.createdAt ?? completedAt,
-        ...(threadRecord ? { sessionId: job.sessionId ?? null, prompt: roundPrompt(job), resumed: Boolean(job.request?.resumeThreadId) } : {}) }
+        ...(threadRecord ? { sessionId: job.sessionId ?? null, prompt: briefOf(job), resumed: Boolean(job.request?.resumeThreadId) } : {}) }
       : { status, reason: terminal?.reason ?? { code: status === "cancelled" ? "cancelled" : status === "completed" ? "end_turn" : "backend_error",
         backendCode: status, message: errorMessage, retryable: false }, completedAt, finalMessages: terminal?.finalMessages ?? [],
         error: errorMessage ? { message: errorMessage } : null, ...(threadRecord ? { result: job.result ?? null } : {}) },

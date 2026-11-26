@@ -16,6 +16,7 @@ const HEADERS: [field: string, header: string][] = [
   ['write', 'WRITE'], ['effort', 'EFFORT'], ['model', 'MODEL'], ['siblings', 'SIBLINGS'], ['sandbox', 'SANDBOX'],
   ['executor', 'EXECUTOR'], ['executor_mode', 'EXECUTOR_MODE'], ['executor_effort', 'EXECUTOR_EFFORT'],
   ['executor_command', 'EXECUTOR_COMMAND'], ['executor_args', 'EXECUTOR_ARGS'], ['executor_permissions', 'EXECUTOR_PERMISSIONS'],
+  ['swarm', 'SWARM'],
 ]
 
 const CWD = { type: 'string', description: 'Absolute path of the repository (or worktree) the job runs in.' }
@@ -60,6 +61,7 @@ const TOOLS = [
         executor_permissions: { type: 'string', enum: ['ask', 'allow-once'], description: 'ACP tool permission policy. dsh/agy/cca default allow-once; agy native questions always wait for the director. ask forwards actual permission requests; it does not undo Qoder bypass mode.' },
         executor_mode: { type: 'string', description: 'EXECUTOR_MODE for a non-Codex executor; cca defaults to bypassPermissions.' },
         executor_effort: { type: 'string', description: 'EXECUTOR_EFFORT for ACP. Without a model override, new agy sessions follow ~/.gemini/antigravity-cli/settings.json; an explicitly chosen model defaults to high, Opus to medium (when the model exposes an effort option). New cca sessions default to max for DeepSeek Flash and high for GLM-5.4 or other models; cca continue re-applies the last confirmed effort unless explicitly supplied, while other executors keep their existing effort.' },
+        swarm: { type: 'boolean', description: 'SWARM: run as an agy /swarm coordinator for large multi-part tasks (new investigate or implement on agy/antigravity only; preview and quota heavy).' },
       },
       required: ['mode', 'name', 'brief'],
     },
