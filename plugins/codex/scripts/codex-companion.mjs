@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
     buildPersistentTaskThreadName,
+    compactAppServerThread,
     DEFAULT_CONTINUE_PROMPT,
     findLatestTaskThread,
     getCodexAuthStatus,
@@ -92,7 +93,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>]",
       "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--thread <id>|--fork-thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--workspace-root <path>] [--thread <id>|--fork-thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/codex-companion.mjs compact <job-id>|--thread <thread-id> [--cwd <repo>] [--json]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs tasks [--query <name>] [--cwd <repo>] [--all] [--days <n>] [--limit <n>]",
@@ -406,20 +408,38 @@ function requireTrackedThreadForWorkspace(workspaceRoot, threadId, executor = "c
   );
 }
 
-function ensureForkSourceIdle(workspaceRoot, forkThreadId) {
+function ensureThreadIdle(workspaceRoot, threadId, action = "forking") {
   const brokerFailures = new Map();
   for (const candidate of sortJobsNewestFirst(listJobs(workspaceRoot))) {
     if (!isActiveJobStatus(candidate.status)) continue;
     const stored = readStoredJob(workspaceRoot, candidate.id) ?? candidate;
     const target = stored.executorSessionId ?? stored.threadId ?? stored.request?.resumeThreadId ?? null;
-    if (target !== forkThreadId) continue;
+    if (target !== threadId) continue;
     const checked = checkJobLiveness(workspaceRoot, stored, null, brokerFailures);
     if (isActiveJobStatus(checked.status)) {
       throw new Error(
-        `Thread ${forkThreadId} is still ${checked.status} (${checked.id}); wait for it to finish or cancel it before forking.`
+        `Thread ${threadId} is still ${checked.status} (${checked.id}); wait for it to finish or cancel it before ${action}.`
       );
     }
   }
+}
+
+function normalizeWorkspaceRoots(cwd, values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return [];
+  }
+  const roots = [];
+  for (const raw of values) {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed) {
+      throw new Error("--workspace-root must not be empty.");
+    }
+    const resolved = path.resolve(cwd, trimmed);
+    if (!roots.includes(resolved)) {
+      roots.push(resolved);
+    }
+  }
+  return roots;
 }
 
 function executorPreset(value) {
@@ -716,6 +736,7 @@ async function executeTaskRun(request) {
     effort: request.effort,
     sandbox: request.sandbox ?? (request.write ? "workspace-write" : "read-only"),
     network: Boolean(request.network),
+    workspaceRoots: request.workspaceRoots,
     onProgress: request.onProgress,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(
@@ -816,7 +837,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, sandbox, network, labe
   }), executor, sandbox, network };
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, resumeLast, resumeThreadId, forkThreadId,
+function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network, workspaceRoots, resumeLast, resumeThreadId, forkThreadId,
   allowOtherRepo, jobId, label, executor, executorPreset, executorCommand, executorArgs, executorMode, executorModel,
   executorEffort, executorPermissions }) {
   return {
@@ -827,6 +848,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, sandbox, network,
     write,
     sandbox,
     network,
+    ...(workspaceRoots?.length ? { workspaceRoots } : {}),
     resumeLast,
     resumeThreadId,
     ...(forkThreadId ? { forkThreadId } : {}),
@@ -1018,6 +1040,7 @@ async function handleReview(argv) {
 export async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file", "thread", "fork-thread", "sandbox", "label", "executor", "executor-preset", "executor-command", "executor-args", "executor-mode", "executor-model", "executor-effort", "executor-permissions"],
+    multiValueOptions: ["workspace-root"],
     booleanOptions: ["json", "write", "network", "resume-last", "resume", "fresh", "background", "allow-other-repo"],
     aliasMap: {
       m: "model"
@@ -1086,6 +1109,11 @@ export async function handleTask(argv) {
     if (!executorCommand) throw new Error("ACP execution requires --executor-command or CODEX_COMPANION_ACP_COMMAND.");
   }
 
+  const workspaceRoots = normalizeWorkspaceRoots(cwd, options["workspace-root"]);
+  if (workspaceRoots.length > 0 && executor !== "codex") {
+    throw new Error("--workspace-root is only supported for Codex tasks.");
+  }
+
   const model = executor === "codex" ? (requestedModel ?? (forkThreadId ? inherited?.model ?? null : null)) : requestedModel;
   const effort = executor === "codex" ? (requestedEffort ?? (forkThreadId ? inherited?.effort ?? null : null)) : requestedEffort;
   const sandbox = options.sandbox ?? (options.write ? "workspace-write" : (forkThreadId && previous?.sandbox ? previous.sandbox : "read-only"));
@@ -1097,7 +1125,7 @@ export async function handleTask(argv) {
   if (forkThreadId) {
     requireTaskRequest(prompt, false);
     requireTrackedThreadForWorkspace(workspaceRoot, forkThreadId, executor);
-    ensureForkSourceIdle(workspaceRoot, forkThreadId);
+    ensureThreadIdle(workspaceRoot, forkThreadId, "forking");
   }
   const taskMetadata = buildTaskRunMetadata({
     prompt,
@@ -1121,6 +1149,7 @@ export async function handleTask(argv) {
     write,
     sandbox,
     network,
+    workspaceRoots,
     resumeLast,
     resumeThreadId,
     forkThreadId,
@@ -1159,6 +1188,63 @@ export async function handleTask(argv) {
       }),
     { json: options.json }
   );
+}
+
+export async function handleCompact(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "thread"],
+    booleanOptions: ["json"],
+    rejectUnknownOptions: true,
+    optionContext: "compact"
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const reference = positionals[0] ?? "";
+  const requestedThreadId = options.thread == null ? "" : String(options.thread).trim();
+  if (options.thread != null && (!requestedThreadId || requestedThreadId.startsWith("-"))) {
+    throw new Error("Provide a thread id with --thread.");
+  }
+  if (reference && requestedThreadId) {
+    throw new Error("Choose either a job id or --thread, not both.");
+  }
+  if (!reference && !requestedThreadId) {
+    throw new Error("Provide a job id or --thread <thread-id>.");
+  }
+  if (positionals.length > 1) {
+    throw new Error("Unexpected extra arguments for compact.");
+  }
+
+  let job = null;
+  let threadId = requestedThreadId;
+  if (reference) {
+    ({ job } = buildSingleJobSnapshot(cwd, reference));
+    const executor = job.executor ?? job.request?.executor ?? "codex";
+    if (executor !== "codex") {
+      throw new Error("Context compaction is only supported for Codex threads.");
+    }
+    threadId = job.executorSessionId ?? job.threadId ?? "";
+    if (!threadId) {
+      throw new Error(`Job ${job.id} does not have a Codex thread ID.`);
+    }
+  } else {
+    const tracked = sortJobsNewestFirst(listJobs(workspaceRoot))
+      .find((item) => (item.executorSessionId ?? item.threadId) === threadId);
+    if (tracked && (tracked.executor ?? tracked.request?.executor ?? "codex") !== "codex") {
+      throw new Error("Context compaction is only supported for Codex threads.");
+    }
+  }
+
+  ensureThreadIdle(workspaceRoot, threadId, "compacting");
+  const result = await compactAppServerThread(workspaceRoot, { threadId });
+  const payload = {
+    jobId: job?.id ?? null,
+    threadId: result.threadId,
+    turnId: result.turnId ?? null,
+    compacted: true
+  };
+  const rendered = `Compacted Codex thread ${payload.threadId}${job ? ` (job ${job.id})` : ""}.\n`;
+  outputCommandResult(payload, rendered, options.json);
 }
 
 async function handleTransfer(argv) {
@@ -1625,6 +1711,9 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
+      break;
+    case "compact":
+      await handleCompact(argv);
       break;
     case "transfer":
       await handleTransfer(argv);

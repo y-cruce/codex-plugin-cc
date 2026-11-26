@@ -13,6 +13,8 @@ import type {
   ReviewStartResponse,
   ReviewTarget,
   Thread,
+  ThreadCompactStartParams,
+  ThreadCompactStartResponse,
   ThreadForkParams,
   ThreadForkResponse,
   ThreadItem,
@@ -24,6 +26,8 @@ import type {
   ThreadSetNameResponse,
   ThreadStartParams as RawThreadStartParams,
   ThreadStartResponse,
+  ThreadUnsubscribeParams,
+  ThreadUnsubscribeResponse,
   Turn,
   TurnInterruptParams,
   TurnInterruptResponse,
@@ -44,9 +48,13 @@ export type {
   InitializeResponse,
   ReviewTarget,
   Thread,
+  ThreadCompactStartParams,
+  ThreadCompactStartResponse,
   ThreadForkParams,
   ThreadItem,
   ThreadListParams,
+  ThreadUnsubscribeParams,
+  ThreadUnsubscribeResponse,
   Turn,
   TurnInterruptParams,
   TurnStartParams,
@@ -63,6 +71,8 @@ export interface CodexAppServerClientOptions {
   brokerEndpoint?: string;
   brokerTimeoutMs?: number;
   disableBroker?: boolean;
+  disableDaemon?: boolean;
+  daemonSocketPath?: string;
   reuseExistingBroker?: boolean;
   requestUserInput?: boolean;
   requireBroker?: boolean;
@@ -103,6 +113,8 @@ export interface AppServerMethodMap {
   "thread/start": { params: ThreadStartParams; result: ThreadStartResponse };
   "thread/resume": { params: ThreadResumeParams; result: ThreadResumeResponse };
   "thread/fork": { params: ThreadForkParams; result: ThreadForkResponse };
+  "thread/unsubscribe": { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
+  "thread/compact/start": { params: ThreadCompactStartParams; result: ThreadCompactStartResponse };
   "thread/name/set": { params: ThreadSetNameParams; result: ThreadSetNameResponse };
   "thread/list": { params: ThreadListParams; result: ThreadListResponse };
   "review/start": { params: ReviewStartParams; result: ReviewStartResponse };

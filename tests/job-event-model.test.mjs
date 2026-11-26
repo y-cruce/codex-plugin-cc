@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCanonicalEvent } from "../plugins/codex/scripts/lib/executor-events.mjs";
-import { normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
+import { CodexEventAdapter, normalizeCodexEvent as normalizeJobEvent } from "../plugins/codex/scripts/lib/executors/codex-event-adapter.mjs";
 import { AcpEventAdapter } from "../plugins/codex/scripts/lib/executors/acp-event-adapter.mjs";
 import { renderJobEvent, createLiveView, applyJobEvent, executorView, jobConfig, questionIds } from "../plugins/codex/scripts/lib/job-event-model.mjs";
 import { DEFAULT_INPUT_TIMEOUT_MS } from "../plugins/codex/scripts/lib/live-turn-control.mjs";
@@ -860,4 +860,87 @@ test("reasoning deltas after a tool call restore thinkingSince without a fresh r
   assert.equal(view.thinkingSince, "2026-11-24T14:55:39.000Z");
   push(5, "message.delta", "2026-11-24T15:00:05.000Z", { role: "assistant", block: { type: "text", text: "Done." } });
   assert.equal(view.thinkingSince, null);
+});
+
+test("mcpServer/startupStatus/updated shows starting servers, clears on ready, and keeps failures visible", async () => {
+  const recorded = [];
+  const adapter = new CodexEventAdapter((event) => recorded.push(event));
+  // Notification arriving during thread/start is buffered and replayed on bindSession.
+  await adapter.accept({
+    method: "mcpServer/startupStatus/updated",
+    params: { threadId: "thread-1", name: "github", environmentId: null, status: "starting", error: null, failureReason: null },
+    emittedAtMs: 1000
+  });
+  assert.equal(recorded.length, 0);
+  await adapter.bindSession("thread-1", { id: "job-1", threadId: "thread-1" });
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].type, "mcp.startup.updated");
+  assert.equal(renderJobEvent(recorded[0]), "MCP github: starting");
+
+  const { view, accept } = harness();
+  const s1 = accept("mcpServer/startupStatus/updated", { name: "github", environmentId: null, status: "starting", error: null, failureReason: null });
+  const s2 = accept("mcpServer/startupStatus/updated", { name: "broken", environmentId: null, status: "starting", error: null, failureReason: null });
+  assert.deepEqual(view.tail.map((row) => row.text), ["MCP github: starting", "MCP broken: starting"]);
+  assert.equal(renderJobEvent(s1), "MCP github: starting");
+  assert.equal(renderJobEvent(s2), "MCP broken: starting");
+
+  const ready = accept("mcpServer/startupStatus/updated", { name: "github", environmentId: null, status: "ready", error: null, failureReason: null });
+  assert.equal(renderJobEvent(ready), "MCP github: ready");
+  assert.deepEqual(view.tail.map((row) => row.text), ["MCP broken: starting"]);
+
+  const failed = accept("mcpServer/startupStatus/updated", {
+    name: "broken", environmentId: null, status: "failed", error: "connection refused", failureReason: "reauthenticationRequired"
+  });
+  assert.equal(renderJobEvent(failed), "MCP broken: failed — connection refused");
+  assert.deepEqual(view.tail.map((row) => row.text), ["MCP broken: failed — connection refused"]);
+});
+
+test("hook/started and hook/completed pair by run id and surface hook status in trace", () => {
+  const { view, accept } = harness();
+  const started = accept("hook/started", {
+    turnId: "turn-1",
+    run: {
+      id: "run-1", eventName: "preToolUse", handlerType: "command", executionMode: "sync",
+      scope: "turn", sourcePath: "/repo/.codex/hooks.json", source: "project", displayOrder: 0,
+      status: "running", statusMessage: "Checking policy", startedAt: 1000, completedAt: null, durationMs: null, entries: []
+    }
+  });
+  assert.equal(started.type, "hook.started");
+  assert.equal(renderJobEvent(started), "Hook preToolUse: running — Checking policy");
+  assert.deepEqual(view.tail.map((row) => row.text), ["Hook preToolUse: running — Checking policy"]);
+
+  const completed = accept("hook/completed", {
+    turnId: "turn-1",
+    run: {
+      id: "run-1", eventName: "preToolUse", handlerType: "command", executionMode: "sync",
+      scope: "turn", sourcePath: "/repo/.codex/hooks.json", source: "project", displayOrder: 0,
+      status: "blocked", statusMessage: null, startedAt: 1000, completedAt: 1042, durationMs: 42,
+      entries: [{ kind: "stop", text: "blocked rm -rf" }]
+    }
+  });
+  assert.equal(completed.type, "hook.completed");
+  assert.equal(renderJobEvent(completed), "Hook preToolUse: blocked (42ms) — blocked rm -rf");
+  assert.equal(view.tail.length, 1);
+  assert.equal(view.tail[0].text, "Hook preToolUse: blocked (42ms) — blocked rm -rf");
+  assert.equal(Object.keys(view._items).length, 0);
+});
+
+test("model/rerouted updates view.model for root job and records trace event", () => {
+  const { view, accept } = harness({ request: { model: "gpt-5.4", effort: "high" } });
+  assert.equal(view.model, "gpt-5.4");
+  const rerouted = accept("model/rerouted", { fromModel: "gpt-5.4", toModel: "gpt-5.3", reason: "highRiskCyberActivity" });
+  assert.equal(rerouted.type, "model.rerouted");
+  assert.equal(renderJobEvent(rerouted), "Model rerouted: gpt-5.4 → gpt-5.3 (highRiskCyberActivity)");
+  assert.equal(view.model, "gpt-5.3");
+  assert.deepEqual(view.tail.map((row) => row.text), ["Model rerouted: gpt-5.4 → gpt-5.3 (highRiskCyberActivity)"]);
+
+  // A sub-agent reroute does not overwrite the root job's model.
+  const childEvent = normalizeJobEvent(
+    { method: "model/rerouted", params: { threadId: "child-1", turnId: "turn-c", fromModel: "gpt-5.4", toModel: "gpt-5.2", reason: "highRiskCyberActivity" } },
+    { id: "job-1" },
+    { id: "child-1", path: "reviewer", parentId: "thread-1" }
+  );
+  childEvent.seq = "99";
+  applyJobEvent(view, childEvent);
+  assert.equal(view.model, "gpt-5.3");
 });

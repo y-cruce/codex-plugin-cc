@@ -1,9 +1,13 @@
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { handleCompact, handleTask } from "../plugins/codex/scripts/codex-companion.mjs";
 import { handleObserve } from "../plugins/codex/scripts/lib/job-observe.mjs";
+import { upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { fileURLToPath } from "node:url";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
+import { initGitRepo, isolateTestEnvironment, makeTempDir, run } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = path.join(ROOT, "plugins/codex/scripts/codex-companion.mjs");
@@ -52,4 +56,69 @@ test("follow rejects unknown and unused options while preserving its job-id posi
     "--after", "cursor", "--until", "done", "--max-seconds", "1", "--verbose", "--quiet"], h);
   assert.equal(accepted.status, 1);
   assert.equal(accepted.stderr.trim(), "UNKNOWN_JOB missing-job");
+});
+
+test("task --workspace-root passthrough and compact CLI validation/end-to-end", async (t) => {
+  isolateTestEnvironment(t);
+  const repo = makeTempDir();
+  const extraRoot = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  await assert.rejects(
+    handleTask(["--cwd", repo, "--executor", "acp", "--executor-command", "fake", "--workspace-root", extraRoot, "hi"]),
+    /--workspace-root is only supported for Codex tasks/
+  );
+  await assert.rejects(
+    handleTask(["--cwd", repo, "--workspace-root", "  ", "hi"]),
+    /--workspace-root must not be empty/
+  );
+
+  // compact validation errors (in-process)
+  for (const [args, pattern] of [
+    [["--cwd", repo], /Provide a job id or --thread/],
+    [["task-1", "--thread", "thr_1", "--cwd", repo], /Choose either a job id or --thread/],
+    [["task-1", "--bogus", "--cwd", repo], /Unknown option --bogus/]
+  ]) {
+    await assert.rejects(handleCompact(args), pattern);
+  }
+
+  // compact rejects non-Codex and active Codex jobs (in-process)
+  const acpJob = { id: "task-acp", status: "completed", jobClass: "task", executor: "acp", threadId: "acp-1", workspaceRoot: repo };
+  const activeJob = { id: "task-busy", status: "running", jobClass: "task", executor: "codex", threadId: "thr_busy", pid: process.pid, workspaceRoot: repo };
+  for (const job of [acpJob, activeJob]) {
+    writeJobFile(repo, job.id, job);
+    upsertJob(repo, job);
+  }
+  await assert.rejects(handleCompact(["task-acp", "--cwd", repo]), /only supported for Codex threads/);
+  await assert.rejects(handleCompact(["task-busy", "--cwd", repo]), /is still running/);
+
+  // end-to-end: task with repeatable --workspace-root -> unsubscribe -> compact by --thread -> resume
+  const env = buildEnv(binDir);
+  const taskRun = run(process.execPath, [
+    SCRIPT, "task", "--cwd", repo, "--workspace-root", ".", "--workspace-root", extraRoot, "--workspace-root", extraRoot, "--json", "cross-repo task"
+  ], { cwd: repo, env });
+  assert.equal(taskRun.status, 0, taskRun.stderr);
+  const taskPayload = JSON.parse(taskRun.stdout);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const resolvedRepo = path.resolve(repo);
+  assert.deepEqual(fakeState.lastThreadStart.config, { "features.default_mode_request_user_input": true });
+  assert.deepEqual(fakeState.lastThreadStart.runtimeWorkspaceRoots, [resolvedRepo, path.resolve(extraRoot)]);
+  assert.deepEqual(fakeState.lastTurnStart.runtimeWorkspaceRoots, [resolvedRepo, path.resolve(extraRoot)]);
+  assert.ok(fakeState.unsubscribedThreads.includes(taskPayload.threadId));
+
+  const compacted = run(process.execPath, [SCRIPT, "compact", "--thread", taskPayload.threadId, "--cwd", repo, "--json"], { cwd: repo, env });
+  assert.equal(compacted.status, 0, compacted.stderr);
+  const compactPayload = JSON.parse(compacted.stdout);
+  assert.equal(compactPayload.threadId, taskPayload.threadId);
+  assert.equal(compactPayload.compacted, true);
+  assert.ok(compactPayload.turnId);
+
+  const resumed = run(process.execPath, [SCRIPT, "task", "--cwd", repo, "--thread", taskPayload.threadId, "--json", "follow up"], { cwd: repo, env });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).threadId, taskPayload.threadId);
 });

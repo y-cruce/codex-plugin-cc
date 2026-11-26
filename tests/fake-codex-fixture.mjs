@@ -315,6 +315,12 @@ rl.on("line", (line) => {
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
         if (BEHAVIOR === "unicode-separators") thread.name = "before\\u2028between\\u2029after";
         thread.sandbox = message.params.sandbox ?? null;
+        state.lastThreadStart = {
+          threadId: thread.id,
+          cwd: thread.cwd,
+          config: message.params.config ?? null,
+          runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots ?? null
+        };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: BEHAVIOR === "unicode-separators" ? buildThread(thread) : { id: thread.id } } });
@@ -349,6 +355,12 @@ rl.on("line", (line) => {
         }
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
+        state.lastThreadResume = {
+          threadId: thread.id,
+          cwd: message.params.cwd ?? null,
+          config: message.params.config ?? null,
+          runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots ?? null
+        };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         break;
@@ -370,7 +382,9 @@ rl.on("line", (line) => {
           model: message.params.model ?? null,
           sandbox: forked.sandbox,
           ephemeral: Boolean(message.params.ephemeral),
-          excludeTurns: Boolean(message.params.excludeTurns)
+          excludeTurns: Boolean(message.params.excludeTurns),
+          config: message.params.config ?? null,
+          runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots ?? null
         };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(forked), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: forked.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
@@ -476,6 +490,7 @@ rl.on("line", (line) => {
 	          turnId,
 	          model: message.params.model ?? null,
 	          effort: message.params.effort ?? null,
+	          runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots ?? null,
 	          prompt
 	        };
 	        saveState(state);
@@ -632,6 +647,33 @@ rl.on("line", (line) => {
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }
+	        break;
+	      }
+
+	      case "thread/unsubscribe": {
+	        state.unsubscribedThreads = state.unsubscribedThreads || [];
+	        state.unsubscribedThreads.push(message.params.threadId);
+	        saveState(state);
+	        send({ id: message.id, result: { status: "unsubscribed" } });
+	        break;
+	      }
+
+	      case "thread/compact/start": {
+	        if (BEHAVIOR === "compact-unsupported") {
+	          send({ id: message.id, error: { code: -32601, message: "Unsupported method: thread/compact/start" } });
+	          break;
+	        }
+	        const thread = ensureThread(state, message.params.threadId);
+	        const turnId = nextTurnId(state);
+	        state.compactedThreads = state.compactedThreads || [];
+	        state.compactedThreads.push(thread.id);
+	        saveState(state);
+	        send({ id: message.id, result: {} });
+	        send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	        send({ method: "item/started", params: { threadId: thread.id, turnId, item: { type: "contextCompaction", id: "cmp_" + turnId } } });
+	        send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "contextCompaction", id: "cmp_" + turnId } } });
+	        send({ method: "thread/compacted", params: { threadId: thread.id, turnId } });
+	        send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	        break;
 	      }
 

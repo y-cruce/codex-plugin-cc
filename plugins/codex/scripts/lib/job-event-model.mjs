@@ -191,6 +191,23 @@ function renderEventText(event, { verbose = false, tail = false } = {}) {
     }
     case "tool.progress": text = p.message ?? ""; break;
     case "plan.updated": text = `Plan: ${p.markdown ?? ""} ${(p.entries ?? []).map((step) => `${step.status}: ${step.content}`).join("; ")}`; break;
+    case "mcp.startup.updated": {
+      const detail = trimmed(p.error) ?? trimmed(p.failureReason);
+      text = `MCP ${p.name || "server"}: ${p.status}${detail ? ` — ${detail}` : ""}`;
+      break;
+    }
+    case "hook.started": case "hook.completed": {
+      const entryText = (p.entries ?? []).map((entry) => trimmed(entry?.text)).find(Boolean);
+      const detail = trimmed(p.statusMessage) ?? (event.type === "hook.completed" ? entryText : null);
+      const duration = event.type === "hook.completed" && typeof p.durationMs === "number" ? ` (${p.durationMs}ms)` : "";
+      text = `Hook ${p.eventName || "run"}: ${p.status}${duration}${detail ? ` — ${detail}` : ""}`;
+      break;
+    }
+    case "model.rerouted": {
+      const route = [trimmed(p.fromModel), trimmed(p.toModel)].filter(Boolean).join(" → ");
+      text = `Model rerouted${route ? `: ${route}` : ""}${trimmed(p.reason) ? ` (${trimmed(p.reason)})` : ""}`;
+      break;
+    }
     case "source.error": text = `Error: ${p.message ?? "Unknown error"}`; break;
     case "source.warning": text = `Warning: ${p.message ?? ""}`; break;
     default: return null;
@@ -635,6 +652,24 @@ export function applyJobEvent(view, event, options = {}) {
         if (round) round.status = "running";
       }
       break;
+    case "mcp.startup.updated": {
+      const mcpKey = JSON.stringify([identity.sessionId, "mcp", p.name ?? ""]);
+      if (p.status === "ready") {
+        const prior = view._items[mcpKey]?.tailSeq;
+        if (prior) view.tail = view.tail.filter((entry) => entry.seq !== prior);
+        delete view._items[mcpKey];
+        text = null;
+      } else {
+        tailKey = mcpKey;
+      }
+      break;
+    }
+    case "hook.started": case "hook.completed":
+      tailKey = p.runId ? JSON.stringify([identity.sessionId, "hook", p.runId]) : null;
+      break;
+    case "model.rerouted":
+      if (!child && trimmed(p.toModel)) view.model = trimmed(p.toModel);
+      break;
     case "history.retention.changed": case "history.continuity.lost": case "history.recording.failed":
       view.history.continuity = "partial";
       break;
@@ -648,7 +683,7 @@ export function applyJobEvent(view, event, options = {}) {
     }
     // A sub-agent's summary is one line, so the output a command row now carries
     // beside it is folded back in here: it is the part that says how it went.
-    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool)\./.test(event.type)) {
+    if (!agent.endedAt && text && /^(command|message|reasoning|source|tool|hook|mcp|model)\./.test(event.type)) {
       const trailing = event.type.startsWith("command.") && key ? view._items[key]?.outputPreview : null;
       agent.lastActivity = preview(trailing ? `${text}\n${trailing}` : text, 300);
     }
@@ -676,6 +711,7 @@ export function applyJobEvent(view, event, options = {}) {
   }
   updateTail(view, event, text, tailKey, whole);
   if (key && event.type.endsWith(".completed")) delete view._items[key];
+  if (tailKey && event.type === "hook.completed") delete view._items[tailKey];
   if (["job.completed", "job.failed", "job.cancelled"].includes(event.type)) view._items = {};
   return view;
 }

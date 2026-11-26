@@ -105,6 +105,8 @@ test("parallel thread owners receive only their own events and reject another so
   await assert.rejects(control.request("turn/start", {
     threadId: h.thread.id, input: [{ type: "text", text: "steal" }]
   }), (error) => error.rpcCode === BROKER_BUSY_RPC_CODE && /busy/.test(error.message));
+  assert.deepEqual(await control.request("thread/unsubscribe", { threadId: h.thread.id }), { status: "notSubscribed" });
+  assert.equal(h.requests().some((item) => item.method === "thread/unsubscribe"), false);
   const states = await Promise.all([h.thread, secondThread].map((thread) =>
     control.request("broker/status", { threadId: thread.id })));
   assert.deepEqual(states.map((state) => state.turnId), [firstTurn.id, secondTurn.id]);

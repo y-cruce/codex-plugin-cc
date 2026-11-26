@@ -49,6 +49,8 @@ export function activityNotes(view: LiveView): string {
       lines.push(`${event.type}: ${budget(event.text, 100)}`)
     } else if (event.type.startsWith('fileChange.') && event.files?.length) {
       lines.push(`${event.type}: ${event.files.map(file => file.path.split('/').slice(-2).join('/')).join(', ')}`)
+    } else if (/^(?:mcp\.startup\.updated|hook\.(?:started|completed)|model\.rerouted)$/.test(event.type)) {
+      lines.push(budget(event.text, 100))
     }
   }
   const messageAt = Date.parse(view.lastMessage?.at ?? '')

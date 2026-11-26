@@ -125,14 +125,26 @@ export async function main(runtimeOptions = {}) {
     return job ? wasDelivered(directorEvent(job, "director.notified", note)) : false;
   });
   let codexEvents;
-  const jobs = new JobRuntime({ directorPush: true, publishDirectorEvent: (job, type) => director.publish(job, type), onTerminal: (job) => codexEvents?.releaseJob(job.id),
-    threadRecords: runtimeOptions.threadRecords ?? THREAD_RECORDS_ENABLED });
+  let requestTail = Promise.resolve();
+  const streamOwners = new Map();
+  const jobs = new JobRuntime({
+    directorPush: true,
+    publishDirectorEvent: (job, type) => director.publish(job, type),
+    onTerminal: (job) => {
+      codexEvents?.releaseJob(job.id);
+      const threadId = job.executorSessionId ?? job.threadId;
+      if (!threadId) return;
+      requestTail = requestTail.then(async () => {
+        if (streamOwners.has(threadId) || controls.threads.get(threadId)?.turnId) return;
+        await appClient.request("thread/unsubscribe", { threadId }).catch(() => {});
+      });
+    },
+    threadRecords: runtimeOptions.threadRecords ?? THREAD_RECORDS_ENABLED
+  });
   codexEvents = new CodexEventAdapter((event) => jobs.record(event));
   await jobs.start(cwd);
   let activeRequestSocket = null;
-  const streamOwners = new Map();
   const pendingThreadStarts = new Map();
-  let requestTail = Promise.resolve();
   let pendingStreamNotifications = null;
   let idleTimer = null;
   let shutdownPromise = null;
@@ -339,6 +351,11 @@ export async function main(runtimeOptions = {}) {
         // Serialize request/response exchanges, not the lifetime of their turns.
         const request = requestTail.then(async () => {
           if (socket.destroyed) return;
+          if (message.method === "thread/unsubscribe" && message.params?.threadId &&
+            (streamOwners.has(message.params.threadId) || controls.threads.get(message.params.threadId)?.turnId)) {
+            send(socket, { id: message.id, result: { status: "notSubscribed" } });
+            return;
+          }
           const isStreaming = STREAMING_METHODS.has(message.method);
           const threadIds = buildStreamThreadIds(message.method, message.params, null);
           if (isStreaming && [...threadIds].some((id) => streamOwners.has(id) && streamOwners.get(id) !== socket)) {

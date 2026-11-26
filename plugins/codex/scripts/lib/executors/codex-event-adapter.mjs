@@ -17,6 +17,10 @@ const METHODS = {
   "turn/plan/updated": "plan.updated",
   "item/plan/delta": "plan.delta",
   "item/mcpToolCall/progress": "tool.progress",
+  "mcpServer/startupStatus/updated": "mcp.startup.updated",
+  "hook/started": "hook.started",
+  "hook/completed": "hook.completed",
+  "model/rerouted": "model.rerouted",
   "companion/question": "question.opened",
   "companion/notification": "director.notified",
   "companion/control-message": "control.message.updated",
@@ -213,6 +217,29 @@ function payloadFor(type, message, receivedAt) {
       ...(p.queued ? { queued: true } : {}), ...(p.queuedJobId ? { queuedJobId: p.queuedJobId } : {}), ...(p.cancelled ? { cancelled: true } : {}) };
     case "agent.activity": return { agentId: String(item.agentThreadId), parentAgentId: p.threadId == null ? null : String(p.threadId),
       path: String(item.agentPath ?? item.agentThreadId).split("/").filter(Boolean).at(-1), status: item.kind ?? "interacted" };
+    case "mcp.startup.updated": return {
+      name: p.name ?? "",
+      status: p.status ?? "starting",
+      error: p.error ?? null,
+      failureReason: p.failureReason ?? null
+    };
+    case "hook.started": case "hook.completed": {
+      const run = p.run ?? {};
+      return {
+        runId: String(run.id ?? ""),
+        eventName: run.eventName ?? "",
+        handlerType: run.handlerType ?? null,
+        status: run.status ?? (type === "hook.started" ? "running" : "completed"),
+        statusMessage: run.statusMessage ?? null,
+        durationMs: typeof run.durationMs === "number" ? run.durationMs : null,
+        entries: Array.isArray(run.entries) ? run.entries.map((entry) => ({ kind: entry.kind ?? "context", text: entry.text ?? "" })) : []
+      };
+    }
+    case "model.rerouted": return {
+      fromModel: p.fromModel ?? "",
+      toModel: p.toModel ?? "",
+      reason: p.reason ?? null
+    };
     case "source.error": return { code: p.error?.code ?? null, message: p.error?.message ?? p.message ?? "Unknown error", data: p.error ?? null };
     case "source.warning": return { code: p.code ?? null, message: p.message ?? "", data: p };
     default: return { method: message.method ?? "unknown", data: structuredClone(p) };

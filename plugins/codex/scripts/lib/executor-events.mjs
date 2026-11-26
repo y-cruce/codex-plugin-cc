@@ -11,6 +11,7 @@ const EVENT_TYPES = [
   "question.opened", "question.resolved", "question.closed",
   "permission.requested", "permission.resolved",
   "director.notified", "control.message.updated", "agent.activity",
+  "mcp.startup.updated", "hook.started", "hook.completed", "model.rerouted",
   "source.warning", "source.error", "source.unknown",
   "history.retention.changed", "history.continuity.lost", "history.recording.failed"
 ];
@@ -58,6 +59,10 @@ const PAYLOAD_FIELDS = {
   "director.notified": ["notificationId", "message", "pendingRequestId"],
   "control.message.updated": ["message", "mode", "accepted"],
   "agent.activity": ["agentId", "parentAgentId", "path", "status"],
+  "mcp.startup.updated": ["name", "status", "error"],
+  "hook.started": ["runId", "eventName", "status"],
+  "hook.completed": ["runId", "eventName", "status"],
+  "model.rerouted": ["fromModel", "toModel", "reason"],
   "source.warning": ["code", "message"],
   "source.error": ["code", "message"],
   "source.unknown": ["method", "data"],

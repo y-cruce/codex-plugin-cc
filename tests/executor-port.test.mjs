@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
-import { findLatestTaskThread, runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
-import { CodexExecutorJobPort } from "../plugins/codex/scripts/lib/executors/codex-driver.mjs";
+import { compactAppServerThread, findLatestTaskThread, runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
+import { CodexExecutorJobPort, unsubscribeCodexThread } from "../plugins/codex/scripts/lib/executors/codex-driver.mjs";
 import { canonicalTerminalReason, jobStatusForTerminal } from "../plugins/codex/scripts/lib/executor-port.mjs";
 import { readJobFile, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { createJobRecord, runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
@@ -150,4 +150,78 @@ test("a task reuses its checked capability result without caching later probes",
   await assert.rejects(runAppServerTurn(process.cwd(), { prompt: "basic" }), missing);
   await assert.rejects(findLatestTaskThread(process.cwd()), missing);
   await assert.rejects(runAppServerTurn(process.cwd(), { availability: { available: false }, prompt: "basic" }), missing);
+});
+
+test("Codex driver passes request_user_input config, optional runtimeWorkspaceRoots, unsubscribe, and compact", async (t) => {
+  isolateTestEnvironment(t);
+  const requests = [];
+  let compactUnsupported = false;
+  const client = {
+    transport: "daemon",
+    stderr: "",
+    observationVersion: 0,
+    notificationHandler: null,
+    exitPromise: new Promise(() => {}),
+    setNotificationHandler(handler) { this.notificationHandler = handler; },
+    async close() {},
+    async request(method, params) {
+      requests.push({ method, params });
+      if (method === "thread/start") return { thread: { id: "thr-1" } };
+      if (method === "thread/resume") return { thread: { id: params.threadId } };
+      if (method === "thread/fork") return { thread: { id: "thr-2" } };
+      if (method === "turn/start") return { turn: { id: "turn-1", status: "completed" } };
+      if (method === "thread/compact/start") {
+        if (compactUnsupported) throw Object.assign(new Error("Unsupported method"), { rpcCode: -32601 });
+        queueMicrotask(() => {
+          this.notificationHandler?.({ method: "turn/started", params: { threadId: params.threadId, turn: { id: "cmp-1" } } });
+          this.notificationHandler?.({ method: "turn/completed", params: { threadId: params.threadId, turn: { id: "cmp-1", status: "completed" } } });
+        });
+        return {};
+      }
+      if (method === "thread/unsubscribe") return { status: "unsubscribed" };
+      throw Object.assign(new Error("Unsupported"), { rpcCode: -32601 });
+    }
+  };
+
+  const port = await CodexExecutorJobPort.open({
+    client,
+    cwd: "/repo",
+    job: { id: "cfg-job" },
+    captureTurn: async (_client, _sessionId, start, options) => {
+      const response = await start();
+      options.onResponse(response);
+      return { turnId: response.turn.id, finalTurn: response.turn, lastAgentMessage: "ok", error: null };
+    }
+  });
+  await port.startSession({ cwd: "/repo", persistThread: true, workspaceRoots: ["/repo", "/other"] });
+  await port.startTurn({ sessionId: "thr-1", prompt: "go", sandbox: "read-only", workspaceRoots: ["/repo", "/other"] });
+  await port.resumeSession({ sessionId: "thr-1", cwd: "/repo" });
+  await port.forkSession({ sessionId: "thr-1", cwd: "/repo", workspaceRoots: ["/other"] });
+  await port.close();
+
+  const startReq = requests.find((r) => r.method === "thread/start");
+  const turnReq = requests.find((r) => r.method === "turn/start");
+  const resumeReq = requests.find((r) => r.method === "thread/resume");
+  const forkReq = requests.find((r) => r.method === "thread/fork");
+  assert.deepEqual(startReq.params.config, { "features.default_mode_request_user_input": true });
+  assert.deepEqual(startReq.params.runtimeWorkspaceRoots, ["/repo", "/other"]);
+  assert.deepEqual(turnReq.params.runtimeWorkspaceRoots, ["/repo", "/other"]);
+  assert.deepEqual(resumeReq.params.config, { "features.default_mode_request_user_input": true });
+  assert.equal("runtimeWorkspaceRoots" in resumeReq.params, false);
+  assert.deepEqual(forkReq.params.config, { "features.default_mode_request_user_input": true });
+  assert.deepEqual(forkReq.params.runtimeWorkspaceRoots, ["/other"]);
+
+  await unsubscribeCodexThread({ request: async () => { throw Object.assign(new Error("old server"), { rpcCode: -32601 }); } }, "thr-1");
+
+  t.mock.method(CodexAppServerClient, "connect", async () => client);
+  requests.length = 0;
+  const compacted = await compactAppServerThread("/repo", { threadId: "thr-1", availability: { available: true } });
+  assert.deepEqual(compacted, { threadId: "thr-1", turnId: "cmp-1", compacted: true });
+  assert.deepEqual(requests.map((r) => r.method), ["thread/resume", "thread/compact/start", "thread/unsubscribe"]);
+
+  compactUnsupported = true;
+  await assert.rejects(
+    compactAppServerThread("/repo", { threadId: "thr-1", availability: { available: true } }),
+    /does not support thread\/compact\/start/
+  );
 });

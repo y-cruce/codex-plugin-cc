@@ -12,6 +12,7 @@ export type CanonicalEventType =
   | "question.opened" | "question.resolved" | "question.closed"
   | "permission.requested" | "permission.resolved"
   | "director.notified" | "control.message.updated" | "agent.activity"
+  | "mcp.startup.updated" | "hook.started" | "hook.completed" | "model.rerouted"
   | "source.warning" | "source.error" | "source.unknown"
   | "history.retention.changed" | "history.continuity.lost" | "history.recording.failed";
 
@@ -142,6 +143,10 @@ export interface CanonicalEventPayloadMap {
   "director.notified": { notificationId: string; message: string; pendingRequestId: string | null };
   "control.message.updated": { message: string; mode: "queued" | "interrupt" | "steer"; accepted: boolean | null; queued?: boolean; queuedJobId?: string; cancelled?: boolean };
   "agent.activity": { agentId: string; parentAgentId: string | null; path: string; status: "started" | "interacted" | "completed" | "interrupted" | "failed" };
+  "mcp.startup.updated": { name: string; status: "starting" | "ready" | "failed" | "cancelled"; error: string | null; failureReason: string | null };
+  "hook.started": HookRunPayload;
+  "hook.completed": HookRunPayload;
+  "model.rerouted": { fromModel: string; toModel: string; reason: string | null };
   "source.warning": SourceNoticePayload;
   "source.error": SourceNoticePayload;
   "source.unknown": { method: string; data: unknown };
@@ -162,6 +167,16 @@ interface JobTerminalPayload {
 interface FileChangePayload {
   status: "pending" | "in_progress" | "completed" | "failed";
   files: CanonicalFileChange[];
+}
+
+interface HookRunPayload {
+  runId: string;
+  eventName: string;
+  handlerType: string | null;
+  status: "running" | "completed" | "failed" | "blocked" | "stopped";
+  statusMessage: string | null;
+  durationMs: number | null;
+  entries?: Array<{ kind: string; text: string }>;
 }
 
 interface SourceNoticePayload {

@@ -7,19 +7,55 @@
  * @typedef {import("./app-server-protocol").CodexAppServerClientOptions} CodexAppServerClientOptions
  * @typedef {import("./app-server-protocol").InitializeCapabilities} InitializeCapabilities
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
+export const DISABLE_DAEMON_ENV = "CODEX_COMPANION_DISABLE_DAEMON";
 export const BROKER_BUSY_RPC_CODE = -32001;
+const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const DAEMON_CONNECT_TIMEOUT_MS = 2000;
+
+export function resolveDaemonControlSocketPath(env = process.env) {
+  const codexHome = path.resolve(env?.CODEX_HOME || path.join(env?.HOME || os.homedir(), ".codex"));
+  return path.join(codexHome, "app-server-control", "app-server-control.sock");
+}
+
+function resolveEligibleDaemonSocket(cwd, options = {}) {
+  if (options.daemonSocketPath) {
+    return options.daemonSocketPath;
+  }
+  if (process.platform === "win32") {
+    return null;
+  }
+  const env = options.env ?? process.env;
+  if (options.disableDaemon || env?.[DISABLE_DAEMON_ENV] === "1") {
+    return null;
+  }
+  const socketPath = resolveDaemonControlSocketPath(env);
+  if (!fs.existsSync(socketPath)) {
+    return null;
+  }
+  // Ensure `codex` on PATH is a real Codex CLI release (not a test fixture stub)
+  // so tests with custom PATH and default CODEX_HOME never bypass fixtures.
+  const version = binaryAvailable("codex", ["--version"], { cwd, env });
+  if (!version.available || !/^codex-cli\s+\d+\.\d+\.\d+/.test(version.detail)) {
+    return null;
+  }
+  return socketPath;
+}
 
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
@@ -352,6 +388,208 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
   }
 }
 
+class DaemonCodexAppServerClient extends AppServerClientBase {
+  constructor(cwd, options = {}) {
+    super(cwd, options);
+    this.transport = "daemon";
+    this.socketPath = options.daemonSocketPath;
+    this.socket = null;
+    this.rxBuffer = Buffer.alloc(0);
+    this.fragmentChunks = null;
+  }
+
+  async initialize() {
+    const key = crypto.randomBytes(16).toString("base64");
+    const expectedAccept = crypto.createHash("sha1").update(`${key}${WEBSOCKET_GUID}`).digest("base64");
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        req.destroy();
+        reject(error);
+      };
+      const req = http.request({
+        socketPath: this.socketPath,
+        path: "/rpc",
+        headers: {
+          Host: "localhost",
+          Connection: "Upgrade",
+          Upgrade: "websocket",
+          "Sec-WebSocket-Key": key,
+          "Sec-WebSocket-Version": "13"
+        }
+      });
+      const timer = setTimeout(
+        () => fail(new Error("Timed out connecting to Codex app-server daemon.")),
+        DAEMON_CONNECT_TIMEOUT_MS
+      );
+      timer.unref?.();
+
+      req.on("upgrade", (res, socket, head) => {
+        if (res.headers["sec-websocket-accept"] !== expectedAccept) {
+          socket.destroy();
+          fail(new Error("Invalid WebSocket handshake response from Codex app-server daemon."));
+          return;
+        }
+        clearTimeout(timer);
+        this.socket = socket;
+        socket.on("data", (chunk) => this.handleFrameChunk(chunk));
+        socket.on("error", (error) => this.handleExit(error));
+        socket.on("close", () => this.handleExit(this.exitError));
+        settled = true;
+        if (head?.length) {
+          this.handleFrameChunk(head);
+        }
+        resolve(undefined);
+      });
+      req.on("response", (res) => {
+        res.resume();
+        fail(new Error(`Codex app-server daemon rejected upgrade with HTTP ${res.statusCode}.`));
+      });
+      req.on("error", fail);
+      req.end();
+    });
+
+    const initialized = await this.request("initialize", {
+      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
+    });
+    this.observationVersion = Number(initialized["observationVersion"] ?? 0);
+    this.notify("initialized", {});
+  }
+
+  handleFrameChunk(chunk) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this.rxBuffer = this.rxBuffer.length ? Buffer.concat([this.rxBuffer, buf]) : buf;
+
+    while (!this.exitResolved && this.rxBuffer.length >= 2) {
+      const b0 = this.rxBuffer[0];
+      const b1 = this.rxBuffer[1];
+      const fin = (b0 & 0x80) !== 0;
+      const opcode = b0 & 0x0f;
+      const masked = (b1 & 0x80) !== 0;
+      let length = b1 & 0x7f;
+      let offset = 2;
+
+      if (length === 126) {
+        if (this.rxBuffer.length < 4) return;
+        length = this.rxBuffer.readUInt16BE(2);
+        offset = 4;
+      } else if (length === 127) {
+        if (this.rxBuffer.length < 10) return;
+        length = Number(this.rxBuffer.readBigUInt64BE(2));
+        offset = 10;
+      }
+
+      let mask = null;
+      if (masked) {
+        if (this.rxBuffer.length < offset + 4) return;
+        mask = this.rxBuffer.subarray(offset, offset + 4);
+        offset += 4;
+      }
+
+      if (this.rxBuffer.length < offset + length) return;
+      let payload = this.rxBuffer.subarray(offset, offset + length);
+      this.rxBuffer = this.rxBuffer.subarray(offset + length);
+
+      if (mask) {
+        const unmasked = Buffer.allocUnsafe(payload.length);
+        for (let i = 0; i < payload.length; i += 1) {
+          unmasked[i] = payload[i] ^ mask[i & 3];
+        }
+        payload = unmasked;
+      }
+
+      if (opcode === 0x9) {
+        if (!this.closed && this.socket && !this.socket.destroyed) {
+          this.writeFrame(0xa, payload);
+        }
+      } else if (opcode === 0x8) {
+        if (!this.closed && this.socket && !this.socket.destroyed) {
+          try {
+            this.writeFrame(0x8, Buffer.alloc(0));
+          } catch {}
+          this.socket.end();
+        }
+        return;
+      } else if (opcode === 0x1) {
+        if (fin) {
+          this.handleLine(payload.toString("utf8"));
+        } else {
+          this.fragmentChunks = [Buffer.from(payload)];
+        }
+      } else if (opcode === 0x0 && this.fragmentChunks) {
+        this.fragmentChunks.push(Buffer.from(payload));
+        if (fin) {
+          const text = Buffer.concat(this.fragmentChunks).toString("utf8");
+          this.fragmentChunks = null;
+          this.handleLine(text);
+        }
+      }
+    }
+  }
+
+  writeFrame(opcode, payload) {
+    const socket = this.socket;
+    if (!socket || socket.destroyed) {
+      throw new Error("codex app-server daemon connection is not connected.");
+    }
+    const len = payload.length;
+    let header;
+    if (len < 126) {
+      header = Buffer.allocUnsafe(2);
+      header[0] = 0x80 | opcode;
+      header[1] = 0x80 | len;
+    } else if (len <= 0xffff) {
+      header = Buffer.allocUnsafe(4);
+      header[0] = 0x80 | opcode;
+      header[1] = 0x80 | 126;
+      header.writeUInt16BE(len, 2);
+    } else {
+      header = Buffer.allocUnsafe(10);
+      header[0] = 0x80 | opcode;
+      header[1] = 0x80 | 127;
+      header.writeBigUInt64BE(BigInt(len), 2);
+    }
+    const mask = crypto.randomBytes(4);
+    const maskedPayload = Buffer.allocUnsafe(len);
+    for (let i = 0; i < len; i += 1) {
+      maskedPayload[i] = payload[i] ^ mask[i & 3];
+    }
+    socket.write(Buffer.concat([header, mask, maskedPayload]));
+  }
+
+  async close() {
+    if (this.closed) {
+      await this.exitPromise;
+      return;
+    }
+
+    this.closed = true;
+    if (this.socket && !this.socket.destroyed) {
+      try {
+        this.writeFrame(0x8, Buffer.alloc(0));
+      } catch {}
+      this.socket.end();
+      setTimeout(() => {
+        if (this.socket && !this.socket.destroyed) {
+          this.socket.destroy();
+        }
+      }, 50).unref?.();
+    } else {
+      this.handleExit(this.exitError);
+    }
+    await this.exitPromise;
+  }
+
+  sendMessage(message) {
+    this.writeFrame(0x1, Buffer.from(JSON.stringify(message), "utf8"));
+  }
+}
+
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
@@ -368,9 +606,24 @@ export class CodexAppServerClient {
     if (!brokerEndpoint && options.requireBroker) {
       throw new Error("A shared broker is required for interactive tasks. Check /codex:setup before retrying.");
     }
-    const client = brokerEndpoint
-      ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
-      : new SpawnedCodexAppServerClient(cwd, options);
+    if (brokerEndpoint) {
+      const client = new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint });
+      await client.initialize();
+      return client;
+    }
+
+    const daemonSocketPath = resolveEligibleDaemonSocket(cwd, options);
+    if (daemonSocketPath) {
+      const daemonClient = new DaemonCodexAppServerClient(cwd, { ...options, daemonSocketPath });
+      try {
+        await daemonClient.initialize();
+        return daemonClient;
+      } catch {
+        await daemonClient.close().catch(() => {});
+      }
+    }
+
+    const client = new SpawnedCodexAppServerClient(cwd, options);
     await client.initialize();
     return client;
   }

@@ -45,7 +45,7 @@ import path from "node:path";
 import { readJsonFile } from "./fs.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
-import { CodexExecutorJobPort, startCodexSession } from "./executors/codex-driver.mjs";
+import { CodexExecutorJobPort, startCodexSession, unsubscribeCodexThread } from "./executors/codex-driver.mjs";
 import { registerObservedJob } from "./observation-client.mjs";
 import { binaryAvailable } from "./process.mjs";
 
@@ -609,7 +609,7 @@ async function withAppServer(cwd, fn, options = {}) {
   } catch (error) {
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
     const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      (options.retryDirectOnBusy !== false && client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
       (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
 
     if (client) {
@@ -975,52 +975,64 @@ export async function runAppServerReview(cwd, options = {}) {
   return withAppServer(cwd, async (client) => {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     await registerObservedJob(client, cwd, options.onProgress);
-    // Persisted so the review thread can be resumed with `task --thread` for follow-ups.
-    const thread = await startCodexSession(client, cwd, {
-      model: options.model,
-      sandbox: options.sandbox ?? "read-only",
-      ephemeral: false,
-      threadName: options.threadName
-    });
-    const sourceThreadId = thread.thread.id;
-    emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
-      threadId: sourceThreadId
-    });
-    const delivery = options.delivery ?? "inline";
+    let sourceThreadId = null;
+    let reviewThreadId = null;
+    try {
+      // Persisted so the review thread can be resumed with `task --thread` for follow-ups.
+      const thread = await startCodexSession(client, cwd, {
+        model: options.model,
+        sandbox: options.sandbox ?? "read-only",
+        ephemeral: false,
+        threadName: options.threadName
+      });
+      sourceThreadId = thread.thread.id;
+      emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
+        threadId: sourceThreadId
+      });
+      const delivery = options.delivery ?? "inline";
 
-    const turnState = await captureTurn(
-      client,
-      sourceThreadId,
-      () =>
-        client.request("review/start", {
-          threadId: sourceThreadId,
-          delivery,
-          target: options.target
-        }),
-      {
-        onProgress: options.onProgress,
-        onResponse(response, state) {
-          if (response.reviewThreadId) {
-            state.threadIds.add(response.reviewThreadId);
-            if (delivery === "detached") {
-              state.threadId = response.reviewThreadId;
+      const turnState = await captureTurn(
+        client,
+        sourceThreadId,
+        () =>
+          client.request("review/start", {
+            threadId: sourceThreadId,
+            delivery,
+            target: options.target
+          }),
+        {
+          onProgress: options.onProgress,
+          onResponse(response, state) {
+            if (response.reviewThreadId) {
+              reviewThreadId = response.reviewThreadId;
+              state.threadIds.add(response.reviewThreadId);
+              if (delivery === "detached") {
+                state.threadId = response.reviewThreadId;
+              }
             }
           }
         }
-      }
-    );
+      );
 
-    return {
-      status: buildResultStatus(turnState),
-      threadId: turnState.threadId,
-      sourceThreadId,
-      turnId: turnState.turnId,
-      reviewText: turnState.reviewText,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr)
-    };
+      return {
+        status: buildResultStatus(turnState),
+        threadId: turnState.threadId,
+        sourceThreadId,
+        turnId: turnState.turnId,
+        reviewText: turnState.reviewText,
+        reasoningSummary: turnState.reasoningSummary,
+        turn: turnState.finalTurn,
+        error: turnState.error,
+        stderr: cleanCodexStderr(client.stderr)
+      };
+    } finally {
+      if (reviewThreadId && reviewThreadId !== sourceThreadId) {
+        await unsubscribeCodexThread(client, reviewThreadId);
+      }
+      if (sourceThreadId) {
+        await unsubscribeCodexThread(client, sourceThreadId);
+      }
+    }
   });
 }
 
@@ -1073,6 +1085,7 @@ export async function runAppServerTurn(cwd, options = {}) {
     const eventPump = (async () => {
       for await (const event of port.events()) options.onExecutorEvent?.(event);
     })();
+    let sessionId = null;
     try {
       let session;
       if (options.forkThreadId) {
@@ -1082,6 +1095,7 @@ export async function runAppServerTurn(cwd, options = {}) {
           cwd,
           model: options.model,
           sandbox: options.sandbox,
+          workspaceRoots: options.workspaceRoots,
           ephemeral: options.ephemeral ?? (options.persistThread ? false : true),
           threadName: options.persistThread ? options.threadName : options.threadName ?? null
         });
@@ -1092,6 +1106,7 @@ export async function runAppServerTurn(cwd, options = {}) {
           cwd,
           model: options.model,
           sandbox: options.sandbox,
+          workspaceRoots: options.workspaceRoots,
           ephemeral: false
         });
       } else {
@@ -1100,12 +1115,13 @@ export async function runAppServerTurn(cwd, options = {}) {
           cwd,
           model: options.model,
           sandbox: options.sandbox,
+          workspaceRoots: options.workspaceRoots,
           ephemeral: options.ephemeral ?? (options.persistThread ? false : true),
           persistThread: options.persistThread,
           threadName: options.persistThread ? options.threadName : options.threadName ?? null
         });
       }
-      const sessionId = session.sessionId;
+      sessionId = session.sessionId;
       emitProgress(options.onProgress, `Thread ready (${sessionId}).`, "starting", {
         executor: "codex",
         executorSessionId: sessionId,
@@ -1123,7 +1139,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       const interruptedTurns = [];
       do {
         const turn = await port.startTurn({ sessionId, prompt: input, cwd, sandbox: options.sandbox,
-          network: options.network, model: options.model, effort: options.effort, outputSchema: options.outputSchema });
+          network: options.network, model: options.model, effort: options.effort, outputSchema: options.outputSchema,
+          workspaceRoots: options.workspaceRoots });
         terminal = await turn.done;
         turnState = await turn.capture;
         fileChanges.push(...turnState.fileChanges);
@@ -1157,8 +1174,84 @@ export async function runAppServerTurn(cwd, options = {}) {
     } finally {
       await port.close();
       await eventPump;
+      if (sessionId) {
+        await unsubscribeCodexThread(client, sessionId);
+      }
     }
   }, { requireBroker: options.persistThread });
+}
+
+export async function compactAppServerThread(cwd, options = {}) {
+  const availability = options.availability ?? getCodexAvailability(cwd);
+  if (!availability.available) {
+    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+  }
+  const threadId = options.threadId;
+  if (!threadId) {
+    throw new Error("A thread id is required to compact context.");
+  }
+
+  return withAppServer(cwd, async (client) => {
+    const previousHandler = client.notificationHandler;
+    /** @type {string | null} */
+    let turnId = null;
+    /** @type {{ message?: string } | null} */
+    let lastError = null;
+    let resolveCompleted;
+    const completed = new Promise((resolve) => {
+      resolveCompleted = resolve;
+    });
+
+    try {
+      await client.request("thread/resume", { threadId, cwd });
+      client.setNotificationHandler((message) => {
+        previousHandler?.(message);
+        if (message.params?.threadId !== threadId) {
+          return;
+        }
+        if (message.method === "turn/started" && message.params?.turn?.id) {
+          turnId = message.params.turn.id;
+        } else if (message.method === "error" && message.params?.error) {
+          lastError = message.params.error;
+        } else if (message.method === "turn/completed") {
+          turnId = message.params.turn?.id ?? turnId;
+          resolveCompleted(message.params.turn ?? { id: turnId, status: "completed" });
+        }
+      });
+
+      try {
+        await client.request("thread/compact/start", { threadId });
+      } catch (error) {
+        if (error?.rpcCode === -32601) {
+          throw new Error(
+            "This Codex version does not support thread/compact/start. Update Codex with `npm install -g @openai/codex@latest`, then retry.",
+            { cause: error }
+          );
+        }
+        throw error;
+      }
+
+      const finalTurn = await Promise.race([
+        completed,
+        client.exitPromise.then(() => {
+          throw client.exitError ?? new Error("Codex connection closed before context compaction completed.");
+        })
+      ]);
+
+      if (finalTurn?.status && finalTurn.status !== "completed") {
+        throw new Error(finalTurn.error?.message ?? lastError?.message ?? `Context compaction ${finalTurn.status}.`);
+      }
+
+      return {
+        threadId,
+        turnId: finalTurn?.id ?? turnId,
+        compacted: true
+      };
+    } finally {
+      client.setNotificationHandler(previousHandler ?? null);
+      await unsubscribeCodexThread(client, threadId);
+    }
+  }, { retryDirectOnBusy: false });
 }
 
 export async function findLatestTaskThread(cwd, availability = getCodexAvailability(cwd)) {

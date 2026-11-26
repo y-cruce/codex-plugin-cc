@@ -1243,4 +1243,21 @@ describe('transcript block spacing', () => {
     assert.equal(failure.props.color, 'red');
     assert.equal(failure.props.wrap, 'wrap');
   });
+  test('surfaces MCP startup, hook activity, and rerouted model in the task pane', ($, on) => {
+    world($, on);
+    const data = fixture();
+    data.activeCommands = []; data.files = []; data.lastMessage = null;
+    data.model = 'gpt-5.3';
+    data.tail = [
+      { seq: '1', at: data.startedAt, type: 'mcp.startup.updated', text: 'MCP github: starting' },
+      { seq: '2', at: data.startedAt, type: 'hook.started', text: 'Hook preToolUse: running' },
+      { seq: '3', at: data.startedAt, type: 'model.rerouted', text: 'Model rerouted: gpt-5.4 → gpt-5.3 (highRiskCyberActivity)' },
+    ];
+    const ui = { ...$.ui.resolve(row()), Button: props => ({ type: 'Button', props, children: props.children ?? [props.label] }) };
+    const rendered = textOf(paneBody(ui, [data], 160, 30, Date.parse(data.startedAt), null, () => {}));
+    assert.match(rendered, /MCP github: starting/);
+    assert.match(rendered, /Hook preToolUse: running/);
+    assert.match(rendered, /Model rerouted: gpt-5\.4 → gpt-5\.3 \(highRiskCyberActivity\)/);
+    assert.match(rendered, /Codex · gpt-5\.3/);
+  });
 });

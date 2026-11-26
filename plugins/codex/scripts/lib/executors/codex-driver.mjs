@@ -16,14 +16,27 @@ const NOTIFY_DIRECTOR_TOOL = {
   deferLoading: false
 };
 
+const THREAD_REQUEST_USER_INPUT_CONFIG = {
+  "features.default_mode_request_user_input": true
+};
+
+function runtimeWorkspaceRootsParam(workspaceRoots) {
+  const roots = Array.isArray(workspaceRoots)
+    ? workspaceRoots.filter((value) => typeof value === "string" && value.trim())
+    : [];
+  return roots.length > 0 ? { runtimeWorkspaceRoots: roots } : {};
+}
+
 function threadParams(cwd, options = {}) {
   return {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only",
+    config: THREAD_REQUEST_USER_INPUT_CONFIG,
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true,
+    ...runtimeWorkspaceRootsParam(options.workspaceRoots),
     ...(options.persistThread ? { dynamicTools: [NOTIFY_DIRECTOR_TOOL] } : {})
   };
 }
@@ -73,7 +86,9 @@ export async function resumeCodexSession(client, sessionId, cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
+    sandbox: options.sandbox ?? "read-only",
+    config: THREAD_REQUEST_USER_INPUT_CONFIG,
+    ...runtimeWorkspaceRootsParam(options.workspaceRoots)
   });
 }
 
@@ -87,8 +102,10 @@ export async function forkCodexSession(client, sessionId, cwd, options = {}) {
       model: options.model ?? null,
       approvalPolicy: options.approvalPolicy ?? "never",
       sandbox: options.sandbox ?? "read-only",
+      config: THREAD_REQUEST_USER_INPUT_CONFIG,
       ephemeral: options.ephemeral ?? false,
-      excludeTurns: true
+      excludeTurns: true,
+      ...runtimeWorkspaceRootsParam(options.workspaceRoots)
     });
   } catch (error) {
     if (error?.rpcCode === -32601) {
@@ -109,6 +126,16 @@ export async function forkCodexSession(client, sessionId, cwd, options = {}) {
     }
   }
   return response;
+}
+
+export async function unsubscribeCodexThread(client, threadId) {
+  if (!client || !threadId) return;
+  try {
+    await client.request("thread/unsubscribe", { threadId });
+  } catch {
+    // Best-effort cleanup: ignore older servers without thread/unsubscribe,
+    // already-unloaded threads, or closed connections.
+  }
 }
 
 export class CodexExecutorJobPort {
@@ -189,7 +216,8 @@ export class CodexExecutorJobPort {
             : { type: "readOnly", networkAccess: false },
         model: request.model ?? null,
         effort: request.effort ?? null,
-        outputSchema: request.outputSchema ?? null
+        outputSchema: request.outputSchema ?? null,
+        ...runtimeWorkspaceRootsParam(request.workspaceRoots)
       }),
       {
         onProgress: this.onProgress,
