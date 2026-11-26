@@ -3,7 +3,7 @@ import path from "node:path";
 import childProcess from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createWorktree, removeWorktree } from "../plugins/codex/scripts/worktree.mjs";
+import { DEFAULT_MAX_SLOTS, createWorktree, removeWorktree } from "../plugins/codex/scripts/worktree.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 function repository() {
@@ -197,4 +197,70 @@ test("a source change during cloning fails verification and retains the register
   assert.throws(() => createWorktree(source, target, "worker/race"), /differs from the pinned commit[\s\S]*Incomplete worktree retained/);
   assert.ok(fs.existsSync(path.join(target, ".git")));
   assert.match(run("git", ["status", "--porcelain"], { cwd: target }).stdout, /src\/app.js/);
+});
+
+test("createWorktree enforces CODEX_WORKTREE_MAX_SLOTS without creating directory or branch", t => {
+  assert.equal(DEFAULT_MAX_SLOTS, 10);
+  const { source } = repository();
+  const root = path.dirname(source);
+  const first = path.join(root, "wt-1");
+  const second = path.join(root, "wt-2");
+  const third = path.join(root, "wt-3");
+  const previous = process.env.CODEX_WORKTREE_MAX_SLOTS;
+  process.env.CODEX_WORKTREE_MAX_SLOTS = "2";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_WORKTREE_MAX_SLOTS;
+    else process.env.CODEX_WORKTREE_MAX_SLOTS = previous;
+  });
+
+  createWorktree(source, first, "worker/cap-1");
+  createWorktree(source, second, "worker/cap-2");
+  fs.writeFileSync(path.join(second, "untracked.txt"), "wip\n");
+
+  let errorMessage = "";
+  assert.throws(() => createWorktree(source, third, "worker/cap-3"), error => {
+    errorMessage = error.message;
+    return /Worktree limit reached \(2\/2 linked worktrees/.test(errorMessage);
+  });
+  assert.ok(errorMessage.includes(fs.realpathSync(first)), errorMessage);
+  assert.ok(errorMessage.includes("[worker/cap-1] (clean)"), errorMessage);
+  assert.ok(errorMessage.includes(fs.realpathSync(second)), errorMessage);
+  assert.ok(errorMessage.includes("[worker/cap-2] (untracked files)"), errorMessage);
+  assert.equal(fs.existsSync(third), false);
+  assert.notEqual(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/worker/cap-3"], { cwd: source }).status, 0);
+
+  removeWorktree(source, first);
+  const created = createWorktree(source, third, "worker/cap-3");
+  assert.equal(created.branch, "worker/cap-3");
+  assert.ok(fs.existsSync(third));
+});
+
+test("removeWorktree refuses unreachable detached HEAD commits with SHAs but allows amended reflog-only commits", () => {
+  const { source, target } = repository();
+  const root = path.dirname(source);
+  createWorktree(source, target, "worker/detached-check");
+  git(target, "checkout", "--detach");
+  git(target, "-c", "user.name=Worker", "-c", "user.email=worker@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "detached work");
+  const detachedSha = git(target, "rev-parse", "HEAD");
+
+  assert.throws(() => removeWorktree(source, target), error =>
+    /Unreachable commits remain/.test(error.message) && error.message.includes(detachedSha));
+  assert.ok(fs.existsSync(target));
+
+  // Tagging makes detached HEAD reachable, allowing clean removal.
+  git(source, "tag", "saved-detached", detachedSha);
+  const removed = removeWorktree(source, target);
+  assert.equal(removed.removed, true);
+  assert.equal(fs.existsSync(target), false);
+
+  // Amending leaves the pre-amend commit only in the worktree reflog; removal should succeed.
+  const second = path.join(root, "wt-amend-check");
+  createWorktree(source, second, "worker/amend-check");
+  git(second, "-c", "user.name=Worker", "-c", "user.email=worker@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial commit");
+  const preAmendSha = git(second, "rev-parse", "HEAD");
+  git(second, "-c", "user.name=Worker", "-c", "user.email=worker@example.invalid", "-c", "commit.gpgsign=false", "commit", "--amend", "--allow-empty", "-m", "amended commit");
+  assert.notEqual(git(second, "rev-parse", "HEAD"), preAmendSha);
+  assert.equal(git(source, "branch", "--contains", preAmendSha), "");
+  assert.equal(removeWorktree(source, second).removed, true);
+  assert.equal(fs.existsSync(second), false);
 });

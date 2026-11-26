@@ -4,10 +4,51 @@ import childProcess from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { runCommand, runCommandChecked } from "./lib/process.mjs";
 
+export const DEFAULT_MAX_SLOTS = 10;
+
 function git(cwd, args, input) {
   return runCommandChecked("git", args, {
     cwd, input, shell: false, maxBuffer: 64 * 1024 * 1024
   }).stdout;
+}
+
+function parseMaxSlots() {
+  const raw = process.env.CODEX_WORKTREE_MAX_SLOTS;
+  if (raw === undefined || raw === "") return DEFAULT_MAX_SLOTS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`CODEX_WORKTREE_MAX_SLOTS must be a positive integer, got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
+function listLinkedWorktrees(source) {
+  const blocks = git(source, ["worktree", "list", "--porcelain"]).trim().split(/\r?\n\r?\n/).filter(Boolean);
+  return blocks.slice(1).map(block => {
+    let wtPath = "";
+    let branch = "(unknown)";
+    let prunable = false;
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) wtPath = line.slice("worktree ".length);
+      else if (line.startsWith("branch ")) branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+      else if (line === "detached") branch = "(detached)";
+      else if (line === "bare") branch = "(bare)";
+      else if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
+    }
+    return { path: wtPath, branch, prunable };
+  });
+}
+
+function worktreeDirtyState(entry) {
+  if (entry.prunable || !entry.path || !fs.existsSync(entry.path)) return "missing";
+  const result = runCommand("git", ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], { cwd: entry.path, shell: false });
+  if (result.status !== 0) return "status unavailable";
+  const lines = result.stdout.split("\n").filter(Boolean);
+  if (!lines.length) return "clean";
+  const hasUntracked = lines.some(line => line.startsWith("?? "));
+  const hasUncommitted = lines.some(line => !line.startsWith("?? "));
+  if (hasUncommitted && hasUntracked) return "uncommitted and untracked files";
+  return hasUntracked ? "untracked files" : "uncommitted changes";
 }
 
 function tree(cwd, base) {
@@ -143,6 +184,15 @@ export function createWorktree(source, destination, branch) {
     if (error.code !== "ENOENT") throw error;
   }
   git(source, ["check-ref-format", "--branch", branch]);
+  const maxSlots = parseMaxSlots();
+  const linked = listLinkedWorktrees(source);
+  if (linked.length >= maxSlots) {
+    const details = linked.map(entry => `  ${entry.path} [${entry.branch}] (${worktreeDirtyState(entry)})`).join("\n");
+    throw new Error(
+      `Worktree limit reached (${linked.length}/${maxSlots} linked worktrees; set CODEX_WORKTREE_MAX_SLOTS to adjust).\n` +
+      `Remove finished worktrees first with "worktree remove <source-repo> <worktree>" until fewer than ${maxSlots} remain, or wait for an active write task to finish:\n${details}`
+    );
+  }
   const base = git(source, ["rev-parse", "HEAD"]).trim();
   git(source, ["worktree", "add", "--no-checkout", "-b", branch, destination, base]);
   const result = { cwd: destination, branch, base, clonedFiles: 0, copiedFiles: 0, checkoutFiles: 0,
@@ -167,6 +217,14 @@ function moduleGitDirs(directory) {
   return found;
 }
 
+function unreachableParentCommits(destination, directory) {
+  const head = runCommand("git", ["--git-dir", directory, "rev-parse", "--verify", "HEAD^{commit}"], { cwd: destination, shell: false });
+  const sha = head.status === 0 ? head.stdout.trim() : "";
+  if (!sha) return [];
+  const out = git(destination, ["--git-dir", directory, "rev-list", sha, "--not", "--branches", "--tags", "--remotes"]).trim();
+  return out ? out.split("\n").filter(Boolean) : [];
+}
+
 export function removeWorktree(source, destination) {
   destination = fs.realpathSync(destination);
   const common = cwd => fs.realpathSync(path.resolve(cwd, git(cwd, ["rev-parse", "--git-common-dir"]).trim()));
@@ -180,7 +238,12 @@ export function removeWorktree(source, destination) {
     if (git(destination, ["--git-dir", gitDir, "status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"]).trim()) {
       throw new Error(`Uncommitted, untracked or ignored files remain in ${gitDir}; preserve them before removal.`);
     }
-    if (gitDir !== directory) {
+    if (gitDir === directory) {
+      const unreachable = unreachableParentCommits(destination, directory);
+      if (unreachable.length) {
+        throw new Error(`Unreachable commits remain in ${directory} (not reachable from any branch, tag, or remote): ${unreachable.join(", ")}; preserve them before removal.`);
+      }
+    } else {
       const base = git(destination, ["--git-dir", gitDir, "config", "--local", "--get", "codex.worktreeBase"]).trim();
       if (git(destination, ["--git-dir", gitDir, "rev-list", "--all", "--reflog", "HEAD", "--not", "--remotes", "--glob=refs/codex/worktree-initial/*", base]).trim()) {
         throw new Error(`Unpublished submodule commits remain in ${gitDir}; push or preserve them before removal.`);
