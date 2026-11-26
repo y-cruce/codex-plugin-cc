@@ -18,8 +18,6 @@ const METHODS = {
   "item/plan/delta": "plan.delta",
   "item/mcpToolCall/progress": "tool.progress",
   "mcpServer/startupStatus/updated": "mcp.startup.updated",
-  "hook/started": "hook.started",
-  "hook/completed": "hook.completed",
   "model/rerouted": "model.rerouted",
   "companion/question": "question.opened",
   "companion/notification": "director.notified",
@@ -223,18 +221,6 @@ function payloadFor(type, message, receivedAt) {
       error: p.error ?? null,
       failureReason: p.failureReason ?? null
     };
-    case "hook.started": case "hook.completed": {
-      const run = p.run ?? {};
-      return {
-        runId: String(run.id ?? ""),
-        eventName: run.eventName ?? "",
-        handlerType: run.handlerType ?? null,
-        status: run.status ?? (type === "hook.started" ? "running" : "completed"),
-        statusMessage: run.statusMessage ?? null,
-        durationMs: typeof run.durationMs === "number" ? run.durationMs : null,
-        entries: Array.isArray(run.entries) ? run.entries.map((entry) => ({ kind: entry.kind ?? "context", text: entry.text ?? "" })) : []
-      };
-    }
     case "model.rerouted": return {
       fromModel: p.fromModel ?? "",
       toModel: p.toModel ?? "",

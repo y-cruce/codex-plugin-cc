@@ -895,34 +895,16 @@ test("mcpServer/startupStatus/updated shows starting servers, clears on ready, a
   assert.deepEqual(view.tail.map((row) => row.text), ["MCP broken: failed — connection refused"]);
 });
 
-test("hook/started and hook/completed pair by run id and surface hook status in trace", () => {
+test("hook/started and hook/completed are not rendered into the event stream or task pane", () => {
   const { view, accept } = harness();
-  const started = accept("hook/started", {
-    turnId: "turn-1",
-    run: {
-      id: "run-1", eventName: "preToolUse", handlerType: "command", executionMode: "sync",
-      scope: "turn", sourcePath: "/repo/.codex/hooks.json", source: "project", displayOrder: 0,
-      status: "running", statusMessage: "Checking policy", startedAt: 1000, completedAt: null, durationMs: null, entries: []
-    }
-  });
-  assert.equal(started.type, "hook.started");
-  assert.equal(renderJobEvent(started), "Hook preToolUse: running — Checking policy");
-  assert.deepEqual(view.tail.map((row) => row.text), ["Hook preToolUse: running — Checking policy"]);
-
-  const completed = accept("hook/completed", {
-    turnId: "turn-1",
-    run: {
-      id: "run-1", eventName: "preToolUse", handlerType: "command", executionMode: "sync",
-      scope: "turn", sourcePath: "/repo/.codex/hooks.json", source: "project", displayOrder: 0,
-      status: "blocked", statusMessage: null, startedAt: 1000, completedAt: 1042, durationMs: 42,
-      entries: [{ kind: "stop", text: "blocked rm -rf" }]
-    }
-  });
-  assert.equal(completed.type, "hook.completed");
-  assert.equal(renderJobEvent(completed), "Hook preToolUse: blocked (42ms) — blocked rm -rf");
-  assert.equal(view.tail.length, 1);
-  assert.equal(view.tail[0].text, "Hook preToolUse: blocked (42ms) — blocked rm -rf");
-  assert.equal(Object.keys(view._items).length, 0);
+  for (const [method, status] of [["hook/started", "running"], ["hook/completed", "completed"]]) {
+    const event = accept(method, {
+      turnId: "turn-1",
+      run: { id: "run-1", eventName: "preToolUse", handlerType: "command", status, durationMs: status === "completed" ? 12 : null, entries: [] }
+    });
+    assert.equal(renderJobEvent(event), null);
+  }
+  assert.deepEqual(view.tail, []);
 });
 
 test("model/rerouted updates view.model for root job and records trace event", () => {

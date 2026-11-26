@@ -40,8 +40,7 @@ test("activity notes keep bounded current actions and exclude output, raw thinki
     { seq: "5", type: "command.started", text: "$ /usr/bin/curl --data argument-sentinel" },
     { seq: "6", type: "tool.started", text: "Read activity.ts" },
     { seq: "7", type: "mcp.startup.updated", text: "MCP github: starting" },
-    { seq: "8", type: "hook.started", text: "Hook preToolUse: running" },
-    { seq: "9", type: "model.rerouted", text: "Model rerouted: gpt-5.4 → gpt-5.3 (highRiskCyberActivity)" },
+    { seq: "8", type: "model.rerouted", text: "Model rerouted: gpt-5.4 → gpt-5.3 (highRiskCyberActivity)" },
   ];
   data.activeCommands = [{ command: "node --eval argument-sentinel" }];
   data.plan = { entries: [{ status: "in_progress", content: "核对退出条件" }] };
@@ -49,7 +48,6 @@ test("activity notes keep bounded current actions and exclude output, raw thinki
   assert.match(notes, /curl/);
   assert.match(notes, /Read activity.ts/);
   assert.match(notes, /MCP github: starting/);
-  assert.match(notes, /Hook preToolUse: running/);
   assert.match(notes, /Model rerouted: gpt-5.4 → gpt-5.3/);
   assert.match(notes, /核对退出条件/);
   assert.doesNotMatch(notes, /sentinel/);
