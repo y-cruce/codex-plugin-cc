@@ -188,7 +188,7 @@ A Claude session on another machine (for example a remote pod driving this machi
 
 ### Parallel worktrees
 
-The director creates a separate worktree for each parallel writer (default cap: 10 linked worktrees per repository, counted separately for each repository including submodule repositories, adjustable via `CODEX_WORKTREE_MAX_SLOTS`) and passes it as the task's `CWD`. With code-director installed:
+The director creates a separate worktree for each parallel writer (default cap: 20 linked worktrees per repository, counted separately for each repository including submodule repositories, adjustable via `CODEX_WORKTREE_MAX_SLOTS`) and passes it as the task's `CWD`. With code-director installed:
 
 ```bash
 bash ~/.claude/skills/code-director/scripts/dispatch.sh worktree /abs/source-repo /abs/new-worktree worker/topic
@@ -201,7 +201,7 @@ From 1.4.45, nested submodules are initialized at their parent's recorded commit
 
 Executors stay in their assigned directory, check symlinks and absolute paths before builds, keep writable build outputs local, and reuse shared immutable dependency caches (Maven: use `~/.m2/repository` directly, never copy or clone `~/.m2`, and never point `-Dmaven.repo.local` elsewhere; Go: share global `GOMODCACHE`/`GOCACHE`; Node: prefer `pnpm`). Never hard-link or symlink shared writable outputs. Commit submodule edits before updating the parent gitlink. After stopping tasks and integrating commits, the director removes the worktree with `dispatch.sh worktree remove <source-repo> <worktree>` (or `node scripts/worktree.mjs remove ...`). Removal checks every repository for uncommitted, untracked and ignored files, refuses if parent `HEAD` contains commits not reachable from any branch, tag or remote ref (listing their SHAs), and refuses to discard submodule commits outside its recorded initial refs and remote-tracking refs. Git's force flag for initialized submodules is used only after those checks. The parent branch is kept. Hiding a pane row does not remove its tree; keep the original directory while its thread needs further turns.
 
-主 agent 为每个并行写入者新建独立 worktree（上限按单个仓库各自计算，各仓默认 10 个 linked worktree，子模块仓库单独计算，可通过 `CODEX_WORKTREE_MAX_SLOTS` 调整）并通过任务的 `CWD` 分配。新建前先通过 `git worktree list --porcelain` 统计该仓已登记的 linked worktree（不含主 checkout），满额即拒绝创建并逐个列出现有 worktree 的路径、分支和脏净状态，方便先回收已结束的目录或让多余的写任务等待。未达上限时先由 Git 登记再对未修改跟踪文件做写时复制（macOS 经 Python 3 调用 APFS 原生 `clonefile`），支持嵌套子模块独立对象库与提交校验。
+主 agent 为每个并行写入者新建独立 worktree（上限按单个仓库各自计算，各仓默认 20 个 linked worktree，子模块仓库单独计算，可通过 `CODEX_WORKTREE_MAX_SLOTS` 调整）并通过任务的 `CWD` 分配。新建前先通过 `git worktree list --porcelain` 统计该仓已登记的 linked worktree（不含主 checkout），满额即拒绝创建并逐个列出现有 worktree 的路径、分支和脏净状态，方便先回收已结束的目录或让多余的写任务等待。未达上限时先由 Git 登记再对未修改跟踪文件做写时复制（macOS 经 Python 3 调用 APFS 原生 `clonefile`），支持嵌套子模块独立对象库与提交校验。
 
 Executor 只在分配目录工作，构建前检查符号链接和绝对路径，保持编译产物本地独立，同时复用共享不可变依赖缓存（Maven 一律直接使用 `~/.m2/repository`，禁止复制或克隆 `~/.m2`，也不许用 `-Dmaven.repo.local` 指向其他目录；Go 共用全局 `GOMODCACHE`/`GOCACHE`；Node 优先 `pnpm`），禁止硬链接或软链接共享的可写输出目录；先提交子模块修改再更新主仓 gitlink。集成并停止任务后用 `dispatch.sh worktree remove` 回收目录，删除前会检查主仓及全部子模块的未提交、未跟踪和忽略文件、主仓 `HEAD` 中无分支/标签/远端可达的提交，以及子模块未推送提交；主仓分支保留，线程仍需续接时不删除目录，面板隐藏不会回收目录。
 
