@@ -83,6 +83,7 @@ export function isCompacting(view: Pick<LiveView, 'status' | 'endedAt' | 'active
 const PROSE = /^(message|reasoning|question|director|control|source|plan|tool\.progress|job\.(failed|cancelled))/
 // Nonzero exits keep a visible command row.
 const isQuietCommand = (event: LiveView['tail'][number]) => (event.type === 'command.started'
+  || event.type === 'command.output.delta'
   || event.type === 'command.interaction'
   || (event.type === 'command.completed' && event.status !== 'failed' && (event.exitCode == null || event.exitCode === 0)))
 const isFileRow = (event: LiveView['tail'][number]) => String(event.type ?? '').startsWith('fileChange') && Boolean(event.files?.length)

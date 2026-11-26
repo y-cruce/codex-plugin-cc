@@ -1289,4 +1289,18 @@ describe('transcript block spacing', () => {
       '    ● $ echo done · 1s',
     ]);
   });
+  test('keeps a running command that streams output inside its shell command group', ($, on) => {
+    world($, on);
+    const ui = $.ui.resolve(row());
+    const data = fixture();
+    data.activeCommands = []; data.files = []; data.lastMessage = null;
+    const at = data.startedAt;
+    data.tail = [
+      { seq: '1', at, type: 'command.completed', text: '$ pwd', exitCode: 0, durationMs: 0 },
+      { seq: '2', at, type: 'command.output.delta', text: '$ a1 cd-pipeline run list', output: 'partial' },
+      { seq: '3', at, type: 'command.started', text: '$ a1 cd-pipeline run get 1' },
+    ];
+    const collapsed = rowsOf(liveTree(ui, data, 120, Date.parse(at), 48)).map(textOf).slice(1);
+    assert.deepEqual(collapsed, [' ', '● Running 3 shell commands…', '  ⎿  $ a1 cd-pipeline run get 1']);
+  });
 });
