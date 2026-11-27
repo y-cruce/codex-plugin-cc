@@ -83,7 +83,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function printUsage() {
@@ -93,7 +93,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>]",
       "  node scripts/codex-companion.mjs adversarial-review [--label <text>] [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--sandbox <read-only|workspace-write|danger-full-access>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--workspace-root <path>] [--thread <id>|--fork-thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--label <text>] [--background] [--write] [--sandbox <read-only|workspace-write|danger-full-access>] [--network] [--workspace-root <path>] [--thread <id>|--fork-thread <id>|--resume-last|--resume|--fresh] [--allow-other-repo] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [prompt]",
       "  node scripts/codex-companion.mjs compact <job-id>|--thread <thread-id> [--cwd <repo>] [--json]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
@@ -152,7 +152,7 @@ function normalizeReasoningEffort(effort) {
   }
   if (!VALID_REASONING_EFFORTS.has(normalized)) {
     throw new Error(
-      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh, max.`
+      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh, max, ultra.`
     );
   }
   return normalized;
