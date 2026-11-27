@@ -200,7 +200,7 @@ test("a source change during cloning fails verification and retains the register
 });
 
 test("createWorktree enforces CODEX_WORKTREE_MAX_SLOTS without creating directory or branch", t => {
-  assert.equal(DEFAULT_MAX_SLOTS, 20);
+  assert.equal(DEFAULT_MAX_SLOTS, 30);
   const { source } = repository();
   const root = path.dirname(source);
   const first = path.join(root, "wt-1");

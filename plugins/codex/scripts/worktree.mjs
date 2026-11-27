@@ -4,7 +4,7 @@ import childProcess from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { runCommand, runCommandChecked } from "./lib/process.mjs";
 
-export const DEFAULT_MAX_SLOTS = 20;
+export const DEFAULT_MAX_SLOTS = 30;
 
 function git(cwd, args, input) {
   return runCommandChecked("git", args, {
