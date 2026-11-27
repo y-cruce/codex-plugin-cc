@@ -171,7 +171,7 @@ export function shouldDropMonitorExpiry(text: string, owned: ReadonlySet<string>
   // Expiry needs no action even after the last job left the pane, or a reload
   // replaced its watch. Match the whole event so a batch cannot lose job events.
   return Boolean(taskId && owned.has(taskId)
-    && /<event>\[Monitor (?:expired after [^\n<]*|timed out — re-arm if needed\.)\]<\/event>/.test(text))
+    && /<event>\[Monitor (?:expired after [^\n<]*|timed out — re-arm if needed\.|timed out(?: with no events delivered)?\.[^\n<]*)\]<\/event>/.test(text))
 }
 
 // An `events` stream the pane armed ends on its own once the repository has been
@@ -1336,7 +1336,7 @@ async function pollOnce($: EngineInterface, state: State) {
     // it again would wake the director twice for one event.
     const mine = [...state.pending, ...lines.filter(line => {
       const monitor = state.monitors.get(line.cwd)
-      return !state.followed.has(line.jobId) && (!monitor || monitor.ended)
+      return !state.followed.has(line.jobId) && (!monitor || monitor.ended || now - monitor.armedAt >= MONITOR_MS)
     })]
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.

@@ -160,6 +160,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
         : init.cwd === workspaceRoot ? threads : [] }), stderr: "" };
     } },
     tool: { call: async (request) => options.toolCall ? options.toolCall(request) : assert.fail("no real monitors") },
+    ...(options.submit && { prompt: { submit: options.submit } }),
     ui: { panes: async () => options.panes ?? [], open: async (request) => { if (options.open) await options.open(); opened.push(request); return request.focus ? options.focusResult ?? { isPlaced: true } : openResult; }, close: async () => {}, invalidate: () => {}, log: (text, options) => (options?.to === "debug" ? debugLogs : logs).push(text), toast: (text) => toasts.push(text),
       notify: async (text) => { notices.push(text); if (options.notify) return options.notify(); return { isSent: true, channel: "terminal_bell" }; },
       focus: async () => ({}), scroll: async () => {}, resolve: () => Object.fromEntries(["Box", "Text", "Code", "Markdown", "Button", "Input"].map((key) => [key, element(key)])) },
@@ -216,6 +217,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       listing[0].sessionIds = [sessionId];
     },
     goal: async (args, text) => { await hooks.get("command.run:")(engine, { command: "goal", args }, async () => ({ text })); await settle(writes); },
+    startTurn: async () => hooks.get("turn.start:")(engine, {}, async () => {}),
     turn: async (reason = "answer") => hooks.get("turn.complete:")(engine, { reason }, async () => ({ text: "" })),
     focus: async (element) => hooks.get("ui.focus:")(engine, { requestId: "codex_tasks", element }, async (event) => event),
     command: async (args) => hooks.get("command.run:")(engine, { command: "codex:tasks", args }, async () => assert.fail("command escaped")),
@@ -448,28 +450,52 @@ test("session resume returns while a monitor stop never returns", async (t) => {
   }
 });
 
-test("an expired monitor stays retired when its last task finished in the gap", async () => {
+test("the pane reports completion once when the last job finishes before the Monitor expiry notice", async () => {
   const calls = [];
-  const pane = await paneHarness(new Map(), undefined, "session", { watch: false, toolCall: request => {
-    calls.push(request);
-    return { result: { taskId: `monitor-${calls.length}` } };
-  } });
+  const submitted = [];
+  let finished = false;
+  const pane = await paneHarness(new Map(), undefined, "session", {
+    watch: false, push: true,
+    submit: async ({ text }) => { submitted.push(text); return {}; },
+    replay: () => [
+      ...(finished ? [{ type: "job.completed", seq: "1", text: "done" }] : []),
+      { type: "end", nextCursor: finished ? "done" : "start", committedSeq: finished ? "1" : "0" },
+    ].map(JSON.stringify).join("\n"),
+    toolCall: request => {
+      calls.push(request);
+      return { result: { taskId: `monitor-${calls.length}` } };
+    },
+  });
   assert.equal(calls.length, 1);
-  pane.advance(1800001);
-  pane.list([{ ...pane.listing[0], status: "completed", live: false }]);
+  const thread = { ...pane.listing[0], historyAvailable: true };
+  pane.list([thread]);
+  await pane.tick();
+  await pane.startTurn();
+  pane.advance(1800000);
+  finished = true;
+  pane.list([{ ...thread, status: "completed", live: false }]);
   pane.files.set(pane.jobPath, { ...pane.files.get(pane.jobPath), status: "completed" });
   pane.files.set(pane.viewPath, { ...pane.live, status: "completed", activeRoundId: null, endedAt: new Date().toISOString() });
   await pane.tick();
   assert.equal(calls.length, 1);
+  assert.match(pane.toasts.join("\n"), /job.completed/);
+  assert.deepEqual(submitted, [], "the director's turn is still running");
+  await pane.turn();
+  await pane.tick();
+  const expiry = { origin: { kind: "task-notification" },
+    text: '<task-notification><task-id>monitor-1</task-id><event>[Monitor expired after 30m with no events delivered. Re-arm it if you still need the watch.]</event></task-notification>' };
+  await pane.prompt(expiry, async () => assert.fail("Monitor expiry reached the director"));
   await pane.tick();
   assert.equal(calls.length, 1);
-  assert.match(pane.toasts.join("\n"), /job.completed/);
+  assert.deepEqual(submitted, ["Codex tasks\nAlpha task · job.completed: done"]);
 });
 
 test("an unreadable Monitor process only re-arms on an ending notice or at the cap", async (t) => {
   const cases = [
     ["terminal notice", '<status>completed</status><summary>Monitor "Codex job events in work" stream ended</summary>'],
     ["expiry notice", '<summary>Monitor event: "Codex job events in work"</summary><event>[Monitor timed out — re-arm if needed.]</event>'],
+    ["timeout notice", '<summary>Monitor event: "Codex job events in work"</summary><event>[Monitor timed out. Re-arm it only if you have more to do before you reply; a few minutes after your reply a new watch is likely stopped, so tell the user what to check instead.]</event>'],
+    ["timeout with stderr", '<summary>Monitor event: "Codex job events in work"</summary><event>[Monitor timed out with no events delivered. Its command wrote to stderr, which isn\'t delivered as events and may mean it failed: see `/tmp/monitor.output`. Re-arm if needed.]</event>'],
     ["age cap", null],
   ];
   for (const [name, ending] of cases) await t.test(name, async () => {
