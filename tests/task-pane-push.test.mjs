@@ -138,6 +138,7 @@ async function paneHarness(stored = new Map(), openResult = { isPlaced: false, r
       if (args[3] === "codex-monitor-stop") return options.stopProcess ? options.stopProcess(args) : { exitCode: 0, stdout: "", stderr: "" };
       if (args[0] === "rm") { files.delete(args[2]); return { exitCode: 0, stdout: "", stderr: "" }; }
       if (args[2] === "message" && options.messageRun) return options.messageRun(args, init);
+      if (args[0] === "sh" && args[2] === "echo $PPID" && options.ppidProbe) return options.ppidProbe();
       if (args[0] === "sh" && options.ppid) return { exitCode: 0, stdout: `${options.ppid}\n`, stderr: "" };
       // Node names the command, not the directory, when a spawn's cwd is gone.
       if (!dirs.has(init.cwd)) throw new Error(`spawn ${args[0]} ENOENT`);
@@ -463,6 +464,53 @@ test("an expired monitor stays retired when its last task finished in the gap", 
   await pane.tick();
   assert.equal(calls.length, 1);
   assert.match(pane.toasts.join("\n"), /job.completed/);
+});
+
+test("an unreadable Monitor process only re-arms on an ending notice or at the cap", async (t) => {
+  const cases = [
+    ["terminal notice", '<status>completed</status><summary>Monitor "Codex job events in work" stream ended</summary>'],
+    ["expiry notice", '<summary>Monitor event: "Codex job events in work"</summary><event>[Monitor timed out — re-arm if needed.]</event>'],
+    ["age cap", null],
+  ];
+  for (const [name, ending] of cases) await t.test(name, async () => {
+    const calls = [];
+    let probes = 0;
+    let monitors = 0;
+    const reason = name === "expiry notice" ? /exit 2/ : /pgrep timed out/;
+    const pane = await paneHarness(new Map(), undefined, "session", {
+      pgrep: () => {
+        probes++;
+        if (name === "expiry notice") return { exitCode: 2, stdout: "", stderr: "" };
+        throw new Error("pgrep timed out");
+      },
+      toolCall: request => {
+        calls.push(request);
+        return request.tool === "Monitor" ? { result: { taskId: `monitor-${++monitors}` } } : {};
+      },
+    });
+    for (let i = 0; i < 2; i++) {
+      pane.advance(20000);
+      await pane.tick();
+    }
+    assert.equal(monitors, 1);
+    assert.equal(pane.debugLogs.filter(text => reason.test(text)).length, 1);
+    const probesBeforeEnd = probes;
+    if (ending) {
+      const notice = { origin: { kind: "task-notification" },
+        text: `<task-notification><task-id>monitor-1</task-id>${ending}</task-notification>` };
+      await pane.prompt(notice, async () => assert.fail("Monitor housekeeping reached the director"));
+      await waitFor(() => monitors === 2, "replacement Monitor", 1000);
+      await pane.prompt(notice, async () => assert.fail("duplicate Monitor housekeeping reached the director"));
+    } else {
+      pane.advance(1800000);
+      await pane.tick();
+    }
+    await pane.tick();
+    assert.equal(monitors, 2);
+    assert.equal(probes, probesBeforeEnd);
+    assert.deepEqual(calls.map(request => request.tool), ["Monitor", "TaskStop", "Monitor"]);
+    assert.equal(calls[1].task_id, "monitor-1");
+  });
 });
 
 test("an old replay cannot write its ledger into a new session", async () => {
@@ -1339,6 +1387,24 @@ test("a fallback Monitor survives a poll whose listing of its repository failed"
   await pane.tick()
   assert.deepEqual(calls, ['Monitor'], "kept through the failed listing, not stopped and rearmed")
 })
+
+test("a failed channel PID lookup is retried and the confirmed channel retires the Monitor", async () => {
+  const calls = [];
+  const now = Date.now();
+  let failed = true;
+  const pane = await paneHarness(new Map(), undefined, "session", { watch: false, now,
+    preset: [["/tmp/codex-channel/4242.confirmed.json", { sessionId: "session", until: now + 60000 }]],
+    ppidProbe: () => {
+      if (failed) throw new Error("sh timed out");
+      return { exitCode: 0, stdout: "4242\n", stderr: "" };
+    },
+    toolCall: async request => { calls.push(request.tool); return { result: { taskId: "fallback-monitor" } }; },
+  });
+  assert.deepEqual(calls, ["Monitor"]);
+  failed = false;
+  await pane.tick();
+  assert.deepEqual(calls, ["Monitor", "TaskStop"]);
+});
 
 test("channel confirmation stops an ACP Monitor whose launch reply arrives after retirement", async () => {
   const calls = [];

@@ -21,7 +21,7 @@ type Job = { id: string; recordId?: string; sessionId?: string; workspaceRoot?: 
 // the start: an ending at or below it was already history then.
 type Receipt = { cursor?: string; terminal?: string; floor?: string }
 type Ledger = Record<string, Receipt>
-type Monitor = { armedAt: number; checkedAt?: number; taskId?: string }
+type Monitor = { armedAt: number; checkedAt?: number; taskId?: string; ended?: boolean }
 type Hold = { armedAt: number; checkedAt?: number; taskId?: string }
 type Delivery = 'steer' | 'queue' | 'interrupt'
 type Notice = { text: string; error?: boolean }
@@ -94,6 +94,7 @@ type State = {
   pinned: boolean
   clock: string
   monitors: Map<string, Monitor>
+  monitorProbeFailures: Set<string>
   retiredMonitors: Set<string>
   // Every watch this pane armed in this session, ended or not: its ending is
   // reported after the entry in `monitors` may already have been replaced.
@@ -101,8 +102,8 @@ type State = {
   leaving: boolean
   liveRoots: Set<string>
   // The director channel's files for this Claude Code process (see
-  // scripts/director-channel.mjs), '' until found, null where there is none.
-  channel: string | null | ''
+  // scripts/director-channel.mjs), '' until found.
+  channel: string
   channelOn: boolean
   // A probe is on its way (the server says so): lines wait for it, and no
   // Monitor is armed in the meantime.
@@ -301,11 +302,7 @@ function updateActivities($: EngineInterface, state: State, views: LiveView[], n
   for (const request of requests) void generateActivity($, state, request)
 }
 
-// Armed once per repository and never awaited: the call resolves when the
-// monitor ends, which is the whole point of it, so awaiting here would hold the
-// poll for the length of the watch. When it does end -- the host's thirty
-// minute cap, or `events` exiting once the repository has been quiet -- the
-// entry goes and the next poll with a live job there arms a fresh one.
+// Record the launch before it starts so a new pane can adopt it on reload.
 function recordMonitors($: EngineInterface, state: State) {
   const key = `${state.key}:monitors`
   const value = Object.fromEntries(state.monitors)
@@ -333,9 +330,11 @@ function stopMonitor($: EngineInterface, state: State, taskId: string, key = sta
   state.retiredMonitors.add(taskId)
   writeStore($, state, `${key}:retiredMonitors`, [...state.retiredMonitors])
   // TaskStop addresses only this process's registry, never another session's shell.
-  $.clock.after(0, () => {
-    void $.tool.call({ tool: 'TaskStop', task_id: taskId }).catch((error: unknown) => {
-      $.ui.log(`Codex tasks stop monitor ${taskId}: ${String(error)}`, { to: 'debug' })
+  return new Promise<void>(resolve => {
+    $.clock.after(0, () => {
+      void $.tool.call({ tool: 'TaskStop', task_id: taskId }).catch((error: unknown) => {
+        $.ui.log(`Codex tasks stop monitor ${taskId}: ${String(error)}`, { to: 'debug' })
+      }).finally(resolve)
     })
   })
 }
@@ -347,44 +346,54 @@ function stopMonitors($: EngineInterface, state: State) {
   for (const monitor of monitors) if (monitor.taskId) stopMonitor($, state, monitor.taskId)
 }
 
-// The watch is a process with a command line of its own, so whether it is still
-// there is a question the system can answer. Neither of the other two sources
-// can: the call settles as soon as the host has launched the monitor, and a
-// reload leaves the promise with the instance that is gone. Trusting age alone
-// meant a watch that ended early -- the `events` command exits once a
-// repository has been quiet -- went unnoticed until the cap, and a job that
-// finished in that half hour woke nobody.
-async function watching($: EngineInterface, state: State, root: string): Promise<boolean> {
-  const epoch = state.epoch
-  const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\.sh events --cwd ${root} --session ${state.sessionId}`],
-    { cwd: state.cwd, timeoutMs: 2000 }).catch(() => null)
-  return state.epoch === epoch && !state.leaving && Boolean(found && found.exitCode === 0 && found.stdout.trim())
+// A failed probe leaves the watch's status unknown. A successful retry
+// clears the log suppression for this repository.
+async function watching($: EngineInterface, state: State, root: string): Promise<boolean | undefined> {
+  let failure: string
+  try {
+    const found = await $.process.run(['pgrep', '-f', `(codex-worker|dispatch)\\.sh events --cwd ${root} --session ${state.sessionId}`],
+      { cwd: state.cwd, timeoutMs: 2000 })
+    if (found.exitCode === 1 || (found.exitCode === 0 && found.stdout.trim())) {
+      state.monitorProbeFailures.delete(root)
+      return found.exitCode === 0
+    }
+    failure = found.exitCode === 0 ? 'pgrep returned no PID (exit 0)' : `pgrep exit ${found.exitCode}`
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error)
+  }
+  if (!state.monitorProbeFailures.has(root)) {
+    state.monitorProbeFailures.add(root)
+    $.ui.log(`Codex tasks monitor probe ${root}: ${failure}`, { to: 'debug' })
+  }
+  return undefined
 }
 
 async function ensureMonitors($: EngineInterface, state: State, live: Set<string>, now: number) {
   const epoch = state.epoch
   const generation = state.generation
   const key = state.key
+  const stale = () => state.leaving || state.epoch !== epoch || generation !== state.generation
   for (const root of live) {
-    if (state.leaving || state.epoch !== epoch || generation !== state.generation) return
+    if (stale()) return
     const monitor = state.monitors.get(root)
-    // Just armed: the process has not necessarily appeared yet, and asking now
-    // would arm a second one for the same repository.
-    if (monitor && now - monitor.armedAt < SETTLE_MS) continue
-    if (monitor && now - monitor.armedAt < MONITOR_MS) {
-      if (now - (monitor.checkedAt ?? 0) < CHECK_MS) continue
+    // A host ending notice and the age cap both allow a restart without a probe.
+    if (!monitor?.ended && (!monitor || now - monitor.armedAt < MONITOR_MS)) {
+      if (monitor && (now - monitor.armedAt < SETTLE_MS || now - (monitor.checkedAt ?? 0) < CHECK_MS)) continue
       const present = await watching($, state, root)
-      if (generation !== state.generation) return
-      monitor.checkedAt = now
-      if (present) continue
+      if (stale()) return
+      if (monitor) {
+        monitor.checkedAt = now
+        if (present !== false) continue
+      } else if (present) {
+        state.monitors.set(root, { armedAt: now })
+        await recordMonitors($, state)
+        continue
+      }
     }
-    if (!monitor && await watching($, state, root)) {
-      if (generation !== state.generation) return
-      state.monitors.set(root, { armedAt: now })
-      await recordMonitors($, state)
-      continue
+    if (monitor?.taskId) {
+      await stopMonitor($, state, monitor.taskId, key)
+      if (stale()) return
     }
-    if (state.leaving || state.epoch !== epoch || generation !== state.generation) return
     const sessionId = state.sessionId
     const armed: Monitor = { armedAt: now }
     state.monitors.set(root, armed)
@@ -415,11 +424,12 @@ async function ensureMonitors($: EngineInterface, state: State, live: Set<string
 // The channel server is a child of this Claude Code process, as is every
 // command the pane runs, so their shared parent names the server's files.
 async function channelBase($: EngineInterface, state: State): Promise<string | null> {
-  if (state.channel !== '') return state.channel
+  if (state.channel) return state.channel
   const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 2000 }).catch(() => null)
   const pid = ran?.exitCode === 0 ? ran.stdout.trim() : ''
+  if (!/^\d+$/.test(pid)) return null
   const tmp = ((await $.env.get('TMPDIR')) ?? '').replace(/\/+$/, '') || '/tmp'
-  state.channel = /^\d+$/.test(pid) ? `${tmp}/codex-channel/${pid}` : null
+  state.channel = `${tmp}/codex-channel/${pid}`
   return state.channel
 }
 
@@ -439,7 +449,7 @@ async function routeEvents($: EngineInterface, state: State, live: Set<string>, 
       if (fallbackRoots.has(root) || state.unreadable.has(root)) continue
       state.monitors.delete(root)
       retired = true
-      if (monitor.taskId) stopMonitor($, state, monitor.taskId)
+      if (monitor.taskId && !monitor.ended) stopMonitor($, state, monitor.taskId)
     }
     if (retired) await recordMonitors($, state)
   }
@@ -1324,8 +1334,10 @@ async function pollOnce($: EngineInterface, state: State) {
     }
     // A job whose follow row is on screen is reported by its own agent; pushing
     // it again would wake the director twice for one event.
-    const mine = [...state.pending, ...lines.filter(line =>
-      !state.followed.has(line.jobId) && !state.monitors.has(line.cwd))]
+    const mine = [...state.pending, ...lines.filter(line => {
+      const monitor = state.monitors.get(line.cwd)
+      return !state.followed.has(line.jobId) && (!monitor || monitor.ended)
+    })]
     // Held, not cleared: a round that cannot push (a turn is running) used to
     // empty the carry and drop with it every line an earlier refusal had kept.
     const pending = state.channelOn ? mine.filter(line => line.fallback) : mine
@@ -1599,7 +1611,8 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     views: new Map<string, LiveView>(), ledger: {}, saved: '{}',
     ticks: 0, tools, since: 0, busy: false, booting: null, polling: null, now: Date.now(), pendingWrites: new Map(), writing: false, opened: false, shown: false, selected: null, ring: undefined, expanded: new Set<string>(),
     followed, unreadable: new Map<string, number>(), pending: [], toEnd: false, pinned: true, clock: '',
-    monitors: new Map<string, Monitor>(), retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
+    monitors: new Map<string, Monitor>(), monitorProbeFailures: new Set<string>(),
+    retiredMonitors: new Set<string>(), ownedMonitors: new Set<string>(), leaving: false,
     liveRoots: new Set<string>(), channel: '', channelOn: false, channelHold: false, hold: null, goal: false,
     instance: Math.random().toString(36).slice(2), replaced: false, timers: [],
     summaries, activities: activityState(), activitySaved: '{}', listedAt: 0,
@@ -1676,6 +1689,19 @@ export function registerTaskPane(on: On, followed: Set<string> = new Set<string>
     return next(e)
   })
   on('prompt.submit', async ($, submitted, next) => {
+    if (submitted.origin.kind === 'task-notification' && !state.leaving) {
+      const taskId = /<task-id>([^<]+)<\/task-id>/.exec(submitted.text)?.[1]
+      if (taskId && !state.retiredMonitors.has(taskId) && (/<status>(?:completed|failed|killed|stopped)<\/status>/.test(submitted.text)
+        || shouldDropMonitorExpiry(submitted.text, state.ownedMonitors))) {
+        for (const monitor of state.monitors.values()) {
+          if (monitor.taskId !== taskId || monitor.ended) continue
+          monitor.ended = true
+          void recordMonitors($, state)
+          $.clock.after(0, () => { void poll($, state) })
+          break
+        }
+      }
+    }
     const admitted = director ? await admitDirector($, director, submitted) : { event: submitted }
     if ('drop' in admitted) return admitted
     const e = admitted.event
