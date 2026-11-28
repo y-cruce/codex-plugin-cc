@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JobEventStore, readHistory, readRecordHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEvent } from "./job-event-store.mjs";
+import { JobEventStore, readHistory, readLegacyHistory, readRecordHistory, resolveLiveViewPath, cursorFor, cleanupHistory, historyHasTerminalEventAt } from "./job-event-store.mjs";
 import { createCanonicalEvent } from "./executor-events.mjs";
 import { createLiveView, applyJobEvent, briefOf, jobConfig } from "./job-event-model.mjs";
 import { readStoredJob, ownerProcessAlive } from "./job-control.mjs";
-import { stateDirFor } from "./history-resolver.mjs";
+import { resolveJobHistory, stateDirFor } from "./history-resolver.mjs";
 import { resolveStateDir, writeJobFile, upsertJob } from "./state.mjs";
 import { bindProvisionalDispatch, bufferProvisionalEvent, createProvisionalDispatch, failProvisionalDispatch,
   MAX_PROVISIONAL_BYTES, MAX_PROVISIONAL_EVENTS, updateRoundReceipt } from "./thread-record-binding.mjs";
-import { THREAD_RECORDS_ENABLED } from "./thread-records.mjs";
+import { THREAD_RECORDS_ENABLED, threadRecordPaths } from "./thread-records.mjs";
 import { jobForPersistence } from "./persisted-result.mjs";
 
 const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
@@ -78,6 +78,11 @@ export class JobRuntime {
   }
 
   async reconcileHistory(cwd) {
+    await this.reconcileLegacyHistory(cwd);
+    await this.reconcileThreadRecords(cwd);
+  }
+
+  async reconcileLegacyHistory(cwd) {
     const root = path.join(resolveStateDir(cwd), "job-history");
     let histories;
     try { histories = await fs.readdir(root, { withFileTypes: true }); }
@@ -85,33 +90,101 @@ export class JobRuntime {
     for (const history of histories) {
       if (!history.isDirectory()) continue;
       const jobId = history.name;
-      const stored = readStoredJob(cwd, jobId);
-      if (stored && ownerProcessAlive(stored.pid) !== false) continue;
-      let hasTerminal;
-      try { hasTerminal = await historyHasTerminalEvent(cwd, jobId); }
-      catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
-      if (hasTerminal) continue;
-      let historical;
-      try { historical = await readHistory(cwd, jobId, { limit: 1 }); }
-      catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
-      const job = stored ?? historical.metadata?.job ?? { id: jobId, workspaceRoot: cwd, status: "running" };
-      const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
-      const openedForSweep = !this.jobs.has(key);
-      let entry;
       try {
-        entry = await this.openEntry(cwd, jobId, job, false);
-      } catch (error) {
-        if (["STORE_BUSY", "ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue;
-        throw error;
-      }
-      try {
-        if (await historyHasTerminalEvent(cwd, jobId)) continue;
-        await this.failOwnerExited(entry, job);
-      } finally {
-        if (openedForSweep) {
-          this.jobs.delete(entry.key);
-          await entry.store.close();
+        const location = await resolveJobHistory(cwd, jobId);
+        if (location.layout !== "legacy") continue;
+        const stored = readStoredJob(cwd, jobId);
+        if (stored && ownerProcessAlive(stored.pid) !== false) continue;
+        let hasTerminal;
+        try { hasTerminal = await historyHasTerminalEventAt(location, jobId); }
+        catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
+        if (hasTerminal) continue;
+        let historical;
+        try { historical = await readLegacyHistory(cwd, jobId, { limit: 1 }); }
+        catch (error) { if (["ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue; throw error; }
+        const job = stored ?? historical.metadata?.job ?? { id: jobId, workspaceRoot: cwd, status: "running" };
+        const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
+        const openedForSweep = !this.jobs.has(key);
+        let entry;
+        try {
+          entry = await this.openEntry(cwd, jobId, job, false);
+        } catch (error) {
+          if (["STORE_BUSY", "ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue;
+          throw error;
         }
+        try {
+          if (await historyHasTerminalEventAt(location, jobId)) continue;
+          await this.failOwnerExited(entry, job);
+        } finally {
+          if (openedForSweep) {
+            this.jobs.delete(entry.key);
+            await entry.store.close();
+          }
+        }
+      } catch (error) {
+        this.diagnostic(error);
+      }
+    }
+  }
+
+  async reconcileThreadRecords(cwd) {
+    const stateDir = resolveStateDir(cwd);
+    const root = path.join(stateDir, "thread-records");
+    let records;
+    try { records = await fs.readdir(root, { withFileTypes: true }); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    for (const record of records) {
+      if (!record.isDirectory()) continue;
+      const recordId = record.name;
+      try {
+        let manifest;
+        try { manifest = JSON.parse(await fs.readFile(path.join(root, recordId, "manifest.json"), "utf8")); }
+        catch (error) { if (error.code === "ENOENT") continue; throw error; }
+        const roundId = manifest?.activeRoundId;
+        if (!roundId) continue;
+        const workspaceRoot = manifest.workspaceRoot ?? cwd;
+        const key = `${workspaceRoot}\0${roundId}`;
+        if (this.jobs.has(key)) continue;
+        const stored = readStoredJob(workspaceRoot, roundId);
+        if (stored && !terminal(stored.status) && ownerProcessAlive(stored.pid) !== false) continue;
+        const location = threadRecordPaths(stateDir, recordId, roundId);
+        let receipt = null;
+        try { receipt = JSON.parse(await fs.readFile(location.roundReceipt, "utf8")); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        const base = stored ?? receipt?.job ?? { id: roundId, workspaceRoot, status: "running" };
+        const job = { ...base, id: roundId, workspaceRoot, recordId, roundId, threadId: manifest.threadId ?? base.threadId ?? null };
+        const entry = { key, cwd: workspaceRoot, job, threadRecords: true,
+          provisional: { workspaceRoot: manifest.workspaceRoot, executorKey: manifest.executorKey },
+          view: createLiveView(job, { recordId }), appendTail: Promise.resolve(), writeTail: Promise.resolve(),
+          viewTimer: null, lastViewAt: 0, ended: false, failure: null, bound: false, store: null };
+        try {
+          await this.openThreadEntry(entry, { recordId, location, receipt });
+        } catch (error) {
+          if (["STORE_BUSY", "ENOENT", "UNKNOWN_JOB"].includes(error.code)) continue;
+          throw error;
+        }
+        try {
+          if (entry.store.snapshot.activeRoundId !== roundId) continue;
+          const latest = readStoredJob(workspaceRoot, roundId) ?? stored;
+          if (latest && !terminal(latest.status) && ownerProcessAlive(latest.pid) !== false) continue;
+          entry.job = latest && terminal(latest.status)
+            ? { ...latest, id: roundId, workspaceRoot, recordId, roundId, threadId: manifest.threadId ?? latest.threadId ?? null }
+            : { ...job, status: "failed", errorMessage: "owner process exited", completedAt: new Date().toISOString() };
+          if (!await historyHasTerminalEventAt(location, roundId)) {
+            this.publishDirectorEvent(entry.job, `job.${entry.job.status}`);
+            await this.append(entry, jobEvent(entry.job, `job.${entry.job.status}`, true));
+            entry.terminalRecorded = true;
+          }
+          await this.finalize(entry);
+        } finally {
+          clearTimeout(entry.viewTimer);
+          if (entry.store) {
+            await entry.store.close().catch(() => {});
+            entry.store = null;
+          }
+        }
+      } catch (error) {
+        this.diagnostic(error);
       }
     }
   }
@@ -120,7 +193,8 @@ export class JobRuntime {
     const key = `${job.workspaceRoot ?? cwd}\0${job.id}`;
     let entry = this.jobs.get(key);
     if (entry) return entry;
-    entry = { key, cwd: job.workspaceRoot ?? cwd, job, threadRecords: false, view: createLiveView(job), writeTail: Promise.resolve(), viewTimer: null,
+    entry = { key, cwd: job.workspaceRoot ?? cwd, job, threadRecords: false, view: createLiveView(job),
+      appendTail: Promise.resolve(), writeTail: Promise.resolve(), viewTimer: null,
       lastViewAt: 0, ended: false, failure: null };
     entry.store = new JobEventStore(entry.cwd, jobId, {
       createCheckpoint: (events, snapshot) => {
@@ -158,34 +232,42 @@ export class JobRuntime {
         .map((follower) => follower.after ?? follower.retentionCursor)
     });
     await entry.store.initialize({ job });
-    entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);
-    const previous = entry.store.checkpoint;
-    if (previous) entry.view = previous;
-    entry.view.history.continuity = entry.store.snapshot.continuity;
-    let after = previous ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
-    do {
-      const history = await readHistory(entry.cwd, jobId, { after, limit: 256 });
-      for (const event of history.events) {
-        if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
+    try {
+      entry.jobFile = path.join(path.dirname(path.dirname(entry.store.directory)), "jobs", `${jobId}.json`);
+      const previous = entry.store.checkpoint;
+      if (previous) entry.view = previous;
+      entry.view.history.continuity = entry.store.snapshot.continuity;
+      let after = previous ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
+      do {
+        const history = await readLegacyHistory(entry.cwd, jobId, { after, limit: 256 });
+        for (const event of history.events) {
+          if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
+        }
+        after = history.nextCursor;
+        if (history.caughtUp === true || (history.caughtUp === undefined &&
+          (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
+      } while (true);
+      this.jobs.set(key, entry);
+      if (appendStarted && entry.store.snapshot.committedSeq === "0") {
+        await this.append(entry, jobEvent(job, "job.started"));
+        await entry.store.flush();
       }
-      after = history.nextCursor;
-      if (history.caughtUp === true || (history.caughtUp === undefined &&
-        (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
-    } while (true);
-    this.jobs.set(key, entry);
-    if (appendStarted && entry.store.snapshot.committedSeq === "0") {
-      await this.append(entry, jobEvent(job, "job.started"));
-      await entry.store.flush();
+      clearTimeout(entry.viewTimer);
+      entry.viewTimer = null;
+      await this.writeView(entry);
+      return entry;
+    } catch (error) {
+      clearTimeout(entry.viewTimer);
+      entry.viewTimer = null;
+      this.jobs.delete(key);
+      await entry.store.close().catch(() => {});
+      throw error;
     }
-    clearTimeout(entry.viewTimer);
-    entry.viewTimer = null;
-    await this.writeView(entry);
-    return entry;
   }
 
   async persistRound(entry) {
     const round = entry.view.rounds?.find((value) => value.jobId === entry.job.id);
-    if (round && entry.location?.roundReceipt) await updateRoundReceipt(entry.location, round, entry.job);
+    if (round && entry.location?.roundReceipt && entry.receipt !== null) await updateRoundReceipt(entry.location, round, entry.job);
   }
 
   terminalJob(entry, event) {
@@ -199,6 +281,7 @@ export class JobRuntime {
     if (entry.ended) return false;
     if (entry.finalizing) return entry.finalizing;
     entry.finalizing = (async () => {
+      await entry.appendTail;
       await entry.store.flush();
       if (entry.threadRecords) {
         await entry.store.updateManifest({ activeRoundId: null });
@@ -232,6 +315,7 @@ export class JobRuntime {
     entry.recordId = binding.recordId;
     entry.location = binding.location;
     entry.receipt = binding.receipt;
+    entry.appendTail ??= Promise.resolve();
     entry.view = createLiveView(entry.job, { recordId: binding.recordId });
     entry.store = new JobEventStore(entry.cwd, binding.recordId, {
       directory: binding.location.directory,
@@ -270,25 +354,33 @@ export class JobRuntime {
         .map((follower) => follower.after ?? follower.retentionCursor)
     });
     await entry.store.initialize({ recordId: binding.recordId });
-    const previous = entry.store.checkpoint;
-    if (previous?.recordId === binding.recordId) entry.view = previous;
-    entry.view.history.continuity = entry.store.snapshot.continuity;
-    let after = previous?.recordId === binding.recordId ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
-    do {
-      const history = await readRecordHistory(entry.cwd, binding.recordId, { after, limit: 256 });
-      for (const event of history.events) {
-        if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
-      }
-      after = history.nextCursor;
-      if (history.caughtUp === true || (history.caughtUp === undefined &&
-        (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
-    } while (true);
-    await this.persistRound(entry);
-    clearTimeout(entry.viewTimer);
-    entry.viewTimer = null;
-    await this.writeView(entry);
-    entry.bound = true;
-    return entry;
+    try {
+      const previous = entry.store.checkpoint;
+      if (previous?.recordId === binding.recordId) entry.view = previous;
+      entry.view.history.continuity = entry.store.snapshot.continuity;
+      let after = previous?.recordId === binding.recordId ? cursorFor(entry.store.snapshot, previous.history.committedSeq) : undefined;
+      do {
+        const history = await readRecordHistory(entry.cwd, binding.recordId, { after, limit: 256 });
+        for (const event of history.events) {
+          if (BigInt(event.seq) > BigInt(entry.view.history.committedSeq ?? "0")) applyJobEvent(entry.view, event);
+        }
+        after = history.nextCursor;
+        if (history.caughtUp === true || (history.caughtUp === undefined &&
+          (!history.events.length || history.events.at(-1).seq === history.committedSeq))) break;
+      } while (true);
+      await this.persistRound(entry);
+      clearTimeout(entry.viewTimer);
+      entry.viewTimer = null;
+      await this.writeView(entry);
+      entry.bound = true;
+      return entry;
+    } catch (error) {
+      clearTimeout(entry.viewTimer);
+      entry.viewTimer = null;
+      await entry.store.close().catch(() => {});
+      entry.store = null;
+      throw error;
+    }
   }
 
   queueBindingEvent(entry, event) {
@@ -317,7 +409,7 @@ export class JobRuntime {
       if (!entry) {
         entry = { key, cwd: job.workspaceRoot ?? cwd, job, threadRecords: true, provisional: createProvisionalDispatch({
           workspaceRoot: job.workspaceRoot ?? cwd, job, executor: this.executorIdentity ?? {}
-        }), view: createLiveView(job, { recordId: job.id }), writeTail: Promise.resolve(), viewTimer: null,
+        }), view: createLiveView(job, { recordId: job.id }), appendTail: Promise.resolve(), writeTail: Promise.resolve(), viewTimer: null,
         lastViewAt: 0, ended: false, failure: null, bound: false, store: null };
         entry.binding = false;
         entry.bindingEvents = [];
@@ -401,22 +493,29 @@ export class JobRuntime {
     return true;
   }
 
-  async append(entry, event) {
-    if (entry.failure) return;
-    try {
-      try { entry.store.append(event); }
-      catch (error) {
-        if (error.code !== "HISTORY_BACKPRESSURE") throw error;
-        await entry.store.flush();
-        entry.store.append(event);
+  append(entry, event) {
+    entry.appendTail ??= Promise.resolve();
+    const run = async () => {
+      if (entry.failure || !entry.store || entry.store.closed) return;
+      try {
+        while (true) {
+          try {
+            entry.store.append(event);
+            return;
+          } catch (error) {
+            if (error.code !== "HISTORY_BACKPRESSURE") throw error;
+            await entry.store.flush();
+          }
+        }
+      } catch (error) {
+        if (entry.store?.failure || error.code === "STORE_CLOSED") entry.failure = error.message;
+        entry.view.history.continuity = "partial";
+        this.scheduleView(entry);
+        this.diagnostic(error);
       }
-    }
-    catch (error) {
-      entry.failure = error.message;
-      entry.view.history.continuity = "partial";
-      this.scheduleView(entry);
-      this.diagnostic(error);
-    }
+    };
+    entry.appendTail = entry.appendTail.then(run, run);
+    return entry.appendTail;
   }
 
   scheduleView(entry, immediate = false) {
@@ -432,6 +531,7 @@ export class JobRuntime {
   }
 
   writeView(entry) {
+    if (entry.threadRecords && !entry.location?.liveView) return entry.writeTail;
     const content = `${JSON.stringify(entry.view)}\n`;
     entry.writeTail = entry.writeTail.catch(() => {}).then(async () => {
       const file = entry.location?.liveView ?? resolveLiveViewPath(entry.cwd, entry.job.id);
@@ -580,6 +680,7 @@ export class JobRuntime {
     for (const follower of this.followers.values()) follower.closed = true;
     this.followers.clear();
     for (const entry of this.jobs.values()) {
+      await entry.appendTail;
       await entry.store?.close();
       clearTimeout(entry.viewTimer);
       if (!entry.threadRecords || entry.bound) await this.writeView(entry);

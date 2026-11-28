@@ -228,3 +228,135 @@ test("explicit seam-off runtime keeps the legacy path and v1 cursor", async (t) 
     await runtime.close();
   }
 });
+
+test("startup reconciliation skips bound legacy placeholders, recovers abandoned thread records, and isolates corrupt histories", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  const stateDir = resolveStateDir(cwd);
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(dead, "exit");
+
+  // 1. Bound thread-record missing a terminal event + stale legacy v1 checkpoint in job-history/ (the Invalid history cursor trigger).
+  const boundId = "task-bound-stale-legacy";
+  const boundLoc = threadRecordPaths(stateDir, boundId, boundId);
+  const boundStore = await new JobEventStore(cwd, boundId, { directory: boundLoc.directory,
+    threadRecord: { recordId: boundId, workspaceRoot: cwd, executorKey: "codex", threadId: "thread-stale" } }).initialize();
+  boundStore.append(event(boundId, "job.started"));
+  await boundStore.close();
+  fs.mkdirSync(path.join(stateDir, "job-index"), { recursive: true });
+  fs.writeFileSync(jobIndexPath(stateDir, boundId), `${JSON.stringify({ schemaVersion: 1, jobId: boundId, roundId: boundId, recordId: boundId })}\n`);
+  const legacyGhost = await new JobEventStore(cwd, boundId, {
+    directory: legacyJobHistoryPaths(stateDir, boundId).directory,
+    createCheckpoint: (_events, snapshot) => ({ schemaVersion: 1, jobId: boundId, status: "failed",
+      history: { committedSeq: snapshot.committedSeq, continuity: snapshot.continuity } })
+  }).initialize({ job: { id: boundId, workspaceRoot: cwd, status: "running" } });
+  legacyGhost.append(event(boundId, "job.failed"));
+  await legacyGhost.close();
+
+  // 2. Corrupt legacy manifest must not abort startup sweep or block other jobs.
+  const corruptDir = legacyJobHistoryPaths(stateDir, "task-corrupt").directory;
+  fs.mkdirSync(corruptDir, { recursive: true });
+  fs.writeFileSync(path.join(corruptDir, "manifest.json"), "{broken json");
+
+  // 3. Thread records with activeRoundId: dead owner -> failed, terminal job file -> completed, live owner -> kept running.
+  const seedActiveRecord = async (jobId, threadId, jobPatch) => {
+    const job = { id: jobId, workspaceRoot: cwd, executor: "codex", status: "running", startedAt: AT, createdAt: AT, pid: process.pid };
+    writeJobFile(cwd, jobId, job);
+    const seed = new JobRuntime({ historySweepMs: 0, threadRecords: true });
+    const owner = {};
+    await seed.register(owner, cwd, jobId);
+    await seed.bind(owner, cwd, jobId, threadId, `turn-${jobId}`);
+    await seed.close();
+    writeJobFile(cwd, jobId, { ...job, ...jobPatch });
+  };
+  await seedActiveRecord("task-dead-record", "thread-dead", { pid: dead.pid });
+  await seedActiveRecord("task-done-record", "thread-done", { status: "completed", completedAt: AT, pid: null });
+  await seedActiveRecord("task-live-record", "thread-live", { pid: process.pid });
+
+  const published = [];
+  const diagnostics = [];
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: true,
+    publishDirectorEvent: (job, type) => published.push({ jobId: job.id, type }) });
+  runtime.diagnostic = (error) => diagnostics.push(error.message);
+  try {
+    await runtime.start(cwd);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(fs.existsSync(path.join(legacyJobHistoryPaths(stateDir, boundId).directory, "writer.lock")), false);
+    assert.equal(await historyHasTerminalEvent(cwd, boundId), false);
+
+    const deadHistory = await readHistory(cwd, "task-dead-record");
+    assert.equal(deadHistory.events.at(-1).type, "job.failed");
+    assert.equal(deadHistory.events.at(-1).payload.reason.message, "owner process exited");
+    const deadLoc = await resolveJobHistory(cwd, "task-dead-record");
+    assert.equal(JSON.parse(fs.readFileSync(deadLoc.manifest, "utf8")).activeRoundId, null);
+    assert.equal(JSON.parse(fs.readFileSync(deadLoc.liveView, "utf8")).status, "failed");
+    assert.equal(JSON.parse(fs.readFileSync(deadLoc.roundReceipt, "utf8")).status, "failed");
+
+    const doneHistory = await readHistory(cwd, "task-done-record");
+    assert.equal(doneHistory.events.at(-1).type, "job.completed");
+    const doneLoc = await resolveJobHistory(cwd, "task-done-record");
+    assert.equal(JSON.parse(fs.readFileSync(doneLoc.manifest, "utf8")).activeRoundId, null);
+    assert.equal(JSON.parse(fs.readFileSync(doneLoc.roundReceipt, "utf8")).status, "completed");
+
+    assert.equal(await historyHasTerminalEvent(cwd, "task-live-record"), false);
+    const liveLoc = await resolveJobHistory(cwd, "task-live-record");
+    assert.equal(JSON.parse(fs.readFileSync(liveLoc.manifest, "utf8")).activeRoundId, "task-live-record");
+    assert.deepEqual(published.sort((a, b) => a.jobId.localeCompare(b.jobId)), [
+      { jobId: "task-dead-record", type: "job.failed" },
+      { jobId: "task-done-record", type: "job.completed" }
+    ]);
+    assert.equal(runtime.jobs.size, 0);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("burst appends and per-event validation errors do not drop terminal events, and pre-bind syncConfig avoids job-history", async (t) => {
+  isolateTestEnvironment(t);
+  const cwd = fs.realpathSync(makeTempDir());
+  const stateDir = resolveStateDir(cwd);
+  const job = { id: "task-burst", workspaceRoot: cwd, executor: "codex", status: "running",
+    startedAt: AT, createdAt: AT, pid: process.pid };
+  writeJobFile(cwd, job.id, job);
+  const runtime = new JobRuntime({ historySweepMs: 0, threadRecords: true });
+  const diagnostics = [];
+  runtime.diagnostic = (error) => diagnostics.push(error.message);
+  const owner = {};
+  try {
+    await runtime.register(owner, cwd, job.id);
+    // Changing effort before bind must not write a placeholder live-view into job-history/.
+    writeJobFile(cwd, job.id, { ...job, reasoningEffort: "high" });
+    await runtime.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(fs.existsSync(path.join(stateDir, "job-history", job.id)), false);
+
+    await runtime.bind(owner, cwd, job.id, "thread-burst", "turn-burst");
+    // Fire >256 concurrent record() calls (exceeding maxPendingEvents) plus one invalid event.
+    const burst = [];
+    for (let index = 0; index < 320; index += 1) {
+      burst.push(runtime.record(createCanonicalEvent({
+        job, type: "message.delta", identity: { sessionId: "thread-burst", turnId: "turn-burst", messageId: "msg-1" },
+        occurredAt: AT, receivedAt: AT, payload: { role: "assistant", block: { type: "text", text: `c${index} ` } },
+        source: { protocol: "codex-app-server", method: "item/agentMessage/delta", raw: null }
+      })));
+    }
+    burst.push(runtime.record({ schemaVersion: 2, jobId: job.id, executor: "codex", type: "message.delta",
+      identity: { jobId: job.id }, occurredAt: AT, receivedAt: AT, timeBasis: "received", payload: {},
+      source: { protocol: "codex-app-server", method: "bad" } }));
+    await Promise.all(burst);
+    writeJobFile(cwd, job.id, { ...job, status: "completed", completedAt: AT, threadId: "thread-burst", pid: null });
+    await runtime.finish(cwd, job.id);
+
+    const history = await readHistory(cwd, job.id);
+    const deltas = history.events.filter((item) => item.type === "message.delta");
+    assert.equal(deltas.length, 320);
+    assert.equal(deltas[0].payload.block.text, "c0 ");
+    assert.equal(deltas.at(-1).payload.block.text, "c319 ");
+    assert.equal(history.events.at(-1).type, "job.completed");
+    assert.equal(diagnostics.length, 1);
+    const loc = await resolveJobHistory(cwd, job.id);
+    assert.equal(JSON.parse(fs.readFileSync(loc.roundReceipt, "utf8")).status, "completed");
+  } finally {
+    await runtime.close();
+  }
+});

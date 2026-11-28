@@ -167,9 +167,8 @@ async function readBlock(handle, block) {
   return events;
 }
 
-/** @param {string} cwd @param {string} jobId @param {{ stateDir?: string }} [options] */
-export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
-  const location = await resolveJobHistory(cwd, jobId, { stateDir });
+/** @param {{ layout: string, directory: string }} location @param {string} jobId */
+export async function historyHasTerminalEventAt(location, jobId) {
   const directory = location.directory;
   const manifest = await loadManifest(directory);
   if (location.layout === "legacy" && manifest.tombstone && TERMINAL.has(manifest.metadata.status ?? manifest.metadata.job?.status)) return true;
@@ -186,6 +185,16 @@ export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
     }
   }
   return false;
+}
+
+/** @param {string} cwd @param {string} jobId @param {{ stateDir?: string }} [options] */
+export async function historyHasTerminalEvent(cwd, jobId, { stateDir } = {}) {
+  return historyHasTerminalEventAt(await resolveJobHistory(cwd, jobId, { stateDir }), jobId);
+}
+
+/** @param {string} cwd @param {string} jobId @param {{ after?: *, limit?: number, stateDir?: string }} [options] */
+export async function readLegacyHistory(cwd, jobId, { after, limit = Infinity, stateDir } = {}) {
+  return readHistoryLocation(resolveLegacyJobHistory(cwd, jobId, { stateDir }), { after, limit, roundId: null });
 }
 
 /** @param {string} cwd @param {string} jobId @param {{ after?: *, limit?: number, stateDir?: string }} [options] */
@@ -603,7 +612,7 @@ async function supersededByRecord(stateDir, jobId, directory) {
   let index;
   try { index = JSON.parse(await fs.readFile(jobIndexPath(stateDir, jobId), "utf8")); }
   catch (error) { if (["ENOENT", "INVALID_ARGUMENT"].includes(error.code)) return false; throw error; }
-  if (index?.schemaVersion !== 1 || !index.recordId || index.recordId === jobId) return false;
+  if (index?.schemaVersion !== 1 || typeof index.recordId !== "string" || !index.recordId) return false;
   const receipt = threadRecordPaths(stateDir, index.recordId, jobId).roundReceipt;
   try { await fs.stat(receipt); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
   try {
